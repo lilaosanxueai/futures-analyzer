@@ -1,0 +1,6 @@
+akshare>=1.18
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+pandas>=2.0
+pypinyin>=0.50

@@ -1,0 +1,4 @@
+config.json
+morning_report.json
+__pycache__/
+*.pyc
