@@ -89,22 +89,20 @@ body {
 .notes-view-panel .notes-full { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .notes-view-panel #notesList { flex: 1; }
 
-/* ---------- 布局：三栏（自选列表 / 详情全景 / AI 对话），分隔条可拖拽 ---------- */
+/* ---------- 布局：工作台两栏（列表+盯盘 / AI 对话），分隔条可拖拽 ---------- */
 .layout {
   flex: 1;
   display: grid;
-  grid-template-columns: var(--w-list, 250px) 10px minmax(0, 1fr) 10px var(--w-chat, 32%);
+  grid-template-columns: var(--w-list, 250px) 10px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: "list sl detail sr chat";
+  grid-template-areas: "list sl chat";
   padding: 14px;
   min-height: 0;
 }
 
 .watch-panel { grid-area: list; }
-.detail-panel { grid-area: detail; }
 .chat-panel { grid-area: chat; }
 .sp-list { grid-area: sl; }
-.sp-right { grid-area: sr; }
 
 /* 拖拽分隔条 */
 .splitter { z-index: 5; position: relative; background: transparent; }
@@ -123,11 +121,8 @@ body.splitter-dragging { user-select: none; }
 @media (max-width: 1200px) {
   .layout {
     grid-template-columns: var(--w-list, 220px) 10px minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) 10px minmax(240px, 45%);
-    grid-template-areas:
-      "list sl detail detail"
-      "list sl sr     sr"
-      "list sl chat   chat";
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "list sl chat";
   }
 }
 
@@ -242,9 +237,14 @@ body.splitter-dragging { user-select: none; }
 .news-item mark { background: rgba(245, 166, 35, .25); color: var(--accent); border-radius: 2px; padding: 0 2px; }
 .news-item .news-src { color: var(--muted); font-size: 10px; margin-left: 4px; }
 
-/* ---------- 详情卡（中栏全景，自身滚动） ---------- */
-.detail-panel { overflow-y: auto; }
-.detail-panel > .panel-head { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+/* ---------- 合约详情独立视图 ---------- */
+.detail-toolbar { gap: 10px; }
+.detail-sym-picker { display: flex; align-items: center; gap: 8px; }
+.detail-sym-picker select { min-width: 200px; }
+
+/* ---------- 详情卡（详情视图内，自身滚动） ---------- */
+.view-panel > .panel-head { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+.view[data-view="detail"] .detail-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .detail-scroll { padding-bottom: 8px; }
 .detail-body { padding: 14px 14px 0; }
 .detail-top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }

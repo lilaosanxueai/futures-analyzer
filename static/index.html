@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825b">
+<link rel="stylesheet" href="/static/style.css?v=0825c">
 </head>
 <body>
 
@@ -16,7 +16,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825c</span>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
     <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
@@ -24,6 +24,7 @@
 
 <nav class="view-nav">
   <button class="view-tab active" data-view="work">📊 工作台</button>
+  <button class="view-tab" data-view="detail">📈 合约详情</button>
   <button class="view-tab" data-view="compare">⚖ 对比分析</button>
   <button class="view-tab" data-view="news">📰 资讯要闻</button>
   <button class="view-tab" data-view="notes">📝 交易心得</button>
@@ -76,27 +77,6 @@
 
       <div class="splitter splitter-v sp-list" data-target="list" title="拖拽调节列表宽度"></div>
 
-      <section class="panel detail-panel">
-        <div class="panel-head"><h2>合约详情</h2><span id="detailTime" class="muted small"></span></div>
-        <div class="detail-scroll">
-          <div id="detailBody" class="detail-body">
-            <div class="muted center pad">在左侧列表中选择一个合约查看详情</div>
-          </div>
-          <div id="chartArea"></div>
-          <div id="sigArea"></div>
-          <div class="alarm-row" id="alarmRow">
-            <label>🔔 价格预警</label>
-            <span class="muted small">上破</span><input id="alarmUp" type="number" step="any" placeholder="如 3200">
-            <span class="muted small">下破</span><input id="alarmDown" type="number" step="any" placeholder="如 2900">
-            <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
-            <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
-            <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
-          </div>
-        </div>
-      </section>
-
-      <div class="splitter splitter-v sp-right" data-target="chat" title="拖拽调节对话区宽度"></div>
-
       <section class="panel chat-panel">
         <div class="panel-head">
           <h2>AI 分析对话</h2>
@@ -119,7 +99,36 @@
     </div>
   </section>
 
-  <!-- 视图 2：对比分析（全宽） -->
+  <!-- 视图 2：合约详情（全宽独立页） -->
+  <section class="view hidden" data-view="detail">
+    <div class="panel view-panel">
+      <div class="panel-head detail-toolbar">
+        <div class="detail-sym-picker">
+          <label class="muted small">合约</label>
+          <select id="detailSym" title="选择要查看的合约"></select>
+          <span class="muted small" style="margin-left:4px">双击工作台列表行可直达</span>
+        </div>
+        <span id="detailTime" class="muted small"></span>
+      </div>
+      <div class="detail-scroll">
+        <div id="detailBody" class="detail-body">
+          <div class="muted center pad">选择上方合约或在工作台列表中双击查看详情</div>
+        </div>
+        <div id="chartArea"></div>
+        <div id="sigArea"></div>
+        <div class="alarm-row" id="alarmRow">
+          <label>🔔 价格预警</label>
+          <span class="muted small">上破</span><input id="alarmUp" type="number" step="any" placeholder="如 3200">
+          <span class="muted small">下破</span><input id="alarmDown" type="number" step="any" placeholder="如 2900">
+          <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
+          <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
+          <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 视图 3：对比分析（全宽） -->
   <section class="view hidden" data-view="compare">
     <div class="panel view-panel">
       <div class="panel-head"><h2>⚖ 对比分析 · 套利视角</h2><span class="muted small">比价 / 价差 / 归一化 + 相关性矩阵</span></div>
@@ -276,6 +285,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825b"></script>
+<script src="/static/app.js?v=0825c"></script>
 </body>
 </html>

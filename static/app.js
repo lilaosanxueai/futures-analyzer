@@ -149,15 +149,15 @@ async function doRefresh() {
     renderMarketStatus(data.market_open);
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
     recordTick();
-    if (state.selected && state.quotes[state.selected]) renderQuoteArea();
+    if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
     // 行情到达后补画一次分时图（选中时行情未到，昨结线缺失）
     if (state.selected && state.quotes[state.selected]?.prev_settle != null && !state.intradayDrawn) {
       state.intradayDrawn = true;
-      loadIntraday(state.selected);
+      if (currentView() === "detail") loadIntraday(state.selected);
     }
     // 交易时段内每 30 秒（6 轮轮询）静默刷新一次分时图与 K 线；每 20 秒拉一次盯盘事件
     state.refreshCount += 1;
-    if (data.market_open && state.refreshCount % 6 === 0 && state.selected) {
+    if (data.market_open && state.refreshCount % 6 === 0 && state.selected && currentView() === "detail") {
       loadIntraday(state.selected);
       loadKline(state.selected);
     }
@@ -299,6 +299,15 @@ $("quoteBody").addEventListener("click", (e) => {
   if (tr) selectSymbol(tr.dataset.sym);
 });
 
+// 双击列表行：直达合约详情页
+$("quoteBody").addEventListener("dblclick", (e) => {
+  const tr = e.target.closest("tr[data-sym]");
+  if (tr) {
+    selectSymbol(tr.dataset.sym);
+    switchView("detail");
+  }
+});
+
 async function addSymbol() {
   const input = $("symbolInput");
   const raw = input.value.trim().toUpperCase();
@@ -327,9 +336,13 @@ function selectSymbol(sym) {
   state.intradayDrawn = false;
   renderTable();
   renderQuoteArea();
-  renderAnalysisArea();
-  renderSignalArea();
+  if (currentView() === "detail") {
+    // 详情视图可见才绘制图表（隐藏容器 clientWidth=0，无法绘图）
+    renderAnalysisArea();
+    renderSignalArea();
+  }
   updateAlarmRow();
+  syncDetailSymSelect();
 }
 
 function renderQuoteArea() {
@@ -1086,11 +1099,39 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
 
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 
+const VIEW_ORDER = ["work", "detail", "compare", "news", "notes"];
+
+function currentView() {
+  const el = document.querySelector(".view:not(.hidden)");
+  return el ? el.dataset.view : "work";
+}
+
+function syncDetailSymSelect() {
+  const sel = $("detailSym");
+  if (sel && sel.value !== (state.selected || "")) sel.value = state.selected || "";
+}
+
+function fillDetailSymOptions() {
+  const sel = $("detailSym");
+  if (!sel) return;
+  const opts = state.candidates.length
+    ? state.candidates.map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("")
+    : state.watchlist.map((s) => `<option value="${s}">${s}</option>`).join("");
+  sel.innerHTML = opts;
+  sel.value = state.selected || "";
+}
+
 function switchView(name) {
   document.querySelectorAll(".view-tab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.dataset.view !== name));
   history.replaceState(null, "", name === "work" ? location.pathname : `?view=${name}`);
-  // 进入视图时按需初始化；图表按切换后的实际宽度重绘
+  // 进入视图时按需初始化；图表按切换后的实际宽度重绘（隐藏容器 clientWidth=0 不能绘图）
+  if (name === "detail") {
+    fillDetailSymOptions();
+    renderQuoteArea();
+    renderAnalysisArea();
+    renderSignalArea();
+  }
   if (name === "compare") initComparePage();
   if (name === "notes") {
     if (!notesState.items.length) loadNotes();
@@ -1105,13 +1146,17 @@ document.querySelectorAll(".view-tab").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
-// 快捷键：Alt+1/2/3/4 切换视图
+// 快捷键：Alt+1..5 切换视图
 document.addEventListener("keydown", (e) => {
-  if (e.altKey && ["1", "2", "3", "4"].includes(e.key)) {
-    const views = ["work", "compare", "news", "notes"];
-    switchView(views[Number(e.key) - 1]);
+  if (e.altKey && /^[1-5]$/.test(e.key)) {
+    switchView(VIEW_ORDER[Number(e.key) - 1]);
     e.preventDefault();
   }
+});
+
+// 详情视图顶部合约选择
+$("detailSym").addEventListener("change", (e) => {
+  if (e.target.value) selectSymbol(e.target.value);
 });
 
 /* ---------- 对比分析 ---------- */
@@ -1327,6 +1372,8 @@ async function loadCandidates() {
     // 心得品种下拉候选
     const dl = $("noteSymbolList");
     if (dl) dl.innerHTML = data.items.map((c) => `<option value="${c.symbol}">${c.name}</option>`).join("");
+    fillDetailSymOptions();  // 详情页合约下拉
+    syncDetailSymSelect();
   } catch (e) {
     /* 候选列表失败不阻塞主流程 */
   }
