@@ -1428,6 +1428,20 @@ _news_cache: dict = {"ts": 0.0, "items": []}
 NEWS_TTL = 120.0
 
 
+# 股市噪音词：命中即剔除（只保留与期货相关的大宗/能源/贵金属/宏观资讯）
+_STOCK_NOISE_KW = [
+    "股价", "股票", "股市", "a股", "港股", "美股", "纳指", "纳斯达克", "道指", "标普",
+    "韩股", "日经", "欧股", "沪指", "深指", "创业板", "科创板", "北交所", "恒生",
+    "涨停", "跌停", "财报", "营收", "净利润", "ipo", "股份回购", "市值", "科技股",
+    "芯片股", "ai芯片", "两市", "成交额", "目标价", "重申", "公告称", "评级",
+]
+
+
+def _is_stock_noise(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in _STOCK_NOISE_KW)
+
+
 def _news_topics(text: str) -> list[str]:
     """返回文本命中的全部主题（不区分大小写）"""
     t = text.lower()
@@ -1448,8 +1462,11 @@ async def news(topic: str = ""):
             key = (title or summary)[:30]
             if not key or key in seen:
                 return
+            text = title + " " + summary
+            if _is_stock_noise(text):
+                return  # 只保留与期货相关（大宗/能源/贵金属/宏观），剔除纯股市与公司新闻
             seen.add(key)
-            hit = _news_topics(title + " " + summary)
+            hit = _news_topics(text)
             items.append({
                 "time": str(time_s),
                 "title": title or (summary[:40] if summary else ""),

@@ -1038,9 +1038,11 @@ function renderNewsView() {
   const list = $("newsList");
   if (!list) return;
   const hlTopics = newsState.filter === "all" ? ["oilgold", "usiran"] : [newsState.filter];
-  const items = newsState.all.filter((it) =>
+  let items = newsState.all.filter((it) =>
     newsState.filter === "all" ? true : (it.topics || []).includes(newsState.filter)
   );
+  // 主题命中的（原油黄金/美伊等期货相关）优先展示
+  items = [...items].sort((a, b) => ((b.topics || []).length) - ((a.topics || []).length));
   if (!items.length) {
     list.innerHTML = `<div class="muted small monitor-hint">该主题暂无条目（数据源每 2 分钟更新）</div>`;
     return;
