@@ -16,157 +16,182 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0820d</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825</span>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
-    <button id="btnSettings" class="btn ghost">⚙ AI 设置</button>
+    <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
 </header>
 
-<main class="layout">
+<nav class="view-nav">
+  <button class="view-tab active" data-view="work">📊 工作台</button>
+  <button class="view-tab" data-view="compare">⚖ 对比分析</button>
+  <button class="view-tab" data-view="news">📰 资讯要闻</button>
+  <button class="view-tab" data-view="notes">📝 交易心得</button>
+</nav>
 
-  <!-- 左：自选行情看板 -->
-  <section class="panel watch-panel">
-    <div class="panel-head">
-      <h2>自选行情</h2>
-      <span id="lastUpdate" class="muted small"></span>
-    </div>
-    <div class="add-row">
-      <div class="search-box">
-        <input id="symbolInput" placeholder="代码 / 名称 / 拼音，如 lw" autocomplete="off">
-        <div id="searchDrop" class="search-drop hidden"></div>
-      </div>
-      <button id="btnAdd" class="btn primary">添加</button>
-    </div>
-    <div class="table-wrap">
-      <table class="quote-table">
-        <thead>
-          <tr>
-            <th class="sortable" data-key="symbol">合约<span class="arrow" data-arrow="symbol"></span></th>
-            <th class="sortable num" data-key="last">最新价<span class="arrow" data-arrow="last"></span></th>
-            <th class="sortable num" data-key="change_pct">涨跌幅<span class="arrow" data-arrow="change_pct"></span></th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="quoteBody">
-          <tr><td colspan="4" class="muted center pad">加载中…</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="splitter splitter-h" data-target="monitor" title="拖拽调节盯盘区高度"></div>
-    <div class="monitor-panel">
-      <div class="monitor-head">
-        <div class="mon-tabs">
-          <button class="mon-tab active" data-tab="monitor">🤖 盯盘</button>
-          <button class="mon-tab" data-tab="news">📰 要闻</button>
-          <button class="mon-tab" data-tab="geopol">⚔️ 美伊</button>
-          <button class="mon-tab" data-tab="notes">📝 心得</button>
+<main class="views">
+
+  <!-- 视图 1：工作台（三栏：列表+盯盘 / 合约详情 / AI 对话） -->
+  <section class="view" data-view="work">
+    <div class="layout">
+
+      <section class="panel watch-panel">
+        <div class="panel-head">
+          <h2>自选行情</h2>
+          <span id="lastUpdate" class="muted small"></span>
         </div>
-        <span id="monitorStatus" class="muted small">启动中…</span>
+        <div class="add-row">
+          <div class="search-box">
+            <input id="symbolInput" placeholder="代码 / 名称 / 拼音，如 lw" autocomplete="off">
+            <div id="searchDrop" class="search-drop hidden"></div>
+          </div>
+          <button id="btnAdd" class="btn primary">添加</button>
+        </div>
+        <div class="table-wrap">
+          <table class="quote-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-key="symbol">合约<span class="arrow" data-arrow="symbol"></span></th>
+                <th class="sortable num" data-key="last">最新价<span class="arrow" data-arrow="last"></span></th>
+                <th class="sortable num" data-key="change_pct">涨跌幅<span class="arrow" data-arrow="change_pct"></span></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="quoteBody">
+              <tr><td colspan="4" class="muted center pad">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="monitor-panel">
+          <div class="monitor-head">
+            <span>🤖 AI 盯盘</span>
+            <span id="monitorStatus" class="muted small">启动中…</span>
+          </div>
+          <div id="monitorList" class="monitor-list">
+            <div class="muted small monitor-hint">重点监控：原油 SC0、黄金 AU0 + 你的自选。急涨急跌时此处提示并推送声音/横幅/标题提醒，AI 自动给出解读。</div>
+          </div>
+        </div>
+        <div class="hint">量仓等完整数据见中间详情栏 · 每 5 秒刷新 · 不构成投资建议</div>
+      </section>
+
+      <div class="splitter splitter-v sp-list" data-target="list" title="拖拽调节列表宽度"></div>
+
+      <section class="panel detail-panel">
+        <div class="panel-head"><h2>合约详情</h2><span id="detailTime" class="muted small"></span></div>
+        <div class="detail-scroll">
+          <div id="detailBody" class="detail-body">
+            <div class="muted center pad">在左侧列表中选择一个合约查看详情</div>
+          </div>
+          <div id="chartArea"></div>
+          <div id="sigArea"></div>
+          <div class="alarm-row" id="alarmRow">
+            <label>🔔 价格预警</label>
+            <span class="muted small">上破</span><input id="alarmUp" type="number" step="any" placeholder="如 3200">
+            <span class="muted small">下破</span><input id="alarmDown" type="number" step="any" placeholder="如 2900">
+            <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
+            <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
+            <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="splitter splitter-v sp-right" data-target="chat" title="拖拽调节对话区宽度"></div>
+
+      <section class="panel chat-panel">
+        <div class="panel-head">
+          <h2>AI 分析对话</h2>
+          <span id="aiBadge" class="ai-badge">未配置</span>
+        </div>
+        <div id="chatBox" class="chat-box">
+          <div class="chat-welcome">
+            <p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p>
+            <p class="muted">例如：「螺纹钢现在的盘面怎么看？」「帮我对比一下豆粕和菜粕」「沪铜最近趋势如何」</p>
+            <p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p>
+          </div>
+        </div>
+        <div class="chat-input-row">
+          <button id="btnAnalyze" class="btn accent" title="让 AI 结合实时行情分析当前选中合约">📊 分析当前合约</button>
+          <input id="chatInput" placeholder="向 AI 提问…" autocomplete="off">
+          <button id="btnSend" class="btn primary">发送</button>
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+  <!-- 视图 2：对比分析（全宽） -->
+  <section class="view hidden" data-view="compare">
+    <div class="panel view-panel">
+      <div class="panel-head"><h2>⚖ 对比分析 · 套利视角</h2><span class="muted small">比价 / 价差 / 归一化 + 相关性矩阵</span></div>
+      <div class="cmp-pane">
+        <div class="cmp-bar">
+          <select id="cmpA"></select>
+          <span class="muted">vs</span>
+          <select id="cmpB"></select>
+          <select id="cmpMode">
+            <option value="ratio">比价</option>
+            <option value="spread">价差</option>
+            <option value="normalized">归一化对比</option>
+          </select>
+          <select id="cmpDays">
+            <option value="60">60日</option>
+            <option value="120" selected>120日</option>
+            <option value="250">250日</option>
+          </select>
+          <button id="btnCmpAi" class="btn accent small-btn" title="把当前对比数据交给 AI 分析，并在工作台对话中查看">🤖 AI 分析</button>
+        </div>
+        <div id="cmpStats" class="cmp-stats"></div>
+        <div class="kline-chart-box"><div id="cmpChart"><span class="muted small">选择两个合约开始对比</span></div></div>
+        <div class="corr-head">
+          <span class="kline-title">品种相关性矩阵（自选 · 日收益率）</span>
+          <select id="corrDays">
+            <option value="60" selected>60日</option>
+            <option value="120">120日</option>
+            <option value="250">250日</option>
+          </select>
+        </div>
+        <div id="corrMatrix" class="corr-matrix"></div>
       </div>
-      <div id="monitorList" class="monitor-list">
-        <div class="muted small monitor-hint">重点监控：原油 SC0、黄金 AU0 + 你的自选。急涨急跌时此处提示并推送声音/横幅/标题提醒，AI 自动给出解读。</div>
+    </div>
+  </section>
+
+  <!-- 视图 3：资讯要闻（全宽列表 + 主题过滤） -->
+  <section class="view hidden" data-view="news">
+    <div class="panel view-panel">
+      <div class="panel-head">
+        <h2>📰 资讯要闻</h2>
+        <div class="news-filter">
+          <button class="filter-chip active" data-filter="all">全部</button>
+          <button class="filter-chip" data-filter="oilgold">🛢 原油/黄金</button>
+          <button class="filter-chip" data-filter="usiran">⚔️ 美伊冲突</button>
+        </div>
       </div>
-      <div id="newsList" class="monitor-list hidden">
-        <div class="muted small monitor-hint">加载原油/黄金主题要闻中…</div>
+      <div id="newsList" class="news-view-list">
+        <div class="muted small monitor-hint">加载要闻中…</div>
       </div>
-      <div id="geopolList" class="monitor-list hidden">
-        <div class="muted small monitor-hint">加载美伊冲突动态中…</div>
+    </div>
+  </section>
+
+  <!-- 视图 4：交易心得（全宽） -->
+  <section class="view hidden" data-view="notes">
+    <div class="panel view-panel notes-view-panel">
+      <div class="panel-head">
+        <h2>📝 交易心得</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="feishuHint" class="muted small">☁ 飞书云文档同步</span>
+          <button id="btnNoteSync" class="btn accent small-btn">☁ 同步到飞书</button>
+        </div>
       </div>
-      <div id="notesWrap" class="hidden notes-wrap">
-        <div id="notesList" class="monitor-list">
+      <div class="notes-full">
+        <div id="notesList" class="news-view-list">
           <div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>
         </div>
         <div class="note-input-row">
-          <span id="noteSym" class="note-sym-chip muted small">不限</span>
-          <input id="noteInput" placeholder="记录交易心得…（Ctrl+Enter 保存）" autocomplete="off">
+          <span id="noteSym" class="note-sym-chip muted small" title="点击切换：新心得关联当前选中合约">不限</span>
+          <input id="noteInput" placeholder="记录交易心得…支持 #标签 与 @合约，回车保存" autocomplete="off">
           <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
-          <button id="btnNoteSync" class="btn accent small-btn" title="把未同步的心得追加到飞书云文档">☁ 飞书</button>
         </div>
       </div>
-    </div>
-    <div class="hint">量仓等完整数据见中间详情栏 · 每 5 秒刷新 · 不构成投资建议</div>
-  </section>
-
-  <div class="splitter splitter-v sp-list" data-target="list" title="拖拽调节列表宽度"></div>
-
-  <!-- 中：合约详情全景 / 对比分析 -->
-  <section class="panel detail-panel">
-    <div class="panel-head">
-      <div class="mon-tabs">
-        <button class="mon-tab active" data-dtab="detail">📈 合约详情</button>
-        <button class="mon-tab" data-dtab="compare">⚖ 对比分析</button>
-      </div>
-      <span id="detailTime" class="muted small"></span>
-    </div>
-
-    <div id="detailPane">
-      <div class="detail-scroll">
-        <div id="detailBody" class="detail-body">
-          <div class="muted center pad">在左侧列表中选择一个合约查看详情</div>
-        </div>
-        <div id="chartArea"></div>
-        <div id="sigArea"></div>
-        <div class="alarm-row" id="alarmRow">
-          <label>🔔 价格预警</label>
-          <span class="muted small">上破</span><input id="alarmUp" type="number" step="any" placeholder="如 3200">
-          <span class="muted small">下破</span><input id="alarmDown" type="number" step="any" placeholder="如 2900">
-          <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
-          <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
-          <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
-        </div>
-      </div>
-    </div>
-
-    <div id="comparePane" class="hidden cmp-pane">
-      <div class="cmp-bar">
-        <select id="cmpA"></select>
-        <span class="muted">vs</span>
-        <select id="cmpB"></select>
-        <select id="cmpMode">
-          <option value="ratio">比价</option>
-          <option value="spread">价差</option>
-          <option value="normalized">归一化对比</option>
-        </select>
-        <select id="cmpDays">
-          <option value="60">60日</option>
-          <option value="120" selected>120日</option>
-          <option value="250">250日</option>
-        </select>
-        <button id="btnCmpAi" class="btn accent small-btn" title="把当前对比数据交给 AI 分析">🤖 AI 分析</button>
-      </div>
-      <div id="cmpStats" class="cmp-stats"></div>
-      <div class="kline-chart-box"><div id="cmpChart"><span class="muted small">选择两个合约开始对比</span></div></div>
-      <div class="corr-head">
-        <span class="kline-title">品种相关性矩阵（自选 · 日收益率）</span>
-        <select id="corrDays">
-          <option value="60" selected>60日</option>
-          <option value="120">120日</option>
-          <option value="250">250日</option>
-        </select>
-      </div>
-      <div id="corrMatrix" class="corr-matrix"></div>
-    </div>
-  </section>
-
-  <div class="splitter splitter-v sp-right" data-target="chat" title="拖拽调节对话区宽度"></div>
-
-  <!-- 右：AI 对话 -->
-  <section class="panel chat-panel">
-    <div class="panel-head">
-      <h2>AI 分析对话</h2>
-      <span id="aiBadge" class="ai-badge">未配置</span>
-    </div>
-    <div id="chatBox" class="chat-box">
-      <div class="chat-welcome">
-        <p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p>
-        <p class="muted">例如：「螺纹钢现在的盘面怎么看？」「帮我对比一下豆粕和菜粕」「沪铜最近趋势如何」</p>
-        <p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p>
-      </div>
-    </div>
-    <div class="chat-input-row">
-      <button id="btnAnalyze" class="btn accent" title="让 AI 结合实时行情分析当前选中合约">📊 分析当前合约</button>
-      <input id="chatInput" placeholder="向 AI 提问…" autocomplete="off">
-      <button id="btnSend" class="btn primary">发送</button>
     </div>
   </section>
 
@@ -206,11 +231,6 @@
       <label>模型</label>
       <input id="cfgModel" type="text" placeholder="如 glm-4-flash / deepseek-chat">
     </div>
-    <p class="form-tip">
-      <span id="keyStatus"></span><br>
-      API Key 按服务商独立保存（切换不丢失），存于本机 config.json，不会上传。
-      智谱 glm-4-flash 免费；glm-5.3 等旗舰模型与 DeepSeek 均按量计费。
-    </p>
     <div class="form-row">
       <label>飞书同步</label>
       <input id="cfgFeishuId" type="text" placeholder="App ID（留空保留已存）">
@@ -218,9 +238,10 @@
       <input id="cfgFeishuTitle" type="text" placeholder="文档标题：期货交易心得">
     </div>
     <p class="form-tip">
+      <span id="keyStatus"></span><br>
       <span id="feishuStatus"></span><br>
-      飞书同步需在 open.feishu.cn 创建企业自建应用，开通「云文档-文档」读写权限后把 App ID/Secret 填到左侧；
-      首次同步会自动创建文档，之后心得按时间戳追加。
+      API Key 按服务商独立保存（切换不丢失），存于本机 config.json，不会上传。
+      智谱 glm-4-flash 免费；旗舰模型与 DeepSeek 按量计费。
     </p>
     <div class="modal-actions">
       <button id="btnClearKey" class="btn ghost">清除已存 Key</button>

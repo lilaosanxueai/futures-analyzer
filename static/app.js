@@ -1001,14 +1001,19 @@ $("notesList").addEventListener("click", (e) => {
   if (sync) syncNotes(sync.dataset.sync);
 });
 
-/* ---------- 主题要闻（原油/黄金 + 美伊冲突） ---------- */
+/* ---------- 主题要闻（资讯视图：全部 / 原油黄金 / 美伊冲突） ---------- */
 
-const newsState = { seen: new Set(), loaded: false, topics: {}, geopolSeen: new Set() };
+const newsState = {
+  seen: new Set(), geopolSeen: new Set(), loaded: false,
+  topics: {}, all: [],
+  filter: localStorage.getItem("fa_news_filter") || "all",
+};
 
 function highlightKeywords(text, topic) {
-  let html = text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const kws = (topic && newsState.topics[topic]) || newsState.topics.oilgold || [];
-  for (const kw of kws) {
+  let html = text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const topics = Array.isArray(topic) ? topic : [topic];
+  const kws = topics.flatMap((t) => newsState.topics[t] || []);
+  for (const kw of [...new Set(kws)]) {
     if (!kw) continue;
     try {
       html = html.replace(new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>");
@@ -1017,20 +1022,27 @@ function highlightKeywords(text, topic) {
   return html;
 }
 
-function renderNewsList(container, items, topic) {
+function renderNewsView() {
+  const list = $("newsList");
+  if (!list) return;
+  const hlTopics = newsState.filter === "all" ? ["oilgold", "usiran"] : [newsState.filter];
+  const items = newsState.all.filter((it) =>
+    newsState.filter === "all" ? true : (it.topics || []).includes(newsState.filter)
+  );
   if (!items.length) {
-    container.innerHTML = `<div class="muted small monitor-hint">暂无该主题条目（数据源可能未更新）</div>`;
+    list.innerHTML = `<div class="muted small monitor-hint">该主题暂无条目（数据源每 2 分钟更新）</div>`;
     return;
   }
-  container.innerHTML = items
+  list.innerHTML = items
     .map((it) => {
       const hm = it.time ? it.time.slice(11, 16) : "";
       const day = it.time ? it.time.slice(5, 10) : "";
       const body = it.link
-        ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, topic)}</a>`
-        : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, topic)}</span>`;
-      return `<div class="news-item matched">
-        <span class="news-time">${day} ${hm}</span>${body}<span class="news-src">${it.source}</span>
+        ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</a>`
+        : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</span>`;
+      const tags = (it.topics || []).map((t) => t === "usiran" ? "⚔️" : t === "oilgold" ? "🛢" : "").join(" ");
+      return `<div class="news-item${(it.topics || []).length ? " matched" : ""}">
+        <span class="news-time">${day} ${hm}</span>${body}<span class="news-src">${tags} ${it.source}</span>
       </div>`;
     })
     .join("");
@@ -1040,17 +1052,12 @@ async function pollNews() {
   try {
     const d = await api("/api/news");
     newsState.topics = d.topics || {};
-    const newsList = $("newsList");
-    const geopolList = $("geopolList");
-    if (!newsList) return;
-    if (!d.items.length) {
-      newsList.innerHTML = `<div class="muted small monitor-hint">暂无要闻（数据源可能暂时不可用）</div>`;
-      return;
-    }
+    newsState.all = d.items || [];
+    if (!newsState.all.length) return;
 
-    // 新命中条目提醒（首次加载静默；oilgold 与 usiran 分别去重）
+    // 新命中条目提醒（首次加载静默；两类主题分别去重）
     if (newsState.loaded) {
-      for (const it of d.items.slice(0, 12)) {
+      for (const it of newsState.all.slice(0, 12)) {
         if (it.matched && !newsState.seen.has(it.title)) {
           toast(`📰 ${it.title.slice(0, 46)}${it.title.length > 46 ? "…" : ""}`);
         }
@@ -1059,61 +1066,39 @@ async function pollNews() {
         }
       }
     }
-    d.items.forEach((it) => {
+    newsState.all.forEach((it) => {
       newsState.seen.add(it.title);
       if ((it.topics || []).includes("usiran")) newsState.geopolSeen.add(it.title);
     });
     newsState.loaded = true;
-
-    // 要闻 Tab：全部条目，原油/黄金命中高亮标记
-    newsList.innerHTML = d.items
-      .map((it) => {
-        const hm = it.time ? it.time.slice(11, 16) : "";
-        const day = it.time ? it.time.slice(5, 10) : "";
-        const body = it.link
-          ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, "oilgold")}</a>`
-          : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, "oilgold")}</span>`;
-        return `<div class="news-item${it.matched ? " matched" : ""}">
-          <span class="news-time">${day} ${hm}</span>${body}<span class="news-src">${it.source}</span>
-        </div>`;
-      })
-      .join("");
-
-    // 美伊 Tab：仅该主题命中条目，主题关键词高亮
-    const geopolItems = d.items.filter((it) => (it.topics || []).includes("usiran"));
-    renderNewsList(geopolList, geopolItems, "usiran");
+    renderNewsView();
   } catch (e) { /* 新闻轮询失败静默 */ }
 }
 
-document.querySelectorAll(".mon-tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".mon-tab").forEach((b) => b.classList.toggle("active", b === btn));
-    const tab = btn.dataset.tab;
-    $("monitorList").classList.toggle("hidden", tab !== "monitor");
-    $("newsList").classList.toggle("hidden", tab !== "news");
-    $("geopolList").classList.toggle("hidden", tab !== "geopol");
-    $("notesWrap").classList.toggle("hidden", tab !== "notes");
-    if (tab !== "monitor" && !newsState.loaded) pollNews();
-    if (tab === "notes" && !notesState.items.length) loadNotes();
-    if (tab === "notes") updateNoteSymChip();
+document.querySelectorAll(".filter-chip").forEach((chip) => {
+  if (chip.dataset.filter === newsState.filter) chip.classList.add("active");
+  chip.addEventListener("click", () => {
+    document.querySelectorAll(".filter-chip").forEach((c) => c.classList.toggle("active", c === chip));
+    newsState.filter = chip.dataset.filter;
+    localStorage.setItem("fa_news_filter", newsState.filter);
+    renderNewsView();
   });
 });
 
-/* ---------- 中栏 Tab：合约详情 / 对比分析 ---------- */
+/* ---------- 顶级视图路由（标签切换界面） ---------- */
 
-document.querySelectorAll("[data-dtab]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll("[data-dtab]").forEach((b) => b.classList.toggle("active", b === btn));
-    $("detailPane").classList.toggle("hidden", btn.dataset.dtab !== "detail");
-    $("comparePane").classList.toggle("hidden", btn.dataset.dtab !== "compare");
-    if (btn.dataset.dtab === "detail") {
-      $("detailTime").textContent = $("detailTime").dataset.txt || "";
-    } else {
-      $("detailTime").dataset.txt = $("detailTime").textContent;
-      $("detailTime").textContent = "";
-      initComparePage();
-    }
-  });
+function switchView(name) {
+  document.querySelectorAll(".view-tab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.dataset.view !== name));
+  history.replaceState(null, "", name === "work" ? location.pathname : `?view=${name}`);
+  // 进入视图时按需初始化；图表按切换后的实际宽度重绘
+  if (name === "compare") initComparePage();
+  if (name === "notes") { if (!notesState.items.length) loadNotes(); updateNoteSymChip(); }
+  if (name === "news" && !newsState.loaded) pollNews();
+}
+
+document.querySelectorAll(".view-tab").forEach((btn) => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
 /* ---------- 对比分析 ---------- */
@@ -1270,6 +1255,7 @@ $("corrDays").addEventListener("change", loadCorrelation);
 $("btnCmpAi").addEventListener("click", () => {
   const a = $("cmpA").value, b = $("cmpB").value;
   const mode = { ratio: "比价", spread: "价差", normalized: "归一化走势对比" }[$("cmpMode").value];
+  switchView("work");  // 回到工作台查看 AI 回复
   sendChat(`请从套利/对冲视角分析 ${a} 与 ${b} 的${mode}（${$("cmpDays").value} 个交易日，当前分位与统计见页面数据）：当前处于什么水平、历史极端区间的含义、适合什么样的策略思路与风险点。`);
 });
 
@@ -1692,10 +1678,11 @@ function initSplitters() {
   loadAiConfig();
   pollMonitor();
   pollNews();
-  // 支持 ?tab=compare 直链对比页 / ?report=1 直开晨报 / ?tab=notes 直开心得
+  // 顶级视图路由：?view=compare|news|notes（兼容旧 ?tab= 参数）；?report=1 直开晨报
   const params = new URLSearchParams(location.search);
-  if (params.get("tab") === "compare") document.querySelector('[data-dtab="compare"]').click();
-  if (params.get("tab") === "notes") document.querySelector('.mon-tab[data-tab="notes"]').click();
+  const legacyTab = params.get("tab");
+  const view = params.get("view") || (legacyTab === "compare" ? "compare" : legacyTab === "notes" ? "notes" : null);
+  if (view) switchView(view);
   if (params.get("report") === "1") $("btnReport").click();
   await doRefresh();
   state.polling = setInterval(doRefresh, 5000);
