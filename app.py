@@ -595,6 +595,36 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             parts.append("\n".join(ind_lines))
         except Exception:
             pass
+
+        # 日内走势结构
+        try:
+            intra = await _intraday_summary(symbol)
+            if intra:
+                parts.append(f"【{symbol} 日内走势结构】{intra}")
+        except Exception:
+            pass
+
+        # 日K统计（区间分位与量仓趋势）
+        try:
+            stats = _daily_stats(await get_daily(symbol))
+            if stats:
+                parts.append(f"【{symbol} 中期统计】{stats}")
+        except Exception:
+            pass
+
+        # 消息面（品种相关要闻）
+        try:
+            vnews = _variety_news(symbol)
+            if vnews:
+                lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
+                parts.append(f"【{symbol} 相关消息面（近期待闻）】\n" + "\n".join(lines))
+        except Exception:
+            pass
+
+        # 基本面背景
+        profile = _variety_profile(symbol)
+        if profile:
+            parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
     return "\n\n".join(parts)
 
 
@@ -608,9 +638,12 @@ class ChatIn(BaseModel):
     symbol: Optional[str] = None
 
 
-SYSTEM_PROMPT = """你是一位专业的国内期货市场分析助手。用户会给你实时行情数据（来自新浪财经，可能有数秒延迟）、近期日线，以及已计算的常用技术指标（MA/MACD/RSI/KDJ/BOLL）和最新信号，请综合这些数据分析：
-1) 价格趋势与关键支撑/压力位（结合均线与布林带）；2) 动能状态（MACD/KDJ/RSI 的背离与共振）；3) 成交量与持仓量变化含义（增仓/减仓上行或下行）；4) 需要关注的风险点与信号冲突之处。
-要求：观点客观中立、条理清晰、使用中文；如数据不足要明说；数据为连续主力合约口径，注意换月影响；引用指标时给出具体数值。
+SYSTEM_PROMPT = """你是一位专业的国内期货市场分析助手。用户会给你多维数据：实时行情、近期日线与技术指标（MA/MACD/RSI/KDJ/BOLL）及信号、日内走势结构（开高低与出现时间、均价偏离、量能分布、尾盘动向）、中期统计（60日分位、持仓变化、量能趋势）、品种相关消息面、基本面框架。请综合分析：
+1) 日内结构：价格在当日区间的位置、量价配合、尾盘动向暗示的短期方向；
+2) 技术面：趋势与关键支撑压力（结合均线/布林/分位）、动能状态与信号共振或冲突；
+3) 消息面与基本面：相关要闻如何作用于该品种的供需与情绪逻辑；
+4) 结论：多空倾向、关键价位（触发条件明确）、量仓验证信号、主要风险。
+要求：观点客观中立、条理清晰、使用中文、引用具体数值；如某维数据缺失要明说；数据为连续主力合约口径，注意换月影响。
 你的输出仅供研究参考，不构成投资建议，必要时提醒用户注意风险。"""
 
 
@@ -709,6 +742,145 @@ async def ai_chat(body: ChatIn):
     logger.info(f"[ai-chat] 完成：耗时 {_time.time() - t0:.0f}s，共 {len(full_reply)} 字"
                 + (f"（续写 {truncated_rounds} 轮）" if truncated_rounds else ""))
     return {"ok": True, "reply": full_reply}
+
+
+# ---------------------------------------------------------------- AI 合约分析：四维上下文
+
+# 品种基本面知识库（按合约前缀匹配，供 AI 参考的背景框架）
+VARIETY_PROFILE = {
+    "RB": "螺纹钢：需求看地产基建开工与专项债，供给看粗钢压产与电炉利润；旺季3-4月/9-10月；关注表观需求、库存周期与铁矿焦煤成本。",
+    "HC": "热卷：制造业与出口（机电、汽车、家电）驱动，卷螺价差反映需求切换；关注出口接单与制造业PMI。",
+    "I": "铁矿石：供给看澳巴发运与天气，需求看钢厂铁水产量；港口库存与钢厂可用天数是核心指标；宏观定价属性强。",
+    "CU": "铜：全球宏观定价（美元、中美PMI），矿端紧张与冶炼加工费约束供给，需求看电网/新能源/地产；LME库存与持仓敏感。",
+    "AU": "黄金：实际利率与美元定价核心，避险与央行购金驱动；关注美联储政策路径、非农/CPI、地缘风险；国内溢价反映消费需求。",
+    "AG": "白银：金融属性同黄金+工业属性（光伏），波动大于黄金；金银比走阔/收敛是常用策略视角。",
+    "SC": "原油：OPEC+产量政策、地缘（中东/俄乌）、全球需求三因子；EIA库存与月差结构是高频核心指标；国内SC另受仓单运费影响。",
+    "FU": "燃料油：跟随原油，发电与航运需求（低硫）季节性明显。",
+    "M": "豆粕：美豆/南美产量与天气、进口到港与油厂开机、生猪存栏三链条；关注USDA报告与油厂库存。",
+    "RM": "菜粕：与豆粕高度联动，水产养殖旺季（5-9月）需求弹性大。",
+    "Y": "豆油 / P:棕榈油：产地（马来印尼）库存（MPOB）、生柴政策、大豆供给；油脂间价差活跃。",
+    "OI": "菜油：跟随油脂板块，加拿大菜籽供给与国内进口为边际变量。",
+    "TA": "PTA：油价成本+PX供给+聚酯需求；加工费与开工率是核心指标。",
+    "EG": "乙二醇：油煤双路线成本，港口库存与聚酯需求。",
+    "MA": "甲醇：煤炭成本+港口库存+下游（MTO/传统化工）需求；内地-港口价差反映区域平衡。",
+    "FG": "玻璃：地产竣工链条，日熔量与厂内库存为核心；纯碱成本联动。",
+    "SA": "纯碱：光伏与浮法玻璃日熔量决定需求，供给看新产能投放；玻璃-纯碱价差策略常用。",
+    "L": "塑料 / V:PVC / PP:聚丙烯：油价煤价成本+下游（农膜/地产/包装）需求季节性；PVC 与地产竣工相关度高。",
+    "C": "玉米：临储政策与进口替代、小麦价差、饲用需求；丰产季（10-11月）压力。",
+    "CF": "棉花：种植面积与天气（新疆）、下游纺织订单与内需；金九银十旺季。",
+    "SR": "白糖：国内产量与进口配额、巴西印度泰国供给；季度性明显。",
+    "IF": "沪深300股指：盈利（PMI/工业利润）与流动性（利率/汇率）双轮驱动；期货贴水结构反映对冲需求。",
+    "IM": "中证1000 / IH:上证50 / IC:中证500：风格与中小盘弹性差异，雪球与量化对冲影响贴水。",
+    "T": "国债：货币政策和资金面定价，经济数据走弱利多；久期属性。",
+}
+
+# 消息面：品种相关的要闻关键词（用于从快讯流过滤）
+VARIETY_NEWS_KW = {
+    "AU": ["黄金", "金价", "期金", "贵金属", "美联储", "降息", "加息", "非农", "cpi", "美元"],
+    "AG": ["白银", "银价", "贵金属", "黄金", "光伏"],
+    "SC": ["原油", "油价", "opec", "欧佩克", "石油", "炼厂", "中东", "霍尔木兹"],
+    "FU": ["燃料油", "原油", "油价", "航运"],
+    "RB": ["螺纹", "钢材", "钢铁", "地产", "基建", "专项债"],
+    "HC": ["热卷", "钢材", "钢铁", "制造业", "出口"],
+    "I": ["铁矿石", "铁矿", "钢铁", "粗钢", "铁水"],
+    "CU": ["铜", "铜价", "电网", "智利", "秘鲁"],
+    "M": ["豆粕", "大豆", "美豆", "生猪", "usda", "南美"],
+    "RM": ["菜粕", "豆粕", "水产"],
+    "P": ["棕榈油", "MPOB".lower(), "生柴", "印尼", "马来"],
+    "Y": ["豆油", "油脂", "大豆"],
+    "OI": ["菜油", "菜籽", "油脂"],
+    "TA": ["pta", "聚酯", "px", "纺织"],
+    "MA": ["甲醇", "煤炭", "mto", "港口库存"],
+    "FG": ["玻璃", "竣工", "地产"],
+    "SA": ["纯碱", "玻璃", "光伏"],
+    "C": ["玉米", "小麦", "饲料"],
+    "CF": ["棉花", "纺织", "新疆"],
+    "SR": ["白糖", "糖", "巴西"],
+    "IF": ["股市", "A股", "沪指", "流动性", "利率", "pmi"],
+    "IM": ["股市", "A股", "中小盘", "中证"],
+    "IH": ["股市", "A股", "蓝筹", "利率"],
+    "IC": ["股市", "A股", "中证"],
+    "T": ["国债", "债市", "利率", "货币政策", "央行"],
+}
+
+
+def _variety_prefix(symbol: str) -> str:
+    m = re.match(r"^([A-Za-z]{1,2})", symbol or "")
+    return m.group(1).upper() if m else ""
+
+
+def _variety_profile(symbol: str) -> str:
+    p = _variety_prefix(symbol)
+    return VARIETY_PROFILE.get(p, "")
+
+
+def _variety_news(symbol: str, limit: int = 8) -> list[dict]:
+    """从要闻缓存中过滤与品种相关的条目"""
+    kws = VARIETY_NEWS_KW.get(_variety_prefix(symbol))
+    if not kws or not _news_cache.get("items"):
+        return []
+    hits = []
+    for it in _news_cache["items"]:
+        text = (it.get("title", "") + " " + it.get("summary", "")[:100]).lower()
+        if any(k.lower() in text for k in kws):
+            hits.append(it)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+async def _intraday_summary(symbol: str) -> str:
+    """日内分时结构摘要：开高低与出现时间、均价偏离、量能分布、尾盘动向"""
+    try:
+        rows = await get_minute(symbol, "1")
+    except Exception:
+        return ""
+    rows = [r for r in rows if r.get("close")]
+    if len(rows) < 10:
+        return ""
+    day = rows[-1]["datetime"][:10]
+    today = [r for r in rows if r["datetime"].startswith(day)]
+    if len(today) < 10:
+        today = rows[-240:]
+    opens = today[0]["open"] or today[0]["close"]
+    hi = max(today, key=lambda r: r["high"] or 0)
+    lo = min(today, key=lambda r: r["low"] or r["close"] or 0)
+    last = today[-1]
+    avg = sum(r["close"] * (r["volume"] or 0) for r in today) / max(1e-9, sum(r["volume"] or 0 for r in today))
+    dev = (last["close"] / avg - 1) * 100 if avg else 0
+    am = sum(r["volume"] or 0 for r in today if r["datetime"][11:13] < "13")
+    pm = sum(r["volume"] or 0 for r in today if r["datetime"][11:13] >= "13")
+    am_pct = am / max(1, am + pm) * 100
+    tail = today[-30:]
+    tail_chg = (tail[-1]["close"] / tail[0]["close"] - 1) * 100 if len(tail) >= 2 and tail[0]["close"] else 0
+    pos = "上方" if last["close"] >= (opens or last["close"]) else "下方"
+    return (
+        f"今开 {opens}，最高 {hi['high']}（{hi['datetime'][11:16]}），最低 {lo['low']}（{lo['datetime'][11:16]}），"
+        f"现价 {last['close']}（位于今开{pos}，偏离日内加权均价 {dev:+.2f}%）；"
+        f"量能：上午占 {am_pct:.0f}%{'（午后放量）' if am_pct < 50 else ''}；尾盘30分钟 {tail_chg:+.2f}%"
+    )
+
+
+def _daily_stats(daily: list) -> str:
+    """近 60 日统计：区间分位、持仓变化、量能趋势"""
+    rows = [r for r in daily[-60:] if r.get("close")]
+    if len(rows) < 20:
+        return ""
+    closes = [r["close"] for r in rows]
+    cur = closes[-1]
+    pct = sum(1 for c in closes if c <= cur) / len(closes) * 100
+    hold_chg = ""
+    if rows[0].get("hold") and rows[-1].get("hold"):
+        d = rows[-1]["hold"] - rows[0]["hold"]
+        hold_chg = f"，持仓较60日前{'增' if d > 0 else '减'} {abs(d):.0f} 手"
+    v_recent = sum(r.get("volume") or 0 for r in rows[-5:]) / 5
+    v_before = sum(r.get("volume") or 0 for r in rows[-15:-5]) / 10
+    v_ratio = v_recent / max(1e-9, v_before)
+    vol_note = "放量" if v_ratio > 1.2 else ("缩量" if v_ratio < 0.8 else "量能平稳")
+    return (
+        f"近60日区间 {min(closes)}~{max(closes)}，当前处于 {pct:.0f}% 分位{hold_chg}；"
+        f"近5日均量/前10日均量 = {v_ratio:.2f}（{vol_note}）"
+    )
 
 
 # ---------------------------------------------------------------- AI 盯盘引擎
