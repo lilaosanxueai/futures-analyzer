@@ -1101,6 +1101,15 @@ document.querySelectorAll(".view-tab").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
+// 快捷键：Alt+1/2/3/4 切换视图
+document.addEventListener("keydown", (e) => {
+  if (e.altKey && ["1", "2", "3", "4"].includes(e.key)) {
+    const views = ["work", "compare", "news", "notes"];
+    switchView(views[Number(e.key) - 1]);
+    e.preventDefault();
+  }
+});
+
 /* ---------- 对比分析 ---------- */
 
 const cmpState = { loaded: false, a: "RB0", b: "HC0" };

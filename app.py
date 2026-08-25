@@ -1431,7 +1431,11 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(BASE_DIR / "static" / "index.html")
+    # HTML 不允许缓存（协商校验），确保拿到最新版本引用最新静态资源
+    return FileResponse(
+        BASE_DIR / "static" / "index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 if __name__ == "__main__":
