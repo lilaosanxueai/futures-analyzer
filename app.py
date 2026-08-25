@@ -996,30 +996,46 @@ async def correlation(symbols: str, days: int = 60):
     }
 
 
-# ---------------------------------------------------------------- 要闻（原油/黄金主题）
+# ---------------------------------------------------------------- 主题要闻
 
-NEWS_KEYWORDS = [
-    # 原油
-    "原油", "油价", "wti", "布伦特", "brent", "opec", "欧佩克", "石油", "炼厂", "燃料油", "燃油",
-    # 黄金/贵金属
-    "黄金", "金价", "期金", "白银", "银价", "贵金属", "comex",
-    # 主要驱动因素
-    "美联储", "fed", "加息", "降息", "利率决议", "非农", "cpi", "通胀", "美元指数",
-    "地缘", "中东", "俄乌", "制裁", "避险", "关税",
-]
+# 多主题关键词：每条快讯会标记命中的全部主题
+NEWS_TOPICS = {
+    # 原油/黄金及宏观驱动
+    "oilgold": [
+        "原油", "油价", "wti", "布伦特", "brent", "opec", "欧佩克", "石油", "炼厂", "燃料油", "燃油",
+        "黄金", "金价", "期金", "白银", "银价", "贵金属", "comex",
+        "美联储", "fed", "加息", "降息", "利率决议", "非农", "cpi", "通胀", "美元指数",
+        "避险", "关税",
+    ],
+    # 美伊冲突：核心方言论与动作
+    "usiran": [
+        # 美方
+        "特朗普", "白宫", "美国国务院", "五角大楼", "美国国防部", "美军", "美国中央司令部",
+        "美国官员", "华盛顿号",
+        # 伊朗方
+        "伊朗", "德黑兰", "哈梅内伊", "伊朗总统", "伊朗外长", "革命卫队", "伊朗核",
+        "铀浓缩", "国际原子能机构", "iaea",
+        # 冲突动作与关联方（保持聚焦，泛词如"地缘/俄乌"归 oilgold 主题）
+        "空袭", "霍尔木兹", "红海", "胡塞", "停火谈判", "以色列", "沙特遇袭", "对伊制裁",
+    ],
+}
 
 _news_cache: dict = {"ts": 0.0, "items": []}
 NEWS_TTL = 120.0
 
 
-def _news_hit(text: str) -> bool:
+def _news_topics(text: str) -> list[str]:
+    """返回文本命中的全部主题（不区分大小写）"""
     t = text.lower()
-    return any(k in t for k in NEWS_KEYWORDS)
+    return [topic for topic, kws in NEWS_TOPICS.items() if any(k in t for k in kws)]
 
 
 @app.get("/api/news")
-async def news():
-    """原油/黄金主题要闻：新浪全球快讯（市场异动流）+ 东方财富全球快讯，关键词命中标记"""
+async def news(topic: str = ""):
+    """主题要闻：新浪全球快讯（市场异动流）+ 东方财富全球快讯，多主题命中标记。
+
+    topic 传入 NEWS_TOPICS 的键时仅返回该主题命中的条目。
+    """
     loop_now = asyncio.get_event_loop().time()
     if loop_now - _news_cache["ts"] > NEWS_TTL:
         items, seen = [], set()
@@ -1029,13 +1045,15 @@ async def news():
             if not key or key in seen:
                 return
             seen.add(key)
+            hit = _news_topics(title + " " + summary)
             items.append({
                 "time": str(time_s),
                 "title": title or (summary[:40] if summary else ""),
                 "summary": summary,
                 "link": link,
                 "source": source,
-                "matched": _news_hit(title + " " + summary),
+                "matched": "oilgold" in hit,   # 兼容字段：原油/黄金主题
+                "topics": hit,
             })
 
         try:
@@ -1056,7 +1074,11 @@ async def news():
         items.sort(key=lambda x: x["time"], reverse=True)
         _news_cache["items"] = items[:80]
         _news_cache["ts"] = loop_now
-    return {"ok": True, "items": _news_cache["items"], "keywords": NEWS_KEYWORDS}
+
+    result_items = _news_cache["items"]
+    if topic in NEWS_TOPICS:
+        result_items = [it for it in result_items if topic in it["topics"]]
+    return {"ok": True, "items": result_items, "topics": NEWS_TOPICS}
 
 
 # ---------------------------------------------------------------- AI 晨报
