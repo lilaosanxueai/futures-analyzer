@@ -411,11 +411,12 @@ input:focus, select:focus { border-color: var(--primary); }
 .note-item .note-ops button { background: none; border: none; cursor: pointer; font-size: 11px; color: var(--muted); padding: 0 2px; }
 .note-item .note-ops button:hover { color: var(--text); }
 .note-synced { color: var(--down); font-size: 10px; }
-.note-input-row {
-  display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border);
-  align-items: center; background: var(--panel-2);
-}
-.note-input-row input { flex: 1; min-width: 0; font-size: 12px; padding: 6px 8px; }
+.note-form { border-top: 1px solid var(--border); background: var(--panel-2); padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.note-row { display: flex; gap: 6px; align-items: center; }
+.note-row input { min-width: 0; font-size: 12px; padding: 6px 8px; }
+.note-row input:first-child { flex: 1; }
+#noteContent { flex: 1; }
+#noteDate { color-scheme: dark; }
 .note-sym-chip {
   flex-shrink: 0; padding: 3px 8px; border-radius: 999px;
   border: 1px solid var(--border); cursor: pointer; max-width: 64px; overflow: hidden;

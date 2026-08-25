@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825">
+<link rel="stylesheet" href="/static/style.css?v=0825b">
 </head>
 <body>
 
@@ -186,10 +186,18 @@
         <div id="notesList" class="news-view-list">
           <div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>
         </div>
-        <div class="note-input-row">
-          <span id="noteSym" class="note-sym-chip muted small" title="点击切换：新心得关联当前选中合约">不限</span>
-          <input id="noteInput" placeholder="记录交易心得…支持 #标签 与 @合约，回车保存" autocomplete="off">
-          <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
+        <div class="note-form">
+          <div class="note-row">
+            <input id="noteTitle" placeholder="标题（留空自动取内容摘要）" autocomplete="off">
+            <input id="noteDate" type="date" title="交易日期">
+            <input id="noteSymbol" list="noteSymbolList" placeholder="品种" autocomplete="off" style="width:110px;flex:none">
+            <datalist id="noteSymbolList"></datalist>
+            <input id="noteTags" placeholder="#标签" autocomplete="off" style="width:90px;flex:none">
+          </div>
+          <div class="note-row">
+            <input id="noteContent" placeholder="心得正文…（回车保存，Shift+Enter 换行）" autocomplete="off">
+            <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
+          </div>
         </div>
       </div>
     </div>
@@ -268,6 +276,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825"></script>
+<script src="/static/app.js?v=0825b"></script>
 </body>
 </html>

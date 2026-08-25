@@ -894,7 +894,7 @@ $("monitorList").addEventListener("click", (e) => {
 
 /* ---------- 交易心得（本地记录 + 飞书云文档同步） ---------- */
 
-const notesState = { items: [], symMode: null };  // symMode: null=不限, "sel"=当前选中合约
+const notesState = { items: [] };
 
 async function loadNotes() {
   try {
@@ -915,10 +915,13 @@ function renderNotes() {
   }
   list.innerHTML = items.map((n) => {
     const t = new Date(n.ts);
-    const dt = `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+    const hm = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+    const title = n.title || (n.content || "").slice(0, 24);
+    const date = n.date || `${t.getMonth() + 1}/${t.getDate()}`;
     return `<div class="note-item" data-id="${n.id}">
       <div class="note-head">
-        <span class="note-time">${dt}</span>
+        <b class="note-title"></b>
+        <span class="note-time">${date} ${hm}</span>
         ${n.symbol ? `<span class="note-sym">${n.symbol}</span>` : ""}
         ${n.tags ? `<span class="note-tag">#${n.tags}</span>` : ""}
         ${n.synced ? `<span class="note-synced">☁已同步</span>` : ""}
@@ -930,32 +933,32 @@ function renderNotes() {
       <div class="note-body"></div>
     </div>`;
   }).join("");
-  // 内容用 textNode 填充避免 XSS
+  // 文本用 textNode 填充避免 XSS
   list.querySelectorAll(".note-item").forEach((el) => {
     const n = items.find((x) => x.id === el.dataset.id);
+    el.querySelector(".note-title").textContent = n ? (n.title || (n.content || "").slice(0, 24)) : "";
     el.querySelector(".note-body").textContent = n ? n.content : "";
   });
 }
 
 async function addNote() {
-  const input = $("noteInput");
-  const text = input.value.trim();
-  if (!text) return;
-  // 解析 #标签 和 @合约
-  let symbol = notesState.symMode === "sel" ? (state.selected || "") : "";
-  let tags = "";
-  let content = text;
-  const tagM = content.match(/#([^\s#]+)/);
-  if (tagM) { tags = tagM[1]; content = content.replace(tagM[0], "").trim(); }
-  const symM = content.match(/@([A-Za-z]{1,3}\d{0,2})/);
-  if (symM) { symbol = symM[1].toUpperCase(); content = content.replace(symM[0], "").trim(); }
+  const contentEl = $("noteContent");
+  const text = contentEl.value.trim();
+  if (!text) return toast("请填写心得正文", true);
+  const title = $("noteTitle").value.trim();
+  const date = $("noteDate").value || new Date().toISOString().slice(0, 10);
+  const symbol = $("noteSymbol").value.trim().toUpperCase();
+  const tags = $("noteTags").value.trim().replace(/^#/, "");
   try {
     await api("/api/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, symbol, tags }),
+      body: JSON.stringify({ title, content: text, symbol, tags, date }),
     });
-    input.value = "";
+    $("noteTitle").value = "";
+    contentEl.value = "";
+    $("noteTags").value = "";
+    // 标题、品种、日期保留（连续记录同类心得更顺手），正文清空
     loadNotes();
     toast("心得已保存");
   } catch (e) {
@@ -978,18 +981,14 @@ async function syncNotes(noteId = "") {
 }
 
 $("btnNoteAdd").addEventListener("click", addNote);
-$("noteInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !e.shiftKey)) addNote();
+$("noteContent").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) addNote();
 });
 $("btnNoteSync").addEventListener("click", () => syncNotes());
-$("noteSym").addEventListener("click", () => {
-  notesState.symMode = notesState.symMode === "sel" ? null : "sel";
-  updateNoteSymChip();
-});
-function updateNoteSymChip() {
-  const chip = $("noteSym");
-  chip.textContent = notesState.symMode === "sel" ? (state.selected || "选中") : "不限";
-  chip.title = notesState.symMode === "sel" ? "新心得将关联当前选中合约（点击切换）" : "新心得不关联合约（点击切换为关联选中合约）";
+// 品种输入框：默认带出当前选中合约，可下拉选主力合约或自由输入
+function prefillNoteSymbol() {
+  const el = $("noteSymbol");
+  if (el && !el.value && state.selected) el.value = state.selected;
 }
 $("notesList").addEventListener("click", (e) => {
   const del = e.target.closest("[data-del]");
@@ -1093,7 +1092,12 @@ function switchView(name) {
   history.replaceState(null, "", name === "work" ? location.pathname : `?view=${name}`);
   // 进入视图时按需初始化；图表按切换后的实际宽度重绘
   if (name === "compare") initComparePage();
-  if (name === "notes") { if (!notesState.items.length) loadNotes(); updateNoteSymChip(); }
+  if (name === "notes") {
+    if (!notesState.items.length) loadNotes();
+    prefillNoteSymbol();
+    const d = $("noteDate");
+    if (d && !d.value) d.value = new Date().toISOString().slice(0, 10);
+  }
   if (name === "news" && !newsState.loaded) pollNews();
 }
 
@@ -1320,6 +1324,9 @@ async function loadCandidates() {
     renderTable();
     if (state.selected && state.quotes[state.selected]) renderQuoteArea();
     if (cmpState.loaded) fillCmpOptions();  // 对比页可能先于候选加载完成初始化
+    // 心得品种下拉候选
+    const dl = $("noteSymbolList");
+    if (dl) dl.innerHTML = data.items.map((c) => `<option value="${c.symbol}">${c.name}</option>`).join("");
   } catch (e) {
     /* 候选列表失败不阻塞主流程 */
   }

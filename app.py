@@ -1025,9 +1025,11 @@ async def get_notes():
 
 
 class NoteIn(BaseModel):
+    title: str = ""
     content: str
     symbol: Optional[str] = None
     tags: str = ""
+    date: str = ""  # YYYY-MM-DD，留空取当天
 
 
 @app.post("/api/notes")
@@ -1039,6 +1041,8 @@ async def add_note(body: NoteIn):
     note = {
         "id": f"n{int(datetime.now().timestamp() * 1000)}",
         "ts": int(datetime.now().timestamp() * 1000),
+        "title": body.title.strip() or content[:24],
+        "date": body.date.strip() or datetime.now().strftime("%Y-%m-%d"),
         "symbol": (body.symbol or "").upper() or None,
         "tags": body.tags.strip(),
         "content": content,
@@ -1151,9 +1155,15 @@ async def _feishu_ensure_doc() -> str:
 
 
 def _note_to_md(note: dict) -> str:
-    t = datetime.fromtimestamp(note["ts"] / 1000).strftime("%Y-%m-%d %H:%M")
-    head = f"### {t}" + (f" · {note['symbol']}" if note.get("symbol") else "") + (f" · {note['tags']}" if note.get("tags") else "")
-    return head + "\n" + note["content"] + "\n"
+    title = note.get("title") or (note.get("content") or "")[:24]
+    t = datetime.fromtimestamp(note["ts"] / 1000)
+    meta_parts = [note.get("date") or t.strftime("%Y-%m-%d")]
+    if note.get("symbol"):
+        meta_parts.append(note["symbol"])
+    if note.get("tags"):
+        meta_parts.append(f"#{note['tags']}")
+    meta_parts.append(t.strftime("%H:%M"))
+    return f"### {title}\n- {' · '.join(meta_parts)}\n{note['content']}\n"
 
 
 @app.post("/api/notes/feishu-sync")
