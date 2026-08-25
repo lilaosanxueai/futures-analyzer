@@ -59,6 +59,7 @@
           <button class="mon-tab active" data-tab="monitor">🤖 盯盘</button>
           <button class="mon-tab" data-tab="news">📰 要闻</button>
           <button class="mon-tab" data-tab="geopol">⚔️ 美伊</button>
+          <button class="mon-tab" data-tab="notes">📝 心得</button>
         </div>
         <span id="monitorStatus" class="muted small">启动中…</span>
       </div>
@@ -70,6 +71,17 @@
       </div>
       <div id="geopolList" class="monitor-list hidden">
         <div class="muted small monitor-hint">加载美伊冲突动态中…</div>
+      </div>
+      <div id="notesWrap" class="hidden notes-wrap">
+        <div id="notesList" class="monitor-list">
+          <div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>
+        </div>
+        <div class="note-input-row">
+          <span id="noteSym" class="note-sym-chip muted small">不限</span>
+          <input id="noteInput" placeholder="记录交易心得…（Ctrl+Enter 保存）" autocomplete="off">
+          <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
+          <button id="btnNoteSync" class="btn accent small-btn" title="把未同步的心得追加到飞书云文档">☁ 飞书</button>
+        </div>
       </div>
     </div>
     <div class="hint">量仓等完整数据见中间详情栏 · 每 5 秒刷新 · 不构成投资建议</div>
@@ -198,6 +210,17 @@
       <span id="keyStatus"></span><br>
       API Key 按服务商独立保存（切换不丢失），存于本机 config.json，不会上传。
       智谱 glm-4-flash 免费；glm-5.3 等旗舰模型与 DeepSeek 均按量计费。
+    </p>
+    <div class="form-row">
+      <label>飞书同步</label>
+      <input id="cfgFeishuId" type="text" placeholder="App ID（留空保留已存）">
+      <input id="cfgFeishuSecret" type="password" placeholder="App Secret（留空保留）">
+      <input id="cfgFeishuTitle" type="text" placeholder="文档标题：期货交易心得">
+    </div>
+    <p class="form-tip">
+      <span id="feishuStatus"></span><br>
+      飞书同步需在 open.feishu.cn 创建企业自建应用，开通「云文档-文档」读写权限后把 App ID/Secret 填到左侧；
+      首次同步会自动创建文档，之后心得按时间戳追加。
     </p>
     <div class="modal-actions">
       <button id="btnClearKey" class="btn ghost">清除已存 Key</button>

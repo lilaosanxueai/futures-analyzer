@@ -357,6 +357,31 @@ input:focus, select:focus { border-color: var(--primary); }
 .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .form-row label { width: 64px; flex-shrink: 0; color: var(--muted); font-size: 13px; }
 .form-row input, .form-row select { flex: 1; }
+
+/* ---------- 交易心得 ---------- */
+.notes-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.notes-wrap.hidden { display: none; }
+.note-item { padding: 6px 14px; border-bottom: 1px solid rgba(43, 50, 69, .5); font-size: 12px; }
+.note-item .note-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+.note-item .note-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.note-item .note-sym { color: var(--primary); font-weight: 600; font-size: 11px; }
+.note-item .note-tag { color: var(--accent); font-size: 11px; }
+.note-item .note-body { line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.note-item .note-ops { float: right; display: flex; gap: 6px; }
+.note-item .note-ops button { background: none; border: none; cursor: pointer; font-size: 11px; color: var(--muted); padding: 0 2px; }
+.note-item .note-ops button:hover { color: var(--text); }
+.note-synced { color: var(--down); font-size: 10px; }
+.note-input-row {
+  display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border);
+  align-items: center; background: var(--panel-2);
+}
+.note-input-row input { flex: 1; min-width: 0; font-size: 12px; padding: 6px 8px; }
+.note-sym-chip {
+  flex-shrink: 0; padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--border); cursor: pointer; max-width: 64px; overflow: hidden;
+  white-space: nowrap;
+}
+.form-row input[id^="cfgFeishu"] { min-width: 0; }
 .form-tip { font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 12px; }
 .modal-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
 

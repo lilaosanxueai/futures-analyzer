@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     "provider": "zhipu",
     "model": PROVIDERS["zhipu"]["default_model"],
     "api_keys": {},  # 按服务商独立保存：{"zhipu": "...", "deepseek": "..."}
+    "feishu": {},    # 飞书云文档同步：{"app_id", "app_secret", "doc_title", "doc_id"}
     "monitor": {
         "enabled": True,
         "sensitivity": 1.0,          # 阈值倍率：0.5 灵敏 / 1 标准 / 2 迟钝
@@ -509,6 +510,7 @@ async def get_ai_config():
         "model": cfg["model"] or PROVIDERS[provider]["default_model"],
         "has_key": bool(cfg["api_keys"].get(provider)),
         "keys_status": {p: bool(cfg["api_keys"].get(p)) for p in PROVIDERS},
+        "feishu_configured": bool((cfg.get("feishu") or {}).get("app_id")),
     }
 
 
@@ -994,6 +996,226 @@ async def correlation(symbols: str, days: int = 60):
         "matrix": [[None if v != v else round(float(v), 2) for v in row] for row in corr.values],
         "days": days,
     }
+
+
+# ---------------------------------------------------------------- 交易心得
+
+NOTES_FILE = BASE_DIR / "notes.json"
+
+
+def _load_notes() -> list[dict]:
+    if NOTES_FILE.exists():
+        try:
+            return json.loads(NOTES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_notes(notes: list[dict]) -> None:
+    try:
+        NOTES_FILE.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+@app.get("/api/notes")
+async def get_notes():
+    return {"ok": True, "items": list(reversed(_load_notes()))}  # 新的在前
+
+
+class NoteIn(BaseModel):
+    content: str
+    symbol: Optional[str] = None
+    tags: str = ""
+
+
+@app.post("/api/notes")
+async def add_note(body: NoteIn):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="心得内容不能为空")
+    notes = _load_notes()
+    note = {
+        "id": f"n{int(datetime.now().timestamp() * 1000)}",
+        "ts": int(datetime.now().timestamp() * 1000),
+        "symbol": (body.symbol or "").upper() or None,
+        "tags": body.tags.strip(),
+        "content": content,
+        "synced": False,  # 是否已同步到飞书
+    }
+    notes.append(note)
+    _save_notes(notes)
+    return {"ok": True, "item": note}
+
+
+@app.delete("/api/notes/{note_id}")
+async def del_note(note_id: str):
+    notes = _load_notes()
+    remain = [n for n in notes if n["id"] != note_id]
+    if len(remain) == len(notes):
+        raise HTTPException(status_code=404, detail="心得不存在")
+    _save_notes(remain)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- 飞书云文档同步
+
+FEISHU_BASE = "https://open.feishu.cn/open-apis"
+_feishu_token = {"token": "", "expire_at": 0.0}
+
+
+def _feishu_cfg(cfg: dict) -> dict:
+    return cfg.get("feishu") or {}
+
+
+async def _feishu_get_token(force: bool = False) -> str:
+    now = asyncio.get_event_loop().time()
+    if not force and _feishu_token["token"] and now < _feishu_token["expire_at"] - 60:
+        return _feishu_token["token"]
+    cfg = _feishu_cfg(load_config())
+    if not cfg.get("app_id") or not cfg.get("app_secret"):
+        raise HTTPException(status_code=400, detail="未配置飞书应用凭证（App ID / App Secret），请先在 AI 设置中填写")
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
+            json={"app_id": cfg["app_id"], "app_secret": cfg["app_secret"]},
+        )
+    data = r.json()
+    if data.get("code") != 0:
+        raise HTTPException(status_code=400, detail=f"飞书认证失败：{data.get('msg')}")
+    _feishu_token["token"] = data["tenant_access_token"]
+    _feishu_token["expire_at"] = now + data.get("expire", 7200)
+    return _feishu_token["token"]
+
+
+def _md_to_feishu_blocks(md_text: str) -> list[dict]:
+    """极简 Markdown -> 飞书 docx 块（标题3/正文/列表）；失败由调用方降级"""
+    blocks = []
+    for line in md_text.split("\n"):
+        s = line.rstrip()
+        if not s.strip():
+            blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": ""}}], "style": {}}})
+            continue
+        text_el = [{"text_run": {"content": s, "text_element_style": {}}}]
+        if s.startswith("### "):
+            blocks.append({"block_type": 5, "heading3": {"elements": text_el}})
+        elif s.startswith("## "):
+            blocks.append({"block_type": 4, "heading2": {"elements": text_el}})
+        elif s.startswith("# "):
+            blocks.append({"block_type": 3, "heading1": {"elements": text_el}})
+        elif s.lstrip().startswith(("- ", "* ")):
+            blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": s.lstrip()[2:], "text_element_style": {}}}]}})
+        else:
+            blocks.append({"block_type": 2, "text": {"elements": text_el, "style": {}}})
+    return blocks
+
+
+async def _feishu_append(doc_id: str, blocks: list[dict]) -> None:
+    token = await _feishu_get_token()
+    async with httpx.AsyncClient(timeout=20) as client:
+        # 追加到文档根 block（document_id 即页面 block）
+        r = await client.post(
+            f"{FEISHU_BASE}/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"children": blocks[:90]},  # 单次上限约 100 块
+        )
+    data = r.json()
+    if data.get("code") != 0:
+        raise HTTPException(status_code=502, detail=f"飞书写入失败：{data.get('msg')}")
+
+
+async def _feishu_ensure_doc() -> str:
+    """获取配置中的文档 ID；没有则创建《期货交易心得》文档"""
+    cfg = load_config()
+    fs = _feishu_cfg(cfg)
+    doc_id = fs.get("doc_id") or ""
+    if doc_id:
+        return doc_id
+    token = await _feishu_get_token()
+    title = fs.get("doc_title") or "期货交易心得"
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"{FEISHU_BASE}/docx/v1/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"title": title},
+        )
+    data = r.json()
+    if data.get("code") != 0:
+        raise HTTPException(status_code=502, detail=f"飞书创建文档失败：{data.get('msg')}（请确认应用已开通「云文档」读写权限）")
+    doc_id = data["data"]["document"]["document_id"]
+    cfg.setdefault("feishu", {})
+    cfg["feishu"]["doc_id"] = doc_id
+    save_config(cfg)
+    return doc_id
+
+
+def _note_to_md(note: dict) -> str:
+    t = datetime.fromtimestamp(note["ts"] / 1000).strftime("%Y-%m-%d %H:%M")
+    head = f"### {t}" + (f" · {note['symbol']}" if note.get("symbol") else "") + (f" · {note['tags']}" if note.get("tags") else "")
+    return head + "\n" + note["content"] + "\n"
+
+
+@app.post("/api/notes/feishu-sync")
+async def notes_feishu_sync(note_id: str = "", all_unsynced: bool = True):
+    """同步心得到飞书云文档：单条（note_id）或全部未同步（all_unsynced）"""
+    notes = _load_notes()
+    targets = [n for n in notes if n["id"] == note_id] if note_id else \
+              [n for n in notes if not n.get("synced") and (all_unsynced or n["id"] == note_id)]
+    if not targets:
+        return {"ok": True, "synced": 0, "msg": "没有待同步的心得"}
+
+    doc_id = await _feishu_ensure_doc()
+    blocks = []
+    for n in targets:
+        blocks.extend(_md_to_feishu_blocks(_note_to_md(n)))
+    try:
+        await _feishu_append(doc_id, blocks)
+    except HTTPException as e:
+        # 块结构不被接受时降级为纯文本块（分段）重试一次
+        plain = "\n".join(_note_to_md(n) for n in targets)
+        plain_blocks = [
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": plain[i:i + 900], "text_element_style": {}}}], "style": {}}}
+            for i in range(0, len(plain), 900)
+        ]
+        try:
+            await _feishu_append(doc_id, plain_blocks)
+        except Exception:
+            raise e
+    ids = {n["id"] for n in targets}
+    for n in notes:
+        if n["id"] in ids:
+            n["synced"] = True
+    _save_notes(notes)
+    return {"ok": True, "synced": len(targets), "doc_id": doc_id}
+
+
+class FeishuCfgIn(BaseModel):
+    app_id: str = ""
+    app_secret: str = ""
+    doc_title: str = "期货交易心得"
+    clear: bool = False
+
+
+@app.post("/api/feishu/config")
+async def set_feishu_config(body: FeishuCfgIn):
+    cfg = load_config()
+    fs = cfg.setdefault("feishu", {})
+    if body.clear:
+        cfg["feishu"] = {}
+        save_config(cfg)
+        return {"ok": True}
+    if body.app_id.strip():
+        fs["app_id"] = body.app_id.strip()
+    if body.app_secret.strip():
+        fs["app_secret"] = body.app_secret.strip()
+    if body.doc_title.strip():
+        fs["doc_title"] = body.doc_title.strip()
+    # 凭证变更后重建文档关联
+    if body.app_id.strip() or body.app_secret.strip():
+        fs.pop("doc_id", None)
+    save_config(cfg)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- 主题要闻

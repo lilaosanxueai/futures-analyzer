@@ -892,6 +892,115 @@ $("monitorList").addEventListener("click", (e) => {
   }
 });
 
+/* ---------- 交易心得（本地记录 + 飞书云文档同步） ---------- */
+
+const notesState = { items: [], symMode: null };  // symMode: null=不限, "sel"=当前选中合约
+
+async function loadNotes() {
+  try {
+    const d = await api("/api/notes");
+    notesState.items = d.items || [];
+    renderNotes();
+  } catch (e) {
+    $("notesList").innerHTML = `<div class="muted small monitor-hint">心得加载失败：${e.message}</div>`;
+  }
+}
+
+function renderNotes() {
+  const list = $("notesList");
+  const items = notesState.items;
+  if (!items.length) {
+    list.innerHTML = `<div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>`;
+    return;
+  }
+  list.innerHTML = items.map((n) => {
+    const t = new Date(n.ts);
+    const dt = `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+    return `<div class="note-item" data-id="${n.id}">
+      <div class="note-head">
+        <span class="note-time">${dt}</span>
+        ${n.symbol ? `<span class="note-sym">${n.symbol}</span>` : ""}
+        ${n.tags ? `<span class="note-tag">#${n.tags}</span>` : ""}
+        ${n.synced ? `<span class="note-synced">☁已同步</span>` : ""}
+        <span class="note-ops">
+          ${n.synced ? "" : `<button data-sync="${n.id}" title="同步这条到飞书">☁</button>`}
+          <button data-del="${n.id}" title="删除">✕</button>
+        </span>
+      </div>
+      <div class="note-body"></div>
+    </div>`;
+  }).join("");
+  // 内容用 textNode 填充避免 XSS
+  list.querySelectorAll(".note-item").forEach((el) => {
+    const n = items.find((x) => x.id === el.dataset.id);
+    el.querySelector(".note-body").textContent = n ? n.content : "";
+  });
+}
+
+async function addNote() {
+  const input = $("noteInput");
+  const text = input.value.trim();
+  if (!text) return;
+  // 解析 #标签 和 @合约
+  let symbol = notesState.symMode === "sel" ? (state.selected || "") : "";
+  let tags = "";
+  let content = text;
+  const tagM = content.match(/#([^\s#]+)/);
+  if (tagM) { tags = tagM[1]; content = content.replace(tagM[0], "").trim(); }
+  const symM = content.match(/@([A-Za-z]{1,3}\d{0,2})/);
+  if (symM) { symbol = symM[1].toUpperCase(); content = content.replace(symM[0], "").trim(); }
+  try {
+    await api("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, symbol, tags }),
+    });
+    input.value = "";
+    loadNotes();
+    toast("心得已保存");
+  } catch (e) {
+    toast(`保存失败：${e.message}`, true);
+  }
+}
+
+async function syncNotes(noteId = "") {
+  try {
+    const d = await api(`/api/notes/feishu-sync${noteId ? `?note_id=${noteId}` : ""}`, { method: "POST" });
+    if (d.synced) {
+      toast(`☁ 已同步 ${d.synced} 条心得到飞书`);
+      loadNotes();
+    } else {
+      toast(d.msg || "没有待同步的心得");
+    }
+  } catch (e) {
+    toast(`飞书同步失败：${e.message}`, true);
+  }
+}
+
+$("btnNoteAdd").addEventListener("click", addNote);
+$("noteInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !e.shiftKey)) addNote();
+});
+$("btnNoteSync").addEventListener("click", () => syncNotes());
+$("noteSym").addEventListener("click", () => {
+  notesState.symMode = notesState.symMode === "sel" ? null : "sel";
+  updateNoteSymChip();
+});
+function updateNoteSymChip() {
+  const chip = $("noteSym");
+  chip.textContent = notesState.symMode === "sel" ? (state.selected || "选中") : "不限";
+  chip.title = notesState.symMode === "sel" ? "新心得将关联当前选中合约（点击切换）" : "新心得不关联合约（点击切换为关联选中合约）";
+}
+$("notesList").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    api(`/api/notes/${del.dataset.del}`, { method: "DELETE" }).then(loadNotes).catch(() => {});
+    return;
+  }
+  const sync = e.target.closest("[data-sync]");
+  if (sync) syncNotes(sync.dataset.sync);
+});
+
 /* ---------- 主题要闻（原油/黄金 + 美伊冲突） ---------- */
 
 const newsState = { seen: new Set(), loaded: false, topics: {}, geopolSeen: new Set() };
@@ -983,7 +1092,10 @@ document.querySelectorAll(".mon-tab").forEach((btn) => {
     $("monitorList").classList.toggle("hidden", tab !== "monitor");
     $("newsList").classList.toggle("hidden", tab !== "news");
     $("geopolList").classList.toggle("hidden", tab !== "geopol");
+    $("notesWrap").classList.toggle("hidden", tab !== "notes");
     if (tab !== "monitor" && !newsState.loaded) pollNews();
+    if (tab === "notes" && !notesState.items.length) loadNotes();
+    if (tab === "notes") updateNoteSymChip();
   });
 });
 
@@ -1409,6 +1521,9 @@ async function loadAiConfig() {
       $("keyStatus").textContent =
         `Key 状态 — 智谱：${cfg.keys_status.zhipu ? "✓ 已保存" : "✗ 未保存"}　DeepSeek：${cfg.keys_status.deepseek ? "✓ 已保存" : "✗ 未保存"}`;
     }
+    if (typeof cfg.feishu_configured !== "undefined") {
+      $("feishuStatus").textContent = `飞书同步：${cfg.feishu_configured ? "✓ 已配置，心得可云端同步" : "未配置（不影响本地记录）"}`;
+    }
   } catch (e) {
     $("aiBadge").textContent = "配置加载失败";
   }
@@ -1454,6 +1569,17 @@ $("btnSaveSettings").addEventListener("click", async () => {
         sensitivity: parseFloat($("cfgSens").value) || 1,
       }),
     });
+    await api("/api/feishu/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        app_id: $("cfgFeishuId").value.trim(),
+        app_secret: $("cfgFeishuSecret").value.trim(),
+        doc_title: $("cfgFeishuTitle").value.trim() || "期货交易心得",
+      }),
+    });
+    $("cfgFeishuId").value = "";
+    $("cfgFeishuSecret").value = "";
     $("cfgApiKey").value = "";
     $("cfgStatus").textContent = "已保存 ✓";
     await loadAiConfig();
@@ -1566,9 +1692,10 @@ function initSplitters() {
   loadAiConfig();
   pollMonitor();
   pollNews();
-  // 支持 ?tab=compare 直链对比页 / ?report=1 直开晨报
+  // 支持 ?tab=compare 直链对比页 / ?report=1 直开晨报 / ?tab=notes 直开心得
   const params = new URLSearchParams(location.search);
   if (params.get("tab") === "compare") document.querySelector('[data-dtab="compare"]').click();
+  if (params.get("tab") === "notes") document.querySelector('.mon-tab[data-tab="notes"]').click();
   if (params.get("report") === "1") $("btnReport").click();
   await doRefresh();
   state.polling = setInterval(doRefresh, 5000);

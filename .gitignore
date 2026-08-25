@@ -1,4 +1,5 @@
 config.json
 morning_report.json
+notes.json
 __pycache__/
 *.pyc
