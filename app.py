@@ -1425,7 +1425,76 @@ NEWS_TOPICS = {
 }
 
 _news_cache: dict = {"ts": 0.0, "items": []}
+_news_ai: dict = {"ts": 0.0, "running": False, "tags": {}}  # AI 筛选结果：{过滤后索引: 类别}
 NEWS_TTL = 120.0
+NEWS_AI_TTL = 300.0   # AI 筛选结果缓存 5 分钟
+NEWS_AI_LIMIT = 60    # 只筛最新 60 条
+
+_AI_FILTER_PROMPT = """你是国内期货资讯筛选器，判定标准严格。下面是财经快讯（已去除股市行情与公司财报类噪音）。请判断每条是否与【国内期货交易】直接相关：
+【判定为相关】：直接涉及期货品种的供需/价格/库存/产量（如 OPEC、EIA、USDA、港口库存、开工率）、宏观货币政策直接影响资产定价（央行/利率决议/通胀/非农/美元指数）、地缘冲突直接冲击商品供给或避险（战争/制裁/袭击产油设施/霍尔木兹）。
+【判定为不相关】：政府机构一般动态、公司融资/人事/股权变动、科技产品、社会民生、文体、医疗、教育、旅游、他国国内政治、间接沾边的泛产业新闻。拿不准的一律判不相关。
+输出严格 JSON 数组，只列出【相关】的条目，每个元素形如 {"i": 序号, "tag": "类别"}，tag 从以下选一个：原油/能源、贵金属、黑色金属、农产品、化工、油脂、宏观利率、美元、地缘、产业数据、天气。不要输出任何其它文字。
+
+条目列表：
+"""
+
+
+async def _ai_filter_news(items: list) -> dict:
+    """批量调用 AI 判定相关性，返回 {索引: 类别}；失败自动对半重试，最终失败降级"""
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    tags: dict = {}
+    cfg = load_config()
+    if not cfg["api_keys"].get(cfg["provider"]):
+        return tags
+
+    async def ask_chunk(base: int, chunk: list) -> None:
+        lines = [
+            f"{i}. {(it.get('title') or '')[:70]} {(it.get('summary') or '')[:80]}".replace("\n", " ")
+            for i, it in enumerate(chunk)
+        ]
+        raw = await _call_ai_simple(
+            [{"role": "user", "content": _AI_FILTER_PROMPT + "\n".join(lines)}],
+            max_tokens=min(8192, max_output_for(cfg["model"] or "")),
+        )
+        arr = json.loads(raw[raw.find("["): raw.rfind("]") + 1])
+        for item in arr:
+            if isinstance(item, dict) and "i" in item:
+                idx = base + int(item["i"])
+                if 0 <= idx < len(items):
+                    tags[idx] = str(item.get("tag", ""))[:8]
+
+    async def ask_with_retry(base: int, chunk: list, depth: int = 0) -> None:
+        try:
+            await ask_chunk(base, chunk)
+        except Exception as e:
+            # 推理模型偶发输出超限：对半拆分重试（最小 3 条）
+            if depth < 2 and len(chunk) > 3:
+                logger.info(f"[ai-news] 块 {base} 失败（{type(e).__name__}），对半重试")
+                mid = len(chunk) // 2
+                await ask_with_retry(base, chunk[:mid], depth + 1)
+                await ask_with_retry(base + mid, chunk[mid:], depth + 1)
+            else:
+                logger.info(f"[ai-news] 块 {base} 放弃：{type(e).__name__} {str(e)[:60]}")
+
+    chunk_size = 10
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start:start + chunk_size]
+        await ask_with_retry(start, chunk)
+    logger.info(f"[ai-news] 全部完成：相关 {len(tags)} 条")
+    return tags
+
+
+async def _ai_filter_job():
+    _news_ai["running"] = True
+    try:
+        items = _news_cache["items"][:NEWS_AI_LIMIT]
+        _news_ai["tags"] = await _ai_filter_news(items)
+        _news_ai["ts"] = asyncio.get_event_loop().time()
+    except Exception:
+        pass
+    finally:
+        _news_ai["running"] = False
 
 
 # 股市噪音词：命中即剔除（只保留与期货相关的大宗/能源/贵金属/宏观资讯）
@@ -1434,6 +1503,9 @@ _STOCK_NOISE_KW = [
     "韩股", "日经", "欧股", "沪指", "深指", "创业板", "科创板", "北交所", "恒生",
     "涨停", "跌停", "财报", "营收", "净利润", "ipo", "股份回购", "市值", "科技股",
     "芯片股", "ai芯片", "两市", "成交额", "目标价", "重申", "公告称", "评级",
+    "基金", "券商", "业绩", "季报", "年报", "增持", "减持", "上市公司", "游资",
+    "家电", "游戏", "流水", "服务器", "晶圆", "pcbs", "存储芯片", "半导体设备",
+    "银行股", "保险股", "券商股", "龙头股", "概念股", "题材股", "翻倍", "套牢",
 ]
 
 
@@ -1499,7 +1571,22 @@ async def news(topic: str = ""):
     result_items = _news_cache["items"]
     if topic in NEWS_TOPICS:
         result_items = [it for it in result_items if topic in it["topics"]]
-    return {"ok": True, "items": result_items, "topics": NEWS_TOPICS}
+
+    # AI 语义筛选状态：首次请求时异步触发，前端轮询拿到 ready
+    ai_stale = loop_now - _news_ai["ts"] > NEWS_AI_TTL
+    if ai_stale and not _news_ai["running"]:
+        _news_ai["tags"] = {}
+        asyncio.create_task(_ai_filter_job())
+    ai_tags = _news_ai["tags"] if not ai_stale else {}
+    return {
+        "ok": True,
+        "items": result_items,
+        "topics": NEWS_TOPICS,
+        "ai": {
+            "status": "ready" if ai_tags else ("filtering" if _news_ai["running"] else "off"),
+            "tags": {str(k): v for k, v in ai_tags.items()},
+        },
+    }
 
 
 # ---------------------------------------------------------------- AI 晨报

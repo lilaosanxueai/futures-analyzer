@@ -1017,7 +1017,7 @@ $("notesList").addEventListener("click", (e) => {
 
 const newsState = {
   seen: new Set(), geopolSeen: new Set(), loaded: false,
-  topics: {}, all: [],
+  topics: {}, all: [], aiTags: {}, aiStatus: "off",
   filter: localStorage.getItem("fa_news_filter") || "all",
 };
 
@@ -1041,25 +1041,46 @@ function renderNewsView() {
   let items = newsState.all.filter((it) =>
     newsState.filter === "all" ? true : (it.topics || []).includes(newsState.filter)
   );
+  // AI 语义筛选：ready 后只显示 AI 判定相关的条目
+  if (newsState.aiStatus === "ready" && newsState.filter === "all") {
+    items = items.filter((_, idx) => newsState.aiTags[idx] !== undefined);
+  }
   // 主题命中的（原油黄金/美伊等期货相关）优先展示
   items = [...items].sort((a, b) => ((b.topics || []).length) - ((a.topics || []).length));
   if (!items.length) {
-    list.innerHTML = `<div class="muted small monitor-hint">该主题暂无条目（数据源每 2 分钟更新）</div>`;
+    list.innerHTML = `<div class="muted small monitor-hint">${newsState.aiStatus === "filtering" ? "AI 正在智能筛选中，请稍候…" : "该主题暂无条目（数据源每 2 分钟更新）"}</div>`;
     return;
   }
   list.innerHTML = items
-    .map((it) => {
+    .map((it, idx) => {
       const hm = it.time ? it.time.slice(11, 16) : "";
       const day = it.time ? it.time.slice(5, 10) : "";
+      const aiTag = newsState.aiTags[idx] ? `<span class="ai-tag">${newsState.aiTags[idx]}</span>` : "";
       const body = it.link
         ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</a>`
         : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</span>`;
       const tags = (it.topics || []).map((t) => t === "usiran" ? "⚔️" : t === "oilgold" ? "🛢" : "").join(" ");
       return `<div class="news-item${(it.topics || []).length ? " matched" : ""}">
-        <span class="news-time">${day} ${hm}</span>${body}<span class="news-src">${tags} ${it.source}</span>
+        <span class="news-time">${day} ${hm}</span>${aiTag}${body}<span class="news-src">${tags} ${it.source}</span>
       </div>`;
     })
     .join("");
+}
+
+function updateAiBadge() {
+  const badge = $("aiFilterBadge");
+  if (!badge) return;
+  const count = Object.keys(newsState.aiTags).length;
+  if (newsState.aiStatus === "ready") {
+    badge.textContent = `🤖 AI 已筛选 ${count} 条相关`;
+    badge.className = "ai-filter-badge ready";
+  } else if (newsState.aiStatus === "filtering") {
+    badge.textContent = "🤖 AI 筛选中…";
+    badge.className = "ai-filter-badge filtering";
+  } else {
+    badge.textContent = "🤖 AI 筛选不可用（未配 Key）";
+    badge.className = "ai-filter-badge";
+  }
 }
 
 async function pollNews() {
@@ -1067,6 +1088,9 @@ async function pollNews() {
     const d = await api("/api/news");
     newsState.topics = d.topics || {};
     newsState.all = d.items || [];
+    newsState.aiStatus = (d.ai && d.ai.status) || "off";
+    newsState.aiTags = (d.ai && d.ai.tags) || {};
+    updateAiBadge();
     if (!newsState.all.length) return;
 
     // 新命中条目提醒（首次加载静默；两类主题分别去重）
