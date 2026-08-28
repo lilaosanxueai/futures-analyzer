@@ -16,6 +16,7 @@ const state = {
   ticks: { sym: null, points: [] },   // 实时走势：本次会话对选中合约的 5 秒采样
   refreshCount: 0,  // 轮询计数（分时图自动刷新节流）
   klinePeriod: "day",                 // K线周期
+  annotMode: null,                    // 分时图标注模式：bull/bear/risk/level/note
   candidates: [],    // 合约候选（含拼音）
   dropHits: [],      // 搜索下拉当前匹配项
   dropIndex: -1,     // 搜索下拉键盘高亮索引
@@ -404,6 +405,16 @@ async function renderAnalysisArea() {
         <span><i class="legend-dot" style="background:#f5c542"></i>价格</span>
         <span><i class="legend-dot" style="background:#7aa2f7"></i>均价</span>
         <span id="intradayDate" class="muted"></span>
+        <span class="annot-bar">
+          <button class="annot-btn" data-annot="bull" title="标注多头判定">📈多</button>
+          <button class="annot-btn" data-annot="bear" title="标注空头判定">📉空</button>
+          <button class="annot-btn" data-annot="risk" title="标注风险点">⚠️</button>
+          <button class="annot-btn" data-annot="level" title="画关键价位线（支撑/压力/止损）">📏</button>
+          <button class="annot-btn" data-annot="note" title="文字批注（趋势推理）">📝</button>
+          <button class="annot-btn" data-annot-clear="1" title="清除当日全部标注">🧹</button>
+          <button class="annot-btn" id="btnAnnotAi" title="把标注交给 AI 逐条评估并给独立推演">🤖评估</button>
+          <button class="annot-btn" id="btnAnnotNote" title="把标注保存为一条交易心得">💾</button>
+        </span>
       </div>
       <div id="intradayChart"><span class="muted small">分时加载中…</span></div>
     </div>
@@ -665,8 +676,181 @@ function bindKlineHover(el) {
   };
 }
 
+/* ---------- 日内走势图形标注 ---------- */
+
+const ANNOT_INFO = {
+  bull: { label: "📈多", color: "#f34e4e" },
+  bear: { label: "📉空", color: "#22c55e" },
+  risk: { label: "⚠风险", color: "#f5a623" },
+  level: { label: "📏价位", color: "#7aa2f7" },
+  note: { label: "📝批注", color: "#ffffff" },
+};
+
+function annotStore() { return JSON.parse(localStorage.getItem("fa_annot") || "{}"); }
+function saveAnnotStore(s) { localStorage.setItem("fa_annot", JSON.stringify(s)); }
+function getAnnots(sym, date) { return (annotStore()[sym] || {})[date] || []; }
+function addAnnot(sym, date, a) {
+  const s = annotStore();
+  (s[sym] = s[sym] || {});
+  (s[sym][date] = s[sym][date] || []);
+  s[sym][date].push(a);
+  saveAnnotStore(s);
+}
+function delAnnot(sym, date, id) {
+  const s = annotStore();
+  if (s[sym] && s[sym][date]) {
+    s[sym][date] = s[sym][date].filter((a) => a.id !== id);
+    saveAnnotStore(s);
+  }
+}
+function clearAnnots(sym, date) {
+  const s = annotStore();
+  if (s[sym]) { delete s[sym][date]; saveAnnotStore(s); }
+}
+
+function annotFmtList(anns) {
+  return anns.map((a) => {
+    const info = ANNOT_INFO[a.type] || {};
+    return `${a.time} ${info.label || a.type} @${a.price}${a.text ? `「${a.text}」` : ""}`;
+  });
+}
+
+function drawAnnotations(el) {
+  const scale = el._iscale;
+  const svg = el.querySelector("svg");
+  if (!svg || !scale || !scale.date || !state.selected) return;
+  const old = svg.querySelector("#annotLayer");
+  if (old) old.remove();
+  const annots = getAnnots(state.selected, scale.date);
+  if (!annots.length) return;
+  const NS = "http://www.w3.org/2000/svg";
+  const layer = document.createElementNS(NS, "g");
+  layer.id = "annotLayer";
+
+  for (const a of annots) {
+    const info = ANNOT_INFO[a.type] || ANNOT_INFO.note;
+    const g = document.createElementNS(NS, "g");
+    g.dataset.annotId = a.id;
+    g.style.cursor = "pointer";
+    g.setAttribute("opacity", "0.95");
+    let shape = "";
+    if (a.type === "level") {
+      const y = scale.yOfPrice(a.price);
+      shape = `<line x1="${scale.padL}" y1="${y.toFixed(1)}" x2="${scale.padR}" y2="${y.toFixed(1)}" stroke="${info.color}" stroke-width="1.2" stroke-dasharray="6 4"/>
+        <rect x="${(scale.padR - 86).toFixed(1)}" y="${(y - 8).toFixed(1)}" width="88" height="16" rx="3" fill="${info.color}" opacity="0.9"/>
+        <text x="${(scale.padR - 82).toFixed(1)}" y="${(y + 4).toFixed(1)}" font-size="10" fill="#0d1117" font-weight="600">${a.price}${a.text ? ` ${a.text.slice(0, 5)}` : ""}</text>`;
+    } else {
+      const x = scale.xOfTime(a.time), y = scale.yOfPrice(a.price);
+      if (a.type === "bull") shape = `<path d="M ${x} ${(y - 7).toFixed(1)} L ${(x - 5).toFixed(1)} ${(y + 4).toFixed(1)} L ${(x + 5).toFixed(1)} ${(y + 4).toFixed(1)} Z" fill="${info.color}"/>`;
+      else if (a.type === "bear") shape = `<path d="M ${x} ${(y + 7).toFixed(1)} L ${(x - 5).toFixed(1)} ${(y - 4).toFixed(1)} L ${(x + 5).toFixed(1)} ${(y - 4).toFixed(1)} Z" fill="${info.color}"/>`;
+      else if (a.type === "risk") shape = `<rect x="${(x - 4.5).toFixed(1)}" y="${(y - 4.5).toFixed(1)}" width="9" height="9" fill="${info.color}" transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})"/>`;
+      else shape = `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="#f5a623"/>`;
+      if (a.text) {
+        shape += `<rect x="${(x + 7).toFixed(1)}" y="${(y - 16).toFixed(1)}" width="${Math.min(a.text.length * 11 + 8, 150)}" height="17" rx="3" fill="rgba(13,17,23,.92)" stroke="${info.color}" stroke-width="0.6"/>
+          <text x="${(x + 11).toFixed(1)}" y="${(y - 4).toFixed(1)}" font-size="10" fill="${info.color}">${a.text.slice(0, 13)}</text>`;
+      }
+    }
+    g.innerHTML = shape + `<title>${a.time} ${info.label} ${a.price}${a.text ? `：${a.text}` : ""}（双击删除）</title>`;
+    layer.appendChild(g);
+  }
+  svg.appendChild(layer);
+}
+
+function bindIntradayAnnot(el) {
+  el.onclick = (ev) => {
+    const mode = state.annotMode;
+    const scale = el._iscale;
+    if (!mode || !scale || !state.selected) return;
+    const svg = el.querySelector("svg");
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+    const time = scale.timeOfX(sx), price = scale.priceOfY(sy);
+    if (!time || price == null) return;
+    const a = { id: `a${Date.now()}`, type: mode, time, price: Math.round(price * 10) / 10, ts: Date.now() };
+    if (mode === "note" || mode === "level" || mode === "risk") {
+      const hint = { note: "批注内容（走势推理/风险描述）", level: "价位含义（如：压力/支撑/止损）", risk: "风险描述（可留空）" }[mode];
+      const text = prompt(`${ANNOT_INFO[mode].label} · ${hint}：`, "");
+      if (mode === "note" && !text) return;
+      if (text) a.text = text.slice(0, 30);
+    }
+    addAnnot(state.selected, scale.date, a);
+    drawAnnotations(el);
+    toast(`已标注 ${ANNOT_INFO[mode].label} @${a.price}`);
+  };
+  el.ondblclick = (ev) => {
+    const g = ev.target.closest("[data-annot-id]");
+    const scale = el._iscale;
+    if (g && scale && state.selected) {
+      delAnnot(state.selected, scale.date, g.dataset.annotId);
+      drawAnnotations(el);
+      toast("标注已删除");
+    }
+  };
+}
+
+function syncAnnotButtons() {
+  document.querySelectorAll(".annot-btn[data-annot]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.annot === state.annotMode);
+  });
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".annot-btn");
+  if (!b) return;
+  if (b.dataset.annot) {
+    state.annotMode = state.annotMode === b.dataset.annot ? null : b.dataset.annot;
+    syncAnnotButtons();
+    if (state.annotMode) toast(`标注模式：${ANNOT_INFO[state.annotMode].label}，点击分时图放置（双击标注可删除）`);
+  } else if (b.dataset.annotClear) {
+    const el = $("intradayChart"), scale = el && el._iscale;
+    if (scale && state.selected && getAnnots(state.selected, scale.date).length) {
+      clearAnnots(state.selected, scale.date);
+      drawAnnotations(el);
+      toast("已清除当日标注");
+    } else toast("当日暂无标注");
+  } else if (b.id === "btnAnnotAi") {
+    aiEvalAnnotations();
+  } else if (b.id === "btnAnnotNote") {
+    saveAnnotationsAsNote();
+  }
+});
+
+async function aiEvalAnnotations() {
+  const el = $("intradayChart"), scale = el && el._iscale;
+  if (!scale || !state.selected) return toast("请先在合约详情页加载分时图", true);
+  const anns = getAnnots(state.selected, scale.date);
+  if (!anns.length) return toast("暂无标注，先在分时图上做标注", true);
+  switchView("work");
+  sendChat(`我在 ${state.selected}（${state.names[state.selected] || ""}）今日（${scale.date}）分时图上做了如下手工标注：\n${annotFmtList(anns).join("\n")}\n\n请：1) 逐条评估我的每个判定（依据是否充分、与量价结构是否一致）；2) 指出标注间的冲突或强化关系（如多头判定与风险位的关系）；3) 给出你基于当前盘面的独立趋势推演（方向、关键触发价位、失效条件），并说明与我的标注的分歧点。`);
+}
+
+async function saveAnnotationsAsNote() {
+  const el = $("intradayChart"), scale = el && el._iscale;
+  if (!scale || !state.selected) return toast("请先在合约详情页加载分时图", true);
+  const anns = getAnnots(state.selected, scale.date);
+  if (!anns.length) return toast("暂无标注", true);
+  try {
+    await api("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: `${state.selected} ${scale.date} 图形标注`,
+        content: annotFmtList(anns).join("\n"),
+        symbol: state.selected,
+        tags: "图形标注",
+        date: scale.date,
+      }),
+    });
+    toast("标注已保存到交易心得");
+    if (notesState.items.length) loadNotes();
+  } catch (e) {
+    toast(`保存失败：${e.message}`, true);
+  }
+}
+
 /* 日内分时图：价格线 + 均价线 + 昨结基准虚线 + 最新点 + 时间刻度 */
-function renderIntradayChart(el, items, prevSettle) {
+function renderIntradayChart(el, items, prevSettle, date) {
   const w = el.clientWidth || 560, h = 140, padT = 8, padB = 16, padX = 8;
   const prices = items.map((it) => it.price).filter((p) => p != null);
   if (prices.length < 2) { el.textContent = "暂无分时数据"; return; }
@@ -700,6 +884,28 @@ function renderIntradayChart(el, items, prevSettle) {
     <text x="${(x(n - 1) - 5).toFixed(1)}" y="${y(last.price) - 6}" fill="${dotColor}" font-size="10" text-anchor="end">${last.price}</text>
     ${tickEls}
   </svg>`;
+  // 标注坐标系（数据坐标存储，图重绘后位置不丢）+ 标注层 + 点击放置
+  el._iscale = {
+    date,
+    padL: padX,
+    padR: w - padX,
+    xOfTime: (t) => {
+      const i = items.findIndex((it) => it.time === t);
+      return i < 0 ? padX : x(i);
+    },
+    yOfPrice: y,
+    timeOfX: (sx) => {
+      if (sx < padX - 4 || sx > w - padX + 4) return null;
+      const i = Math.max(0, Math.min(n - 1, Math.round(((sx - padX) / (w - padX * 2)) * Math.max(1, n - 1))));
+      return items[i].time;
+    },
+    priceOfY: (sy) => {
+      if (sy < padT - 4 || sy > h - padB + 4) return null;
+      return min + (1 - (sy - padT) / (h - padT - padB)) * (max - min);
+    },
+  };
+  drawAnnotations(el);
+  bindIntradayAnnot(el);
 }
 
 async function loadIntraday(sym) {
@@ -710,7 +916,14 @@ async function loadIntraday(sym) {
     if (dateEl) dateEl.textContent = `（${data.date}）`;
     if (!el) return;
     if (!data.items.length) { el.textContent = "暂无分时数据"; return; }
-    renderIntradayChart(el, data.items, state.quotes[sym]?.prev_settle);
+    // 自测钩子：?annot_test=1 时生成示例标注（也用于回归验证标注渲染）
+    if (new URLSearchParams(location.search).get("annot_test") === "1" && !getAnnots(sym, data.date).length) {
+      const p = data.items[Math.floor(data.items.length * 0.3)];
+      addAnnot(sym, data.date, { id: "test1", type: "bull", time: p.time, price: p.price, ts: Date.now() });
+      addAnnot(sym, data.date, { id: "test2", type: "level", time: p.time, price: +(p.price * 1.004).toFixed(1), text: "压力", ts: Date.now() + 1 });
+      addAnnot(sym, data.date, { id: "test3", type: "note", time: p.time, price: +(p.price * 0.996).toFixed(1), text: "示例批注", ts: Date.now() + 2 });
+    }
+    renderIntradayChart(el, data.items, state.quotes[sym]?.prev_settle, data.date);
   } catch (e) {
     const el = $("intradayChart");
     if (el) el.textContent = "分时数据加载失败";
@@ -1150,7 +1363,11 @@ function fillDetailSymOptions() {
 function switchView(name) {
   document.querySelectorAll(".view-tab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.dataset.view !== name));
-  history.replaceState(null, "", name === "work" ? location.pathname : `?view=${name}`);
+  // 只更新 view 参数，保留 annot_test/selftest 等其它参数
+  const params = new URLSearchParams(location.search);
+  if (name === "work") params.delete("view"); else params.set("view", name);
+  const qs = params.toString();
+  history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
   // 进入视图时按需初始化；图表按切换后的实际宽度重绘（隐藏容器 clientWidth=0 不能绘图）
   if (name === "detail") {
     fillDetailSymOptions();

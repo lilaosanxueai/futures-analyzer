@@ -567,5 +567,12 @@ input:focus, select:focus { border-color: var(--primary); }
 
 /* ---------- 分时图 ---------- */
 .intraday-wrap { margin-top: 14px; }
-.intraday-legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.intraday-legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); margin-bottom: 4px; flex-wrap: wrap; align-items: center; }
+.annot-bar { display: inline-flex; gap: 3px; margin-left: auto; }
+.annot-btn {
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+  font-size: 11px; padding: 1px 7px; border-radius: 4px; cursor: pointer; line-height: 1.6;
+}
+.annot-btn:hover { color: var(--text); border-color: var(--muted); }
+.annot-btn.active { background: rgba(245, 166, 35, .15); color: var(--accent); border-color: var(--accent); }
 .legend-dot { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 4px; }
