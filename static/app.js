@@ -1619,7 +1619,7 @@ $("settingsModal").addEventListener("click", (e) => {
   if (e.target === $("settingsModal")) $("settingsModal").classList.add("hidden");
 });
 
-const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-chat" };
+const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-v4-flash-vision-exp" };
 $("cfgProvider").addEventListener("change", () => {
   $("cfgModel").value = DEFAULT_MODELS[$("cfgProvider").value] || "";
 });
