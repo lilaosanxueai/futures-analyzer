@@ -622,12 +622,26 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         except Exception:
             pass
 
-        # 消息面（品种相关要闻）
+        # 消息面（三层：品种产业/供需深研 + 金属行情快讯 + 全球要闻流）
+        try:
+            deep = await _variety_news_deep(symbol)
+            if deep:
+                lines = [f"- [{it['time'][5:16]}] {it['title']}（{it['source']}）" for it in deep]
+                parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻，近期待闻）】\n" + "\n".join(lines))
+        except Exception:
+            pass
+        try:
+            shm = await _shmet_news(symbol)
+            if shm:
+                lines = [f"- [{it['time']}] {it['title']}" for it in shm]
+                parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
+        except Exception:
+            pass
         try:
             vnews = _variety_news(symbol)
             if vnews:
                 lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
-                parts.append(f"【{symbol} 相关消息面（近期待闻）】\n" + "\n".join(lines))
+                parts.append(f"【{symbol} 全球宏观要闻（新浪/东财快讯流）】\n" + "\n".join(lines))
         except Exception:
             pass
 
@@ -819,9 +833,100 @@ def _variety_prefix(symbol: str) -> str:
     return m.group(1).upper() if m else ""
 
 
+# 品种搜索词（东财品种新闻 / SHMET 快讯过滤用）
+VARIETY_SEARCH = {
+    "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "JM": "焦煤", "J": "焦炭",
+    "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "NI": "沪镍", "SN": "沪锡", "SS": "不锈钢",
+    "AU": "黄金", "AG": "白银", "SC": "原油", "FU": "燃料油", "LU": "低硫燃料油", "NR": "20号胶", "RU": "橡胶",
+    "M": "豆粕", "RM": "菜粕", "Y": "豆油", "P": "棕榈油", "OI": "菜油", "A": "豆一", "B": "豆二",
+    "TA": "PTA", "MA": "甲醇", "EG": "乙二醇", "EB": "苯乙烯", "PP": "聚丙烯", "L": "塑料", "V": "PVC", "PG": "液化气",
+    "FG": "玻璃", "SA": "纯碱", "UR": "尿素", "C": "玉米", "CS": "玉米淀粉", "CF": "棉花", "SR": "白糖",
+    "JD": "鸡蛋", "LH": "生猪", "SP": "纸浆", "LC": "碳酸锂", "SI": "工业硅", "EC": "集运",
+    "IF": "沪深300", "IH": "上证50", "IC": "中证500", "IM": "中证1000", "T": "国债",
+}
+
+# SHMET 金属快讯对非金属品种的通用宏观过滤词
+_MACRO_KW = ["黄金", "金价", "原油", "油价", "美元", "美联储", "央行", "降息", "加息", "通胀",
+             "地缘", "伊朗", "中东", "霍尔木兹", "智利", "秘鲁", "新能源", "光伏", "环保", "关税", "贸易"]
+
+
+def _variety_search_word(symbol: str) -> str:
+    p = _variety_prefix(symbol)
+    if p in VARIETY_SEARCH:
+        return VARIETY_SEARCH[p]
+    # 兜底：从主连名称提取核心词（如"螺纹钢连续"→"螺纹钢"）
+    try:
+        name = asyncio.run(get_directory()).get(symbol, {}).get("name", "")
+        return name.replace("连续", "").replace("期货", "").strip() or p
+    except Exception:
+        return p
+
+
+# 缓存：品种深研（东财，10 分钟）+ SHMET 快讯（90 秒）
+_deep_news_cache: dict[str, tuple[float, list]] = {}
+_shmet_cache: dict = {"ts": 0.0, "items": []}
+DEEP_TTL = 600.0
+SHMET_TTL = 90.0
+
+
+async def _variety_news_deep(symbol: str, limit: int = 6) -> list[dict]:
+    """东财品种聚焦新闻：产业/供需/库存深度报道（期货日报等），10 分钟缓存"""
+    word = _variety_search_word(symbol)
+    loop_now = asyncio.get_event_loop().time()
+    cached = _deep_news_cache.get(word)
+    if cached and loop_now - cached[0] < DEEP_TTL:
+        return cached[1][:limit]
+    try:
+        df = await call_ak(ak.stock_news_em, symbol=word)
+        items = [
+            {
+                "time": str(r.get("发布时间", ""))[:16],
+                "title": str(r.get("新闻标题", ""))[:70],
+                "summary": str(r.get("新闻内容", ""))[:150],
+                "source": str(r.get("文章来源", "")),
+                "link": str(r.get("新闻链接", "")),
+            }
+            for r in df.to_dict("records")
+            if not _is_stock_noise(str(r.get("新闻标题", "")) + " " + str(r.get("新闻内容", ""))[:80])
+        ]
+        _deep_news_cache[word] = (loop_now, items)
+        return items[:limit]
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[deep-news] {word} 失败：{e}")
+        return []
+
+
+async def _shmet_news(symbol: str = "", limit: int = 6) -> list[dict]:
+    """SHMET 上海有色网金属快讯（秒级，覆盖金属+宏观地缘），90 秒缓存"""
+    loop_now = asyncio.get_event_loop().time()
+    if loop_now - _shmet_cache["ts"] > SHMET_TTL:
+        try:
+            df = await call_ak(ak.futures_news_shmet)
+            _shmet_cache["items"] = [
+                {"time": str(r.get("发布时间", ""))[5:16], "title": str(r.get("内容", ""))[:90]}
+                for r in df.to_dict("records")
+            ]
+            _shmet_cache["ts"] = loop_now
+        except Exception as e:
+            logging.getLogger("uvicorn.error").info(f"[shmet] 失败：{e}")
+            return []
+    items = _shmet_cache["items"]
+    if symbol:
+        p = _variety_prefix(symbol)
+        if p in ("CU", "AL", "ZN", "PB", "NI", "SN", "SS", "AU", "AG", "SC", "FU", "LU", "BR", "AO", "LC", "SI"):
+            return items[:limit]  # 金属/能源品种：快讯直接全给
+        # 其他品种：过滤出宏观/共性因子相关条目
+        hit = [it for it in items if any(k in it["title"] for k in _MACRO_KW)]
+        return hit[:limit]
+    return items[:limit]
+
+
 def _variety_profile(symbol: str) -> str:
     p = _variety_prefix(symbol)
     return VARIETY_PROFILE.get(p, "")
+
+
+
 
 
 def _variety_news(symbol: str, limit: int = 8) -> list[dict]:
