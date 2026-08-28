@@ -503,8 +503,8 @@ function renderTickChart() {
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/>
     <circle cx="${x(points.length - 1)}" cy="${y(lastP)}" r="2.5" fill="${color}"/>
     <text x="${w - pad}" y="${y(lastP) - 6}" fill="${color}" font-size="10" text-anchor="end">${lastP}</text>
-    <text x="${pad}" y="${h - 3}" fill="#8a93a6" font-size="9">近 ${durMin} 分钟（5 秒采样）</text>
-    <text x="${w - pad}" y="${h - 3}" fill="#8a93a6" font-size="9" text-anchor="end">高 ${max} / 低 ${min}</text>
+    <text x="${pad}" y="${h - 3}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9">近 ${durMin} 分钟（5 秒采样）</text>
+    <text x="${w - pad}" y="${h - 3}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9" text-anchor="end">高 ${max} / 低 ${min}</text>
   </svg>`;
 }
 
@@ -533,7 +533,7 @@ function renderLines(container, series, opts = {}) {
       return `<polyline points="${pts.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.4"/>`;
     })
     .join("");
-  const label = opts.minMax !== false ? `<text x="${pad}" y="11" fill="#8a93a6" font-size="10">${max}</text><text x="${pad}" y="${h - 5}" fill="#8a93a6" font-size="10">${min}</text>` : "";
+  const label = opts.minMax !== false ? `<text x="${pad}" y="11" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="10">${max}</text><text x="${pad}" y="${h - 5}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="10">${min}</text>` : "";
   container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${polylines}${label}</svg>`;
 }
 
@@ -584,8 +584,8 @@ function renderKlineChart(el, data) {
   for (let g = 0; g <= 3; g++) {
     const p = pmin + ((pmax - pmin) * g) / 3;
     const yy = yMain(p);
-    els.push(`<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${padL + plotW}" y2="${yy.toFixed(1)}" stroke="#232b3b" stroke-dasharray="2 4"/>`);
-    els.push(`<text x="${w - padR + 4}" y="${(yy + 3).toFixed(1)}" fill="#8a93a6" font-size="9">${fp(p)}</text>`);
+    els.push(`<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${padL + plotW}" y2="${yy.toFixed(1)}" stroke="#232b3b" style="stroke:var(--chart-grid)" stroke-dasharray="2 4"/>`);
+    els.push(`<text x="${w - padR + 4}" y="${(yy + 3).toFixed(1)}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9">${fp(p)}</text>`);
   }
   // 蜡烛与成交量
   items.forEach((it, i) => {
@@ -636,10 +636,10 @@ function renderKlineChart(el, data) {
   const tickIdx = [...new Set([0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1])];
   tickIdx.forEach((i) => {
     const label = data.period === "day" ? items[i].datetime.slice(5) : items[i].datetime.slice(5, 16);
-    els.push(`<text x="${cx(i).toFixed(1)}" y="${volBase + 12}" fill="#8a93a6" font-size="9" text-anchor="middle">${label}</text>`);
+    els.push(`<text x="${cx(i).toFixed(1)}" y="${volBase + 12}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9" text-anchor="middle">${label}</text>`);
   });
   // 十字光标竖线（预留，hover 时移动）
-  els.push(`<line id="kCross" x1="0" y1="${padT}" x2="0" y2="${volBase}" stroke="#8a93a6" stroke-dasharray="3 3" visibility="hidden"/>`);
+  els.push(`<line id="kCross" x1="0" y1="${padT}" x2="0" y2="${volBase}" stroke="#8a93a6" style="stroke:var(--chart-axis)" stroke-dasharray="3 3" visibility="hidden"/>`);
 
   const H = volBase + padB;
   el.innerHTML = `<svg viewBox="0 0 ${w} ${H}" width="${w}" height="${H}">${els.join("")}</svg>`;
@@ -870,12 +870,12 @@ function renderIntradayChart(el, items, prevSettle, date) {
   const last = items[n - 1];
   const dotColor = prevSettle ? (last.price >= prevSettle ? "var(--up)" : "var(--down)") : "#f5c542";
   const settleLine = prevSettle
-    ? `<line x1="${padX}" y1="${y(prevSettle)}" x2="${w - padX}" y2="${y(prevSettle)}" stroke="#8a93a6" stroke-width="1" stroke-dasharray="4 4"/>
-       <text x="${padX + 2}" y="${y(prevSettle) - 3}" fill="#8a93a6" font-size="9">昨结 ${prevSettle}</text>`
+    ? `<line x1="${padX}" y1="${y(prevSettle)}" x2="${w - padX}" y2="${y(prevSettle)}" stroke="#8a93a6" style="stroke:var(--chart-axis)" stroke-width="1" stroke-dasharray="4 4"/>
+       <text x="${padX + 2}" y="${y(prevSettle) - 3}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9">昨结 ${prevSettle}</text>`
     : "";
   const tickIdx = [...new Set([0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1])];
   const tickEls = tickIdx
-    .map((i) => `<text x="${x(i).toFixed(1)}" y="${h - 4}" fill="#8a93a6" font-size="9" text-anchor="middle">${items[i].time}</text>`)
+    .map((i) => `<text x="${x(i).toFixed(1)}" y="${h - 4}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9" text-anchor="middle">${items[i].time}</text>`)
     .join("");
   el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
     ${settleLine}
@@ -1590,6 +1590,53 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
   });
 });
 
+/* ---------- 皮肤系统 ---------- */
+
+const SKINS = [
+  { id: "dark",        name: "暗夜（默认）", desc: "经典深色",        colors: ["#0d1117", "#161b22", "#3b82f6"] },
+  { id: "light",       name: "晴空白",       desc: "清逸浅色",        colors: ["#f2f5f9", "#ffffff", "#2563eb"] },
+  { id: "glass-dark",  name: "玻璃 · 夜",    desc: "毛玻璃暗色",      colors: ["#0a0d18", "#2a3550", "#8b5cf6"] },
+  { id: "glass-light", name: "玻璃 · 昼",    desc: "毛玻璃浅色",      colors: ["#eef2fb", "#ffffff", "#38bdf8"] },
+  { id: "aurora",      name: "极光动态",     desc: "流动极光 + 玻璃", colors: ["#05070f", "#3b82f6", "#a855f7"] },
+  { id: "green",       name: "墨绿护眼",     desc: "低饱和绿调",      colors: ["#0f1a14", "#1b2c23", "#10b981"] },
+];
+
+function applySkin(id) {
+  if (!SKINS.some((s) => s.id === id)) id = "dark";
+  document.body.dataset.skin = id;
+  localStorage.setItem("fa_skin", id);
+  renderSkinList();
+  redrawCharts();
+}
+
+function renderSkinList() {
+  const cur = document.body.dataset.skin || "dark";
+  const el = $("skinList");
+  if (!el) return;
+  el.innerHTML = SKINS.map((s) => `
+    <button class="skin-card${s.id === cur ? " active" : ""}" data-skin="${s.id}">
+      <span class="skin-preview">${s.colors.map((c) => `<i style="background:${c}"></i>`).join("")}</span>
+      <span class="skin-name">${s.name}</span>
+      <span class="skin-desc">${s.desc}</span>
+    </button>`).join("");
+}
+
+$("btnSkin").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("skinPop").classList.toggle("hidden");
+  renderSkinList();
+});
+$("skinPop").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const card = e.target.closest("[data-skin]");
+  if (card) applySkin(card.dataset.skin);
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#skinPop") && !e.target.closest("#btnSkin")) {
+    $("skinPop").classList.add("hidden");
+  }
+});
+
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 
 const VIEW_ORDER = ["work", "detail", "compare", "news", "notes", "trades"];
@@ -1733,8 +1780,8 @@ function renderCompareChart(el, d) {
   for (let g = 0; g <= 3; g++) {
     const v = min + ((max - min) * g) / 3;
     const yy = y(v);
-    els.push(`<line x1="${padX}" y1="${yy.toFixed(1)}" x2="${padX + plotW}" y2="${yy.toFixed(1)}" stroke="#232b3b" stroke-dasharray="2 4"/>`);
-    els.push(`<text x="${w - padR + 4}" y="${(yy + 3).toFixed(1)}" fill="#8a93a6" font-size="9">${fp(v)}</text>`);
+    els.push(`<line x1="${padX}" y1="${yy.toFixed(1)}" x2="${padX + plotW}" y2="${yy.toFixed(1)}" stroke="#232b3b" style="stroke:var(--chart-grid)" stroke-dasharray="2 4"/>`);
+    els.push(`<text x="${w - padR + 4}" y="${(yy + 3).toFixed(1)}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9">${fp(v)}</text>`);
   }
   // 比价模式：均值/±1σ/±2σ 通道
   if (d.stats) {
@@ -1766,7 +1813,7 @@ function renderCompareChart(el, d) {
   // X 刻度
   const tickIdx = [...new Set([0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1])];
   tickIdx.forEach((i) => {
-    els.push(`<text x="${x(i).toFixed(1)}" y="${h - 4}" fill="#8a93a6" font-size="9" text-anchor="middle">${items[i].date.slice(5)}</text>`);
+    els.push(`<text x="${x(i).toFixed(1)}" y="${h - 4}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9" text-anchor="middle">${items[i].date.slice(5)}</text>`);
   });
   const legend = d.mode === "normalized"
     ? d.symbols.map((s, i) => `<span><i class="legend-dot" style="background:${colors[i % colors.length]}"></i>${s}</span>`).join("")
@@ -2249,6 +2296,8 @@ function initSplitters() {
 }
 
 (async function init() {
+  const skinParam = new URLSearchParams(location.search).get("skin");
+  applySkin(skinParam || localStorage.getItem("fa_skin") || "dark");
   restoreSplitterState();
   initSplitters();
   renderTable();

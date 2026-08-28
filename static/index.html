@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825j">
+<link rel="stylesheet" href="/static/style.css?v=0825l">
 </head>
 <body>
 
@@ -16,8 +16,9 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825j</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825l</span>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
+    <button id="btnSkin" class="btn ghost" title="切换皮肤">🎨</button>
     <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
 </header>
@@ -321,8 +322,14 @@
   </div>
 </div>
 
+<!-- 皮肤选择弹层 -->
+<div id="skinPop" class="skin-pop hidden">
+  <div class="skin-pop-title">🎨 皮肤风格 <span class="muted small">点击即切换</span></div>
+  <div id="skinList" class="skin-list"></div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825j"></script>
+<script src="/static/app.js?v=0825l"></script>
 </body>
 </html>
