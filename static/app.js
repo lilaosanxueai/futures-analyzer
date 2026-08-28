@@ -148,6 +148,7 @@ async function doRefresh() {
     checkAlarms();
     renderTable();
     renderMarketStatus(data.market_open);
+    setDocTitle();
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
     recordTick();
     if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
@@ -422,8 +423,13 @@ async function renderAnalysisArea() {
     <div class="kline-wrap">
       <div class="kline-head">
         <span class="kline-title">K 线 · <span class="muted">MA5 <i class="legend-dot" style="background:#ffffff"></i> MA10 <i class="legend-dot" style="background:#f5c542"></i> MA20 <i class="legend-dot" style="background:#c084fc"></i></span></span>
-        <div class="period-tabs" id="periodTabs">
-          ${Object.keys(PERIOD_LABEL).map((p) => `<button data-p="${p}" class="${state.klinePeriod === p ? "active" : ""}">${PERIOD_LABEL[p]}</button>`).join("")}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <div class="period-tabs" id="periodTabs">
+            ${Object.keys(PERIOD_LABEL).map((p) => `<button data-p="${p}" class="${state.klinePeriod === p ? "active" : ""}">${PERIOD_LABEL[p]}</button>`).join("")}
+          </div>
+          <button class="kline-toggle${state.klineShowMA !== false ? " on" : ""}" id="tglMA" title="均线开关">MA</button>
+          <button class="kline-toggle${state.klineShowBoll ? " on" : ""}" id="tglBoll" title="布林带开关">BOLL</button>
+          <span class="muted small" title="滚轮缩放 · 拖拽平移 · 双击复位">🖱️缩放/平移</span>
         </div>
       </div>
       <div class="kline-chart-box">
@@ -438,6 +444,18 @@ async function renderAnalysisArea() {
     if (!b || b.dataset.p === state.klinePeriod) return;
     state.klinePeriod = b.dataset.p;
     loadKline(sym);
+  });
+  $("tglMA").addEventListener("click", () => {
+    state.klineShowMA = state.klineShowMA === false;
+    $("tglMA").classList.toggle("on", state.klineShowMA !== false);
+    const el = $("klineChart");
+    if (el && el._kfull) renderKlineChart(el, el._kfull);
+  });
+  $("tglBoll").addEventListener("click", () => {
+    state.klineShowBoll = !state.klineShowBoll;
+    $("tglBoll").classList.toggle("on", state.klineShowBoll);
+    const el = $("klineChart");
+    if (el && el._kfull) renderKlineChart(el, el._kfull);
   });
 }
 
@@ -545,8 +563,10 @@ async function loadKline(sym) {
   const el = $("klineChart");
   if (!el) return;
   try {
-    const d = await api(`/api/kline/${sym}?period=${state.klinePeriod}&limit=90`);
+    const d = await api(`/api/kline/${sym}?period=${state.klinePeriod}&limit=500`);
     if (!d.items.length) { el.textContent = "暂无K线数据"; return; }
+    el._kfull = d;
+    state.klineView = { bars: 90, offset: 0 };
     renderKlineChart(el, d);
     const tabs = document.querySelectorAll("#periodTabs button");
     tabs.forEach((b) => b.classList.toggle("active", b.dataset.p === state.klinePeriod));
@@ -555,8 +575,14 @@ async function loadKline(sym) {
   }
 }
 
+/* K 线蜡烛图：窗口化渲染（bars/offset 支持缩放平移）+ MA/BOLL 开关 */
 function renderKlineChart(el, data) {
-  const items = data.items;
+  const all = data.items;
+  const vw = state.klineView || (state.klineView = { bars: 90, offset: 0 });
+  vw.bars = Math.max(20, Math.min(vw.bars, all.length));
+  vw.offset = Math.max(0, Math.min(vw.offset, all.length - 20));
+  const end = all.length - vw.offset;
+  const items = all.slice(Math.max(0, end - vw.bars), end);
   const w = el.clientWidth || 540;
   const padL = 6, padR = 58, padT = 8, mainH = 225, gap = 6, volH = 56, padB = 18;
   const plotW = w - padL - padR;
@@ -567,7 +593,10 @@ function renderKlineChart(el, data) {
 
   const highs = [], lows = [];
   items.forEach((it) => { highs.push(it.high ?? it.close ?? 0); lows.push(it.low ?? it.close ?? 0); });
-  for (const k of ["ma5", "ma10", "ma20"]) {
+  const overlayKeys = [];
+  if (state.klineShowMA !== false) overlayKeys.push("ma5", "ma10", "ma20");
+  if (state.klineShowBoll) overlayKeys.push("boll_up", "boll_mid", "boll_low");
+  for (const k of overlayKeys) {
     items.forEach((it) => { if (it[k] != null) { highs.push(it[k]); lows.push(it[k]); } });
   }
   let pmin = Math.min(...lows), pmax = Math.max(...highs);
@@ -580,14 +609,12 @@ function renderKlineChart(el, data) {
   const fp = (v) => (v >= 1000 ? v.toFixed(0) : v.toFixed(1));
 
   const els = [];
-  // 价格网格与右轴刻度
   for (let g = 0; g <= 3; g++) {
     const p = pmin + ((pmax - pmin) * g) / 3;
     const yy = yMain(p);
     els.push(`<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${padL + plotW}" y2="${yy.toFixed(1)}" stroke="#232b3b" style="stroke:var(--chart-grid)" stroke-dasharray="2 4"/>`);
     els.push(`<text x="${w - padR + 4}" y="${(yy + 3).toFixed(1)}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9">${fp(p)}</text>`);
   }
-  // 蜡烛与成交量
   items.forEach((it, i) => {
     if (it.close == null || it.open == null) return;
     const up = it.close >= it.open;
@@ -603,13 +630,11 @@ function renderKlineChart(el, data) {
       els.push(`<rect x="${(x - bw / 2).toFixed(1)}" y="${vy.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5, volBase - vy).toFixed(1)}" fill="${color}" opacity="0.5"/>`);
     }
   });
-  // 均线
-  const maColors = { ma5: "#ffffff", ma10: "#f5c542", ma20: "#c084fc" };
-  for (const [k, c] of Object.entries(maColors)) {
+  const maColors = { ma5: "#ffffff", ma10: "#f5c542", ma20: "#c084fc", boll_up: "#38bdf8", boll_mid: "#94a3b8", boll_low: "#38bdf8" };
+  for (const k of overlayKeys) {
     const pts = items.map((it, i) => (it[k] == null ? null : `${cx(i).toFixed(1)},${yMain(it[k]).toFixed(1)}`)).filter(Boolean);
-    if (pts.length > 1) els.push(`<polyline points="${pts.join(" ")}" fill="none" stroke="${c}" stroke-width="1" opacity="0.9"/>`);
+    if (pts.length > 1) els.push(`<polyline points="${pts.join(" ")}" fill="none" stroke="${maColors[k]}" stroke-width="1" opacity="${k.startsWith("boll") ? 0.75 : 0.9}"${k === "boll_mid" ? ' stroke-dasharray="4 3"' : ""}/>`);
   }
-  // 最新价虚线与右侧价签
   const last = items[n - 1];
   if (last.close != null) {
     const up = last.close >= (last.open ?? last.close);
@@ -619,7 +644,6 @@ function renderKlineChart(el, data) {
     els.push(`<rect x="${w - padR + 1}" y="${(yy - 7).toFixed(1)}" width="${padR - 3}" height="14" rx="2" fill="${c}"/>`);
     els.push(`<text x="${w - padR + 5}" y="${(yy + 4).toFixed(1)}" fill="#fff" font-size="9">${fp(last.close)}</text>`);
   }
-  // 信号标记（▲看多 ▼看空 ◆警示）
   (data.signals || []).forEach((s, si) => {
     const idx = items.findIndex((it) => it.datetime === s.date);
     if (idx < 0) return;
@@ -632,19 +656,57 @@ function renderKlineChart(el, data) {
     else shape = `<rect x="${(x - 3.5).toFixed(1)}" y="${(yTop - 4).toFixed(1)}" width="7" height="7" fill="${col}" transform="rotate(45 ${x.toFixed(1)} ${(yTop - 0.5).toFixed(1)})"/>`;
     els.push(`<g>${shape}<title>${s.name}：${s.detail}</title></g>`);
   });
-  // X 轴时间刻度
   const tickIdx = [...new Set([0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1])];
   tickIdx.forEach((i) => {
     const label = data.period === "day" ? items[i].datetime.slice(5) : items[i].datetime.slice(5, 16);
     els.push(`<text x="${cx(i).toFixed(1)}" y="${volBase + 12}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="9" text-anchor="middle">${label}</text>`);
   });
-  // 十字光标竖线（预留，hover 时移动）
   els.push(`<line id="kCross" x1="0" y1="${padT}" x2="0" y2="${volBase}" stroke="#8a93a6" style="stroke:var(--chart-axis)" stroke-dasharray="3 3" visibility="hidden"/>`);
 
   const H = volBase + padB;
   el.innerHTML = `<svg viewBox="0 0 ${w} ${H}" width="${w}" height="${H}">${els.join("")}</svg>`;
   el._kdata = { items, cx, padL, plotW, period: data.period };
   bindKlineHover(el);
+  bindKlineZoomPan(el, data);
+}
+
+/* 滚轮缩放 + 拖拽平移 + 双击复位 */
+function bindKlineZoomPan(el, data) {
+  const vw = state.klineView;
+  const all = data.items;
+  let raf = null;
+  const redraw = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = null; renderKlineChart(el, data); });
+  };
+  el.onwheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
+    vw.bars = Math.round(Math.max(20, Math.min(vw.bars * factor, all.length)));
+    vw.offset = Math.min(vw.offset, all.length - 20);
+    redraw();
+  };
+  let dragging = false, lastX = 0;
+  el.onpointerdown = (e) => {
+    dragging = true; lastX = e.clientX;
+    el.setPointerCapture(e.pointerId);
+  };
+  el.onpointermove = (e) => {
+    if (!dragging) return;
+    const barW = (el.clientWidth || 540) / vw.bars;
+    const dBars = Math.round((e.clientX - lastX) / barW);
+    if (dBars !== 0) {
+      lastX += dBars * barW;
+      vw.offset = Math.max(0, Math.min(vw.offset + dBars, all.length - 20));
+      redraw();
+    }
+  };
+  el.onpointerup = el.onpointercancel = () => { dragging = false; };
+  el.ondblclick = () => {
+    vw.bars = 90; vw.offset = 0;
+    redraw();
+    toast("已复位");
+  };
 }
 
 function bindKlineHover(el) {
@@ -675,179 +737,6 @@ function bindKlineHover(el) {
     tip.classList.add("hidden");
     cross.setAttribute("visibility", "hidden");
   };
-}
-
-/* ---------- 日内走势图形标注 ---------- */
-
-const ANNOT_INFO = {
-  bull: { label: "📈多", color: "#f34e4e" },
-  bear: { label: "📉空", color: "#22c55e" },
-  risk: { label: "⚠风险", color: "#f5a623" },
-  level: { label: "📏价位", color: "#7aa2f7" },
-  note: { label: "📝批注", color: "#ffffff" },
-};
-
-function annotStore() { return JSON.parse(localStorage.getItem("fa_annot") || "{}"); }
-function saveAnnotStore(s) { localStorage.setItem("fa_annot", JSON.stringify(s)); }
-function getAnnots(sym, date) { return (annotStore()[sym] || {})[date] || []; }
-function addAnnot(sym, date, a) {
-  const s = annotStore();
-  (s[sym] = s[sym] || {});
-  (s[sym][date] = s[sym][date] || []);
-  s[sym][date].push(a);
-  saveAnnotStore(s);
-}
-function delAnnot(sym, date, id) {
-  const s = annotStore();
-  if (s[sym] && s[sym][date]) {
-    s[sym][date] = s[sym][date].filter((a) => a.id !== id);
-    saveAnnotStore(s);
-  }
-}
-function clearAnnots(sym, date) {
-  const s = annotStore();
-  if (s[sym]) { delete s[sym][date]; saveAnnotStore(s); }
-}
-
-function annotFmtList(anns) {
-  return anns.map((a) => {
-    const info = ANNOT_INFO[a.type] || {};
-    return `${a.time} ${info.label || a.type} @${a.price}${a.text ? `「${a.text}」` : ""}`;
-  });
-}
-
-function drawAnnotations(el) {
-  const scale = el._iscale;
-  const svg = el.querySelector("svg");
-  if (!svg || !scale || !scale.date || !state.selected) return;
-  const old = svg.querySelector("#annotLayer");
-  if (old) old.remove();
-  const annots = getAnnots(state.selected, scale.date);
-  if (!annots.length) return;
-  const NS = "http://www.w3.org/2000/svg";
-  const layer = document.createElementNS(NS, "g");
-  layer.id = "annotLayer";
-
-  for (const a of annots) {
-    const info = ANNOT_INFO[a.type] || ANNOT_INFO.note;
-    const g = document.createElementNS(NS, "g");
-    g.dataset.annotId = a.id;
-    g.style.cursor = "pointer";
-    g.setAttribute("opacity", "0.95");
-    let shape = "";
-    if (a.type === "level") {
-      const y = scale.yOfPrice(a.price);
-      shape = `<line x1="${scale.padL}" y1="${y.toFixed(1)}" x2="${scale.padR}" y2="${y.toFixed(1)}" stroke="${info.color}" stroke-width="1.2" stroke-dasharray="6 4"/>
-        <rect x="${(scale.padR - 86).toFixed(1)}" y="${(y - 8).toFixed(1)}" width="88" height="16" rx="3" fill="${info.color}" opacity="0.9"/>
-        <text x="${(scale.padR - 82).toFixed(1)}" y="${(y + 4).toFixed(1)}" font-size="10" fill="#0d1117" font-weight="600">${a.price}${a.text ? ` ${a.text.slice(0, 5)}` : ""}</text>`;
-    } else {
-      const x = scale.xOfTime(a.time), y = scale.yOfPrice(a.price);
-      if (a.type === "bull") shape = `<path d="M ${x} ${(y - 7).toFixed(1)} L ${(x - 5).toFixed(1)} ${(y + 4).toFixed(1)} L ${(x + 5).toFixed(1)} ${(y + 4).toFixed(1)} Z" fill="${info.color}"/>`;
-      else if (a.type === "bear") shape = `<path d="M ${x} ${(y + 7).toFixed(1)} L ${(x - 5).toFixed(1)} ${(y - 4).toFixed(1)} L ${(x + 5).toFixed(1)} ${(y - 4).toFixed(1)} Z" fill="${info.color}"/>`;
-      else if (a.type === "risk") shape = `<rect x="${(x - 4.5).toFixed(1)}" y="${(y - 4.5).toFixed(1)}" width="9" height="9" fill="${info.color}" transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})"/>`;
-      else shape = `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="#f5a623"/>`;
-      if (a.text) {
-        shape += `<rect x="${(x + 7).toFixed(1)}" y="${(y - 16).toFixed(1)}" width="${Math.min(a.text.length * 11 + 8, 150)}" height="17" rx="3" fill="rgba(13,17,23,.92)" stroke="${info.color}" stroke-width="0.6"/>
-          <text x="${(x + 11).toFixed(1)}" y="${(y - 4).toFixed(1)}" font-size="10" fill="${info.color}">${a.text.slice(0, 13)}</text>`;
-      }
-    }
-    g.innerHTML = shape + `<title>${a.time} ${info.label} ${a.price}${a.text ? `：${a.text}` : ""}（双击删除）</title>`;
-    layer.appendChild(g);
-  }
-  svg.appendChild(layer);
-}
-
-function bindIntradayAnnot(el) {
-  el.onclick = (ev) => {
-    const mode = state.annotMode;
-    const scale = el._iscale;
-    if (!mode || !scale || !state.selected) return;
-    const svg = el.querySelector("svg");
-    if (!svg) return;
-    const rect = svg.getBoundingClientRect();
-    const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
-    const time = scale.timeOfX(sx), price = scale.priceOfY(sy);
-    if (!time || price == null) return;
-    const a = { id: `a${Date.now()}`, type: mode, time, price: Math.round(price * 10) / 10, ts: Date.now() };
-    if (mode === "note" || mode === "level" || mode === "risk") {
-      const hint = { note: "批注内容（走势推理/风险描述）", level: "价位含义（如：压力/支撑/止损）", risk: "风险描述（可留空）" }[mode];
-      const text = prompt(`${ANNOT_INFO[mode].label} · ${hint}：`, "");
-      if (mode === "note" && !text) return;
-      if (text) a.text = text.slice(0, 30);
-    }
-    addAnnot(state.selected, scale.date, a);
-    drawAnnotations(el);
-    toast(`已标注 ${ANNOT_INFO[mode].label} @${a.price}`);
-  };
-  el.ondblclick = (ev) => {
-    const g = ev.target.closest("[data-annot-id]");
-    const scale = el._iscale;
-    if (g && scale && state.selected) {
-      delAnnot(state.selected, scale.date, g.dataset.annotId);
-      drawAnnotations(el);
-      toast("标注已删除");
-    }
-  };
-}
-
-function syncAnnotButtons() {
-  document.querySelectorAll(".annot-btn[data-annot]").forEach((b) => {
-    b.classList.toggle("active", b.dataset.annot === state.annotMode);
-  });
-}
-
-document.addEventListener("click", (e) => {
-  const b = e.target.closest(".annot-btn");
-  if (!b) return;
-  if (b.dataset.annot) {
-    state.annotMode = state.annotMode === b.dataset.annot ? null : b.dataset.annot;
-    syncAnnotButtons();
-    if (state.annotMode) toast(`标注模式：${ANNOT_INFO[state.annotMode].label}，点击分时图放置（双击标注可删除）`);
-  } else if (b.dataset.annotClear) {
-    const el = $("intradayChart"), scale = el && el._iscale;
-    if (scale && state.selected && getAnnots(state.selected, scale.date).length) {
-      clearAnnots(state.selected, scale.date);
-      drawAnnotations(el);
-      toast("已清除当日标注");
-    } else toast("当日暂无标注");
-  } else if (b.id === "btnAnnotAi") {
-    aiEvalAnnotations();
-  } else if (b.id === "btnAnnotNote") {
-    saveAnnotationsAsNote();
-  }
-});
-
-async function aiEvalAnnotations() {
-  const el = $("intradayChart"), scale = el && el._iscale;
-  if (!scale || !state.selected) return toast("请先在合约详情页加载分时图", true);
-  const anns = getAnnots(state.selected, scale.date);
-  if (!anns.length) return toast("暂无标注，先在分时图上做标注", true);
-  switchView("work");
-  sendChat(`我在 ${state.selected}（${state.names[state.selected] || ""}）今日（${scale.date}）分时图上做了如下手工标注：\n${annotFmtList(anns).join("\n")}\n\n请：1) 逐条评估我的每个判定（依据是否充分、与量价结构是否一致）；2) 指出标注间的冲突或强化关系（如多头判定与风险位的关系）；3) 给出你基于当前盘面的独立趋势推演（方向、关键触发价位、失效条件），并说明与我的标注的分歧点。`);
-}
-
-async function saveAnnotationsAsNote() {
-  const el = $("intradayChart"), scale = el && el._iscale;
-  if (!scale || !state.selected) return toast("请先在合约详情页加载分时图", true);
-  const anns = getAnnots(state.selected, scale.date);
-  if (!anns.length) return toast("暂无标注", true);
-  try {
-    await api("/api/notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: `${state.selected} ${scale.date} 图形标注`,
-        content: annotFmtList(anns).join("\n"),
-        symbol: state.selected,
-        tags: "图形标注",
-        date: scale.date,
-      }),
-    });
-    toast("标注已保存到交易心得");
-    if (notesState.items.length) loadNotes();
-  } catch (e) {
-    toast(`保存失败：${e.message}`, true);
-  }
 }
 
 /* 日内分时图：价格线 + 均价线 + 昨结基准虚线 + 最新点 + 时间刻度 */
@@ -1636,6 +1525,95 @@ document.addEventListener("click", (e) => {
     $("skinPop").classList.add("hidden");
   }
 });
+
+/* ---------- 命令面板 Ctrl+K ---------- */
+
+const CMDK_COMMANDS = [
+  { key: "工作台", desc: "视图", run: () => switchView("work") },
+  { key: "详情", desc: "视图", run: () => switchView("detail") },
+  { key: "对比", desc: "视图", run: () => switchView("compare") },
+  { key: "资讯/要闻", desc: "视图", run: () => switchView("news") },
+  { key: "心得", desc: "视图", run: () => switchView("notes") },
+  { key: "交易日志", desc: "视图", run: () => switchView("trades") },
+  { key: "晨报", desc: "生成/查看 AI 简报", run: () => $("btnReport").click() },
+  { key: "皮肤", desc: "切换界面皮肤", run: () => $("btnSkin").click() },
+  { key: "设置", desc: "AI/飞书/盯盘配置", run: () => $("btnSettings").click() },
+];
+
+const cmdkState = { hits: [], index: -1 };
+
+function cmdkRender() {
+  const q = $("cmdkInput").value.trim().toLowerCase();
+  let hits = [];
+  if (!q) {
+    hits = CMDK_COMMANDS.slice(0, 6).map((c) => ({ type: "cmd", ...c }));
+  } else {
+    const cmds = CMDK_COMMANDS.filter((c) => c.key.toLowerCase().includes(q))
+      .map((c) => ({ type: "cmd", ...c }));
+    const syms = state.candidates
+      .filter((c) => c.symbol.toLowerCase().includes(q) || (c.name || "").includes(q) || (c.py || "").startsWith(q))
+      .slice(0, 8)
+      .map((c) => ({ type: "sym", key: c.symbol, desc: c.name, sym: c.symbol }));
+    hits = [...syms, ...cmds].slice(0, 12);
+  }
+  cmdkState.hits = hits;
+  if (cmdkState.index >= hits.length) cmdkState.index = hits.length - 1;
+  $("cmdkList").innerHTML = hits.length
+    ? hits.map((h, i) => `<div class="cmdk-item${i === cmdkState.index ? " hl" : ""}" data-i="${i}">
+        <span>${h.type === "sym" ? `<b>${h.key}</b> ${h.desc}` : h.key}</span>
+        <span class="desc">${h.type === "sym" ? "合约 →" : h.desc}</span>
+      </div>`).join("")
+    : `<div class="cmdk-item muted">无匹配</div>`;
+}
+
+function cmdkRun(i) {
+  const h = cmdkState.hits[i];
+  if (!h) return;
+  cmdkClose();
+  if (h.type === "sym") {
+    addFromCandidate(h.sym);
+    switchView("detail");
+  } else {
+    h.run();
+  }
+}
+
+function cmdkOpen() {
+  $("cmdk").classList.remove("hidden");
+  $("cmdkInput").value = "";
+  cmdkState.index = 0;
+  cmdkRender();
+  setTimeout(() => $("cmdkInput").focus(), 30);
+}
+function cmdkClose() { $("cmdk").classList.add("hidden"); }
+
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    $("cmdk").classList.contains("hidden") ? cmdkOpen() : cmdkClose();
+  }
+  if ($("cmdk").classList.contains("hidden")) return;
+  if (e.key === "Escape") cmdkClose();
+  if (e.key === "ArrowDown") { e.preventDefault(); cmdkState.index = Math.min(cmdkState.index + 1, cmdkState.hits.length - 1); cmdkRender(); }
+  if (e.key === "ArrowUp") { e.preventDefault(); cmdkState.index = Math.max(cmdkState.index - 1, 0); cmdkRender(); }
+  if (e.key === "Enter") cmdkRun(cmdkState.index);
+});
+$("cmdkInput").addEventListener("input", () => { cmdkState.index = 0; cmdkRender(); });
+$("cmdkList").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-i]");
+  if (item) cmdkRun(Number(item.dataset.i));
+});
+$("cmdk").addEventListener("click", (e) => { if (e.target === $("cmdk")) cmdkClose(); });
+
+/* ---------- 标签页标题实时价格 ---------- */
+
+function setDocTitle() {
+  const q = state.selected && state.quotes[state.selected];
+  if (q && q.last != null && !titleFlashTimer) {
+    const pct = q.change_pct;
+    document.title = `${state.selected} ${q.last} ${pct != null ? (pct >= 0 ? "↑" : "↓") + Math.abs(pct).toFixed(2) + "%" : ""} | 期货助手`;
+  }
+}
 
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 

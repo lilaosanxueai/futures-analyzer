@@ -567,6 +567,33 @@ input:focus, select:focus { border-color: var(--primary); }
 .skin-name { font-size: 12.5px; font-weight: 600; display: block; }
 .skin-desc { font-size: 10.5px; color: var(--muted); }
 
+
+/* ---------- 命令面板 ---------- */
+.cmdk { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 300; display: flex; justify-content: center; padding-top: 12vh; }
+.cmdk.hidden { display: none; }
+.cmdk-card {
+  width: min(560px, 92vw); height: fit-content;
+  background: var(--panel-solid); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .55); overflow: hidden;
+}
+.cmdk-card input {
+  width: 100%; border: none; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--text); font-size: 15px; padding: 14px 16px; outline: none;
+}
+.cmdk-list { max-height: 340px; overflow-y: auto; padding: 6px; }
+.cmdk-item {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  padding: 8px 12px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.cmdk-item .desc { color: var(--muted); font-size: 11.5px; }
+.cmdk-item.hl, .cmdk-item:hover { background: var(--panel-2); }
+.cmdk-hint { padding: 8px 14px; border-top: 1px solid var(--border); }
+.kline-toggle {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  font-size: 10.5px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+}
+.kline-toggle.on { color: var(--accent); border-color: var(--accent); background: rgba(245, 166, 35, .1); }
+
 /* ---------- 其它 ---------- */
 .muted { color: var(--muted); }
 .small { font-size: 12px; }

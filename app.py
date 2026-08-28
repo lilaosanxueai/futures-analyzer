@@ -438,12 +438,20 @@ async def kline(symbol: str, period: str = "day", limit: int = 120):
     df = pd.DataFrame(rows)
     for n in (5, 10, 20):
         df[f"ma{n}"] = df["close"].rolling(n).mean()
+    _mid = df["close"].rolling(20).mean()
+    _std = df["close"].rolling(20).std(ddof=0)
+    df["boll_up"] = _mid + 2 * _std
+    df["boll_mid"] = _mid
+    df["boll_low"] = _mid - 2 * _std
     items = [
         {
             **r,
             "ma5": _round_ma(v) if (v := r.get("ma5")) is not None else None,
             "ma10": _round_ma(v) if (v := r.get("ma10")) is not None else None,
             "ma20": _round_ma(v) if (v := r.get("ma20")) is not None else None,
+            "boll_up": _round_ma(v) if (v := r.get("boll_up")) is not None else None,
+            "boll_mid": _round_ma(v) if (v := r.get("boll_mid")) is not None else None,
+            "boll_low": _round_ma(v) if (v := r.get("boll_low")) is not None else None,
         }
         for r in df.to_dict("records")
     ]
