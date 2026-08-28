@@ -1686,6 +1686,54 @@ def _note_to_md(note: dict) -> str:
     return f"### {title}\n- {' · '.join(meta_parts)}\n{note['content']}\n"
 
 
+class ChatExportIn(BaseModel):
+    content: str
+    title: str = "AI 对话记录"
+
+
+@app.post("/api/chat-export")
+async def chat_export(body: ChatExportIn):
+    """将 AI 对话历史导出追加到飞书云文档《AI 对话记录》"""
+    cfg = load_config()
+    fs = cfg.get("feishu") or {}
+    if not fs.get("app_id") or not fs.get("app_secret"):
+        raise HTTPException(status_code=400, detail="未配置飞书应用凭证（App ID / App Secret）")
+    text = body.content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="对话内容为空")
+
+    doc_id = fs.get("chat_doc_id") or ""
+    if not doc_id:
+        import logging
+        # 首次导出：创建独立《AI 对话记录》文档并记住
+        token = await _feishu_get_token()
+        try:
+            async with httpx.AsyncClient(timeout=20) as _client:
+                r = await _client.post(
+                    f"{FEISHU_BASE}/docx/v1/documents",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"title": body.title},
+                )
+            data = r.json()
+            logging.getLogger("uvicorn.error").info(f"[chat-export] 创建文档：code={data.get('code')} msg={data.get('msg')}")
+            if data.get("code") == 0 and data.get("data", {}).get("document"):
+                doc_id = data["data"]["document"]["document_id"]
+                cfg["feishu"]["chat_doc_id"] = doc_id
+                save_config(cfg)
+        except Exception as e:
+            logging.getLogger("uvicorn.error").info(f"[chat-export] 创建文档异常：{type(e).__name__} {e}")
+    if not doc_id:
+        # 创建失败兜底：追加到心得文档（有内容可存比文档分类更优先）
+        doc_id = await _feishu_ensure_doc()
+
+    blocks = [
+        {"block_type": 2, "text": {"elements": [{"text_run": {"content": text[i:i + 900], "text_element_style": {}}}], "style": {}}}
+        for i in range(0, len(text), 900)
+    ]
+    await _feishu_append(doc_id, blocks)
+    return {"ok": True, "doc_id": doc_id}
+
+
 @app.post("/api/notes/feishu-sync")
 async def notes_feishu_sync(note_id: str = "", all_unsynced: bool = True):
     """同步心得到飞书云文档：单条（note_id）或全部未同步（all_unsynced）"""

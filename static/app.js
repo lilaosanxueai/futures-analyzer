@@ -7,7 +7,8 @@ const state = {
   selected: localStorage.getItem("fa_selected") || null,
   quotes: {},        // symbol -> quote
   names: {},         // symbol -> name/exchange（来自主力列表）
-  chat: [],          // {role, content}
+  chat: JSON.parse(localStorage.getItem("fa_chat_history") || "[]") || [],  // {role, content}，持久化到 localStorage
+  chatHistoryLen: 60,  // 自动存档条数上限
   aiReady: false,
   polling: null,
   sort: { key: null, dir: -1 },                          // 表格排序
@@ -1841,6 +1842,79 @@ $("btnCmpAi").addEventListener("click", () => {
   sendChat(`请从套利/对冲视角分析 ${a} 与 ${b} 的${mode}（${$("cmpDays").value} 个交易日，当前分位与统计见页面数据）：当前处于什么水平、历史极端区间的含义、适合什么样的策略思路与风险点。`);
 });
 
+/* ---------- AI 对话历史（存档 + 飞书导出） ---------- */
+
+let chatHistShown = false;
+
+function renderChatHistoryBox() {
+  const box = $("chatHistoryBox");
+  if (!box) return;
+  const msgs = state.chat;
+  if (!msgs.length) {
+    box.innerHTML = `<div class="muted small monitor-hint">暂无对话历史。工作台的 AI 对话会自动存档到本地，也可导出飞书。</div>`;
+    return;
+  }
+  const fmt = (m, i) => {
+    const who = m.role === "user" ? "我" : "AI";
+    const safe = m.content.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    return `<div class="news-item">
+      <span class="news-time">${who}</span><span style="white-space:pre-wrap">${safe.slice(0, 260)}</span>
+      <button class="cmd-copy" data-i="${i}" title="复制该条">📋</button>
+    </div>`;
+  };
+  box.innerHTML = `<div class="muted small" style="padding:4px 10px;display:flex;justify-content:space-between;align-items:center">
+    <span>共 ${msgs.length} 条（最近 60 条自动存档）</span>
+    <span>
+      <button id="btnChatExport" class="btn accent small-btn">☁ 导出飞书《AI 对话记录》</button>
+      <button id="btnChatClear" class="btn ghost small-btn">清空本地</button>
+    </span>
+  </div>` + msgs.slice(-40).map(fmt).join("");
+}
+
+$("btnChatHistory").addEventListener("click", () => {
+  chatHistShown = !chatHistShown;
+  if (chatHistShown) {
+    $("chatHistoryBox").classList.remove("hidden");
+    $("notesList").classList.add("hidden");
+    renderChatHistoryBox();
+  } else {
+    $("chatHistoryBox").classList.add("hidden");
+    $("notesList").classList.remove("hidden");
+  }
+});
+
+// 事件委托：导出/清空/复制（容器动态渲染）
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#btnChatExport")) {
+    exportChatToFeishu();
+  } else if (e.target.closest("#btnChatClear")) {
+    clearChatHistory();
+    renderChatHistoryBox();
+  } else if (e.target.closest(".cmd-copy")) {
+    const i = Number(e.target.closest(".cmd-copy").dataset.i);
+    const m = state.chat.slice(-40)[i];
+    if (m) {
+      navigator.clipboard?.writeText(m.content).then(() => toast("已复制")).catch(() => {});
+    }
+  }
+});
+
+async function exportChatToFeishu() {
+  const msgs = state.chat;
+  if (!msgs.length) return toast("暂无对话历史", true);
+  const content = msgs.map((m) => `${m.role === "user" ? "🧑‍💼 我" : "🤖 AI"}：${m.content}`).join("\n\n");
+  try {
+    const d = await api("/api/chat-export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, title: "AI 对话记录" }),
+    });
+    toast(`已导出飞书（共 ${msgs.length} 条）：${d.doc_id ? "文档已更新" : ""}`);
+  } catch (e) {
+    toast(`导出失败：${e.message}`, true);
+  }
+}
+
 /* ---------- AI 晨报 ---------- */
 
 let reportTimer = null;
@@ -1978,6 +2052,37 @@ $("searchDrop").addEventListener("click", (e) => {
 
 /* ---------- AI 对话 ---------- */
 
+function renderStoredChat() {
+  const box = $("chatBox");
+  if (!box || !state.chat.length) return;
+  box.innerHTML = "";
+  state.chat.slice(-30).forEach((m) => {
+    // 复用 pushMsg 渲染结构（不重复存入 history）
+    const div = document.createElement("div");
+    div.className = "msg " + (m.role === "user" ? "user" : "assistant");
+    const who = m.role === "user" ? "我" : "AI 助手";
+    div.innerHTML = `<div class="who">${who}</div>`;
+    if (m.role === "assistant") {
+      const body = document.createElement("div");
+      body.className = "md";
+      body.innerHTML = renderMarkdown(m.content);
+      div.appendChild(body);
+    } else {
+      div.appendChild(document.createTextNode(m.content));
+    }
+    box.appendChild(div);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearChatHistory() {
+  state.chat = [];
+  localStorage.removeItem("fa_chat_history");
+  const box = $("chatBox");
+  if (box) box.innerHTML = `<div class="chat-welcome"><p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p><p class="muted">例如：「螺纹钢现在的盘面怎么看？」「帮我对比一下豆粕和菜粕」「沪铜最近趋势如何」</p><p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p></div>`;
+  toast("对话历史已清空");
+}
+
 function pushMsg(role, content, cls) {
   state.chat.push({ role, content });
   const box = $("chatBox");
@@ -1995,6 +2100,9 @@ function pushMsg(role, content, cls) {
   }
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+  try {
+    localStorage.setItem("fa_chat_history", JSON.stringify(state.chat.slice(-state.chatHistoryLen)));
+  } catch (e) { /* 存储满/不可用时静默 */ }
   return div;
 }
 
@@ -2280,6 +2388,7 @@ function initSplitters() {
   initSplitters();
   renderTable();
   selectSymbol(state.selected);
+  renderStoredChat();  // 恢复上次 AI 对话历史
   loadCandidates();
   loadAiConfig();
   pollMonitor();

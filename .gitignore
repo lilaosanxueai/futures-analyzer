@@ -3,3 +3,4 @@ morning_report.json
 notes.json
 __pycache__/
 *.pyc
+server.log
