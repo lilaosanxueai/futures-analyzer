@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825h">
+<link rel="stylesheet" href="/static/style.css?v=0825i">
 </head>
 <body>
 
@@ -16,7 +16,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825h</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825i</span>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
     <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
@@ -123,6 +123,22 @@
           <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
           <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
           <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
+        </div>
+        <div class="trade-eval" id="tradeEval">
+          <div class="te-head">🎯 开仓风险评估 <span class="muted small">（日内短线 · 基于实时数据）</span></div>
+          <div class="te-form">
+            <select id="teDir" title="交易方向">
+              <option value="long">📈 做多</option>
+              <option value="short">📉 做空</option>
+            </select>
+            <label>开仓价<input id="teEntry" type="number" step="any" placeholder="现价"></label>
+            <label>止损(点)<input id="teStop" type="number" step="any" placeholder="如 20"></label>
+            <label>止盈(点)<input id="teTarget" type="number" step="any" placeholder="如 40"></label>
+            <label>手数<input id="teLots" type="number" step="any" value="1" style="width:56px"></label>
+            <button id="btnTradeEval" class="btn primary small-btn">🤖 AI 评估</button>
+          </div>
+          <div id="teCalc" class="te-calc"></div>
+          <div id="teResult" class="te-result"></div>
         </div>
       </div>
     </div>
@@ -286,6 +302,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825h"></script>
+<script src="/static/app.js?v=0825i"></script>
 </body>
 </html>

@@ -341,6 +341,7 @@ function selectSymbol(sym) {
     // 详情视图可见才绘制图表（隐藏容器 clientWidth=0，无法绘图）
     renderAnalysisArea();
     renderSignalArea();
+    syncTradeEvalEntry();
   }
   updateAlarmRow();
   syncDetailSymSelect();
@@ -932,6 +933,92 @@ async function loadIntraday(sym) {
 
 async function loadSparkline(sym) { /* 已被 K 线图替代，保留空实现避免旧引用 */ }
 
+/* ---------- 开仓风险评估（日内短线） ---------- */
+
+const teState = { entryTouched: false };
+
+// 切换合约时若用户未手动改过开仓价，自动跟随现价
+function syncTradeEvalEntry() {
+  const input = $("teEntry");
+  if (!input) return;
+  if (!teState.entryTouched || !input.value) {
+    const q = state.selected && state.quotes[state.selected];
+    if (q && q.last != null) input.value = q.last;
+  }
+  renderTeCalc();
+}
+
+// 输入变化即实时计算止损/止盈价与盈亏比（不调 AI）
+function renderTeCalc() {
+  const box = $("teCalc");
+  if (!box) return;
+  const q = state.selected && state.quotes[state.selected];
+  const dir = $("teDir").value;
+  const entry = parseFloat($("teEntry").value);
+  const sp = parseFloat($("teStop").value);
+  const tp = parseFloat($("teTarget").value);
+  const lots = parseFloat($("teLots").value) || 1;
+  if (!entry || !sp || !tp || sp <= 0 || tp <= 0) { box.innerHTML = ""; return; }
+  const sign = dir === "long" ? 1 : -1;
+  const stop = (entry - sign * sp).toFixed(1);
+  const target = (entry + sign * tp).toFixed(1);
+  const rr = (tp / sp).toFixed(2);
+  const items = [
+    `止损价 <b>${stop}</b>`, `止盈价 <b>${target}</b>`, `盈亏比 <b>${rr}</b>`,
+  ];
+  if (q && q.last != null) {
+    const dev = ((entry / q.last - 1) * 100).toFixed(2);
+    items.push(`开仓偏离现价 <b>${dev > 0 ? "+" : ""}${dev}%</b>`);
+  }
+  box.innerHTML = items.map((s) => `<span class="cmp-stat">${s}</span>`).join("");
+}
+
+["teDir", "teEntry", "teStop", "teTarget", "teLots"].forEach((id) => {
+  $(id).addEventListener("input", () => {
+    if (id === "teEntry") teState.entryTouched = true;
+    renderTeCalc();
+  });
+  $(id).addEventListener("change", renderTeCalc);
+});
+
+$("btnTradeEval").addEventListener("click", async () => {
+  const sym = state.selected;
+  if (!sym) return toast("请先选择合约", true);
+  const entry = parseFloat($("teEntry").value);
+  const sp = parseFloat($("teStop").value);
+  const tp = parseFloat($("teTarget").value);
+  if (!entry || !sp || !tp || sp <= 0 || tp <= 0) return toast("请填写开仓价、止损与止盈点数", true);
+  const lots = parseFloat($("teLots").value) || 1;
+  const result = $("teResult");
+  result.innerHTML = `<span class="typing-dots"><span></span><span></span><span></span></span>
+    <span class="muted small" style="margin-left:6px">AI 正在结合实时行情、指标、消息面评估开仓计划…</span>`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 150000);
+    const d = await api("/api/trade-eval", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: sym, direction: $("teDir").value, entry, stop_points: sp, target_points: tp, lots }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const c = d.calc || {};
+    const stats = [
+      `止损价 ${c.stop_price}`, `止盈价 ${c.target_price}`, `盈亏比 ${c.rr}`,
+      c.day_high ? `日内波幅 ${c.day_low}~${c.day_high}` : "",
+      c.stop_vs_range != null ? `止损占日内波幅 ${c.stop_vs_range}%` : "",
+      c.stop_vs_avg != null ? `占5日均幅 ${c.stop_vs_avg}%` : "",
+      c.risk_amt ? `风险 ¥${c.risk_amt.toLocaleString()}` : "",
+      c.reward_amt ? `潜在盈利 ¥${c.reward_amt.toLocaleString()}` : "",
+    ].filter(Boolean).map((s) => `<span class="cmp-stat">${s}</span>`).join("");
+    $("teCalc").innerHTML = stats;
+    result.innerHTML = `<div class="md">${renderMarkdown(d.advice)}</div>`;
+  } catch (e) {
+    const msg = e.name === "AbortError" ? "评估超时，请重试" : e.message;
+    result.innerHTML = `<div class="msg error">评估失败：${msg}</div>`;
+  }
+});
+
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
@@ -1374,6 +1461,7 @@ function switchView(name) {
     renderQuoteArea();
     renderAnalysisArea();
     renderSignalArea();
+    syncTradeEvalEntry();
   }
   if (name === "compare") initComparePage();
   if (name === "notes") {

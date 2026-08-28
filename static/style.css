@@ -532,6 +532,25 @@ input:focus, select:focus { border-color: var(--primary); }
 .report-body .md h2 { margin: 14px 0 8px; }
 .report-generating { text-align: center; padding: 40px 0; }
 
+/* ---------- 开仓风险评估 ---------- */
+.trade-eval {
+  margin: 14px; padding: 12px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+}
+.te-head { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.te-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.te-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+.te-form input, .te-form select { padding: 5px 8px; font-size: 12px; width: 92px; }
+.te-form select { width: 88px; }
+.te-calc { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.te-calc .cmp-stat {
+  background: rgba(13, 17, 23, .6); border-radius: 5px; padding: 3px 10px;
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.te-calc .k { color: var(--muted); margin-right: 3px; }
+.te-result { margin-top: 10px; font-size: 12.5px; }
+.te-result .md { background: rgba(13, 17, 23, .45); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+
 /* ---------- 拼音搜索下拉 ---------- */
 .search-box { position: relative; flex: 1; min-width: 0; }
 .search-drop {

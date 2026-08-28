@@ -883,6 +883,151 @@ def _daily_stats(daily: list) -> str:
     )
 
 
+# ---------------------------------------------------------------- 开仓风险评估（日内短线）
+
+# 主要品种合约乘数（元/点/手），用于风险金额估算；未知品种不计算金额
+CONTRACT_MULTIPLIER = {
+    "RB": 10, "HC": 10, "I": 100, "J": 100, "JM": 60, "SF": 5, "SM": 5,
+    "CU": 5, "AL": 5, "ZN": 5, "PB": 5, "NI": 1, "SN": 1, "SS": 5,
+    "AU": 1000, "AG": 15, "SC": 1000, "FU": 10, "BU": 10, "RU": 10, "NR": 10, "LU": 10, "BR": 5,
+    "M": 10, "Y": 10, "P": 10, "OI": 10, "RM": 10, "C": 10, "CS": 10, "A": 10, "B": 10,
+    "CF": 5, "SR": 10, "AP": 10, "CJ": 5, "PK": 5,
+    "TA": 5, "MA": 10, "EG": 10, "EB": 5, "PP": 5, "L": 5, "V": 5, "PG": 20,
+    "FG": 20, "SA": 20, "UR": 20, "AO": 20, "SH": 20, "LC": 5, "SI": 5,
+    "IF": 300, "IH": 300, "IC": 200, "IM": 200, "T": 10000, "TF": 10000, "TS": 20000, "TL": 10000,
+}
+
+
+class TradeEvalIn(BaseModel):
+    symbol: str
+    direction: str = "long"  # long / short
+    entry: float
+    stop_points: float
+    target_points: float
+    lots: float = 1
+
+
+TRADE_EVAL_PROMPT = """你是严格的日内短线交易风险教练（国内期货，T+0 双向交易）。交易者提交了开仓计划，请基于参考数据做开仓前风险体检。
+
+【交易计划】
+- 品种：{symbol}（{name}），方向：{dir_cn}
+- 开仓价 {entry}（现价 {last}，偏离 {dev_pct}%）
+- 止损 {stop_points} 点（{stop_price}），止盈 {target_points} 点（{target_price}）
+- 盈亏比 {rr}，手数 {lots}{risk_amt}
+- 止损幅度占日内已实现波幅 {stop_vs_range}%，占近5日平均日波幅 {stop_vs_avg}%
+- 参考位：今日最高 {day_high} / 最低 {day_low}，日内均价 {day_avg}，昨结 {prev_settle}
+
+【参考数据（实时）】
+{context}
+
+请输出（Markdown，600字内，务必引用具体数值）：
+1. **方向一致性**：计划方向与日内结构、动能指标（MACD/KDJ/RSI）是否同向，现价位置（相对均价/开收盘）
+2. **入场点位质量**：属追价还是回踩位？偏离均价风险
+3. **止损合理性**：点数是否小于日内噪音波幅（易被扫）；是否落在关键位（均价/昨结/日内高低/MA）外侧
+4. **止盈可达性**：目标对应价位今日是否已触及过/是否越过明显压力支撑
+5. **盈亏比评价**：{rr} 的盈亏比在该品种日内波动特征下是否划算
+6. **风险评级与建议**：低/中/高 + 明确行动（可执行 / 建议调整为：止损X点止盈Y点入场价Z / 等待某信号再进 / 放弃），给出调整后的具体参数
+7. **时机提示**：当前时段（早盘/午盘/尾盘/夜盘）日内短线的注意事项
+结尾固定一句：以上为盘面数据推演，不构成投资建议。"""
+
+
+@app.post("/api/trade-eval")
+async def trade_eval(body: TradeEvalIn):
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    symbol = body.symbol.strip().upper()
+    if body.direction not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="direction 仅支持 long/short")
+    if body.stop_points <= 0 or body.target_points <= 0:
+        raise HTTPException(status_code=400, detail="止损/止盈点数必须为正")
+    if body.entry <= 0:
+        raise HTTPException(status_code=400, detail="开仓价格无效")
+
+    quote = _quote_cache.get(symbol, (0, {}))[1]
+    if not quote:
+        try:
+            quote = await fetch_quote(symbol)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"无法获取 {symbol} 实时行情")
+
+    sign = 1 if body.direction == "long" else -1
+    stop_price = round(body.entry - sign * body.stop_points, 2)
+    target_price = round(body.entry + sign * body.target_points, 2)
+    rr = round(body.target_points / body.stop_points, 2)
+    last = quote.get("last") or body.entry
+    dev_pct = round((body.entry / last - 1) * 100, 2) if last else 0
+
+    # 日内波幅基准
+    day_high = day_low = day_avg = None
+    try:
+        rows = await get_minute(symbol, "1")
+        day = rows[-1]["datetime"][:10]
+        today = [r for r in rows if r["datetime"].startswith(day)]
+        if len(today) >= 5:
+            day_high = max(r["high"] or r["close"] or 0 for r in today)
+            day_low = min(r["low"] or r["close"] or 9e9 for r in today)
+            vsum = sum(r["volume"] or 0 for r in today)
+            day_avg = round(sum((r["close"] or 0) * (r["volume"] or 0) for r in today) / max(1e-9, vsum), 2) if vsum else None
+    except Exception:
+        pass
+    day_range = (day_high - day_low) if (day_high and day_low) else None
+    stop_vs_range = round(body.stop_points / day_range * 100, 1) if day_range else None
+
+    # 近5日平均日波幅
+    avg5 = None
+    try:
+        daily = [d for d in await get_daily(symbol) if d.get("high") and d.get("low")][-5:]
+        if daily:
+            avg5 = round(sum(d["high"] - d["low"] for d in daily) / len(daily), 2)
+    except Exception:
+        pass
+    stop_vs_avg = round(body.stop_points / avg5 * 100, 1) if avg5 else None
+
+    mult = CONTRACT_MULTIPLIER.get(_variety_prefix(symbol), 0)
+    risk_amt = f"（止损金额约 ¥{body.stop_points * mult * body.lots:,.0f}，止盈金额约 ¥{body.target_points * mult * body.lots:,.0f}）" if mult else ""
+
+    directory = await get_directory()
+    name = directory.get(symbol, {}).get("name", "")
+    context = await _build_market_context(symbol)
+
+    prompt = TRADE_EVAL_PROMPT.format(
+        symbol=symbol, name=name, dir_cn="做多" if body.direction == "long" else "做空",
+        entry=body.entry, last=last, dev_pct=dev_pct,
+        stop_points=body.stop_points, stop_price=stop_price,
+        target_points=body.target_points, target_price=target_price,
+        rr=rr, lots=body.lots, risk_amt=risk_amt,
+        stop_vs_range=stop_vs_range if stop_vs_range is not None else "--",
+        stop_vs_avg=stop_vs_avg if stop_vs_avg is not None else "--",
+        day_high=day_high, day_low=day_low, day_avg=day_avg, prev_settle=quote.get("prev_settle"),
+        context=context,
+    )
+
+    logger.info(f"[trade-eval] {symbol} {body.direction} @{body.entry} sl{body.stop_points} tp{body.target_points}")
+    try:
+        advice = await _call_ai_with_fallback(
+            [{"role": "user", "content": prompt}],
+            max_tokens=min(4096, max_output_for(load_config()["model"] or "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 评估失败：{e}")
+
+    return {
+        "ok": True,
+        "calc": {
+            "stop_price": stop_price, "target_price": target_price, "rr": rr,
+            "dev_pct": dev_pct, "day_high": day_high, "day_low": day_low,
+            "day_avg": day_avg, "day_range": day_range, "avg5_range": avg5,
+            "stop_vs_range": stop_vs_range, "stop_vs_avg": stop_vs_avg,
+            "risk_amt": body.stop_points * mult * body.lots if mult else None,
+            "reward_amt": body.target_points * mult * body.lots if mult else None,
+            "multiplier": mult or None,
+        },
+        "advice": advice,
+    }
+
+
 # ---------------------------------------------------------------- AI 盯盘引擎
 
 _MONITOR = {
@@ -913,14 +1058,16 @@ def _monitor_threshold(symbol: str, mult: float) -> float:
     return base * mult
 
 
-async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
+async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048, provider: str = "") -> str:
     """供盯盘等内部功能调用的轻量 AI 接口。
 
     注意：推理型模型（如 deepseek-v4-pro）会先消耗大量 token 生成思维链，
     max_tokens 给足才能保证正文（content）非空。
     """
     cfg = load_config()
-    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
+    provider = provider or cfg["provider"]
+    if provider not in PROVIDERS:
+        provider = "zhipu"
     api_key = cfg["api_keys"].get(provider)
     if not api_key:
         raise RuntimeError("未配置 API Key")
@@ -929,14 +1076,31 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
             f"{PROVIDERS[provider]['base_url']}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
-                "model": cfg["model"] or PROVIDERS[provider]["default_model"],
+                "model": cfg["model"] if provider == cfg["provider"] else PROVIDERS[provider]["default_model"],
                 "messages": messages,
                 "temperature": 0.4,
-                "max_tokens": min(2048, max_output_for(cfg["model"] or "")),
+                "max_tokens": max_tokens,
             },
         )
     resp.raise_for_status()
     return (resp.json()["choices"][0]["message"].get("content") or "").strip()
+
+
+async def _call_ai_with_fallback(messages: list[dict], max_tokens: int = 4096) -> str:
+    """主模型优先；返回空或失败时自动切换到另一家已配置的服务商重试"""
+    cfg = load_config()
+    errors = []
+    for p in [cfg["provider"]] + [x for x in PROVIDERS if x != cfg["provider"]]:
+        if not cfg["api_keys"].get(p):
+            continue
+        try:
+            out = await _call_ai_simple(messages, max_tokens=max_tokens, provider=p)
+            if out:
+                return out
+            errors.append(f"{p}: 空输出")
+        except Exception as e:
+            errors.append(f"{p}: {type(e).__name__}")
+    raise RuntimeError("AI 无有效输出（" + "；".join(errors) + "）")
 
 
 async def _ai_comment_for_event(event: dict):
