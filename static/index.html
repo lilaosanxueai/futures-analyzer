@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825i">
+<link rel="stylesheet" href="/static/style.css?v=0825j">
 </head>
 <body>
 
@@ -16,7 +16,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825i</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825j</span>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
     <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
@@ -28,6 +28,7 @@
   <button class="view-tab" data-view="compare">⚖ 对比分析</button>
   <button class="view-tab" data-view="news">📰 资讯要闻</button>
   <button class="view-tab" data-view="notes">📝 交易心得</button>
+  <button class="view-tab" data-view="trades">📒 交易日志</button>
 </nav>
 
 <main class="views">
@@ -136,6 +137,7 @@
             <label>止盈(点)<input id="teTarget" type="number" step="any" placeholder="如 40"></label>
             <label>手数<input id="teLots" type="number" step="any" value="1" style="width:56px"></label>
             <button id="btnTradeEval" class="btn primary small-btn">🤖 AI 评估</button>
+            <button id="btnTradeLog" class="btn accent small-btn" title="把该计划（含 AI 评级）存入交易日志，事后了结统计">📥 记入日志</button>
           </div>
           <div id="teCalc" class="te-calc"></div>
           <div id="teResult" class="te-result"></div>
@@ -229,6 +231,20 @@
     </div>
   </section>
 
+  <!-- 视图 5：交易日志与复盘统计（全宽） -->
+  <section class="view hidden" data-view="trades">
+    <div class="panel view-panel">
+      <div class="panel-head">
+        <h2>📒 交易日志</h2>
+        <span class="muted small">在「合约详情 → 开仓评估」中存入计划，事后回来标记结果</span>
+      </div>
+      <div id="tradeStats" class="cmp-stats" style="padding:12px 14px 0;"></div>
+      <div id="tradesList" class="news-view-list" style="padding-top:8px;">
+        <div class="muted small monitor-hint">暂无交易记录。做开仓评估后点「📥 记入日志」，事后在此了结并统计。</div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <!-- AI 设置弹窗 -->
@@ -271,6 +287,11 @@
       <input id="cfgFeishuSecret" type="password" placeholder="App Secret（留空保留）">
       <input id="cfgFeishuTitle" type="text" placeholder="文档标题：期货交易心得">
     </div>
+    <div class="form-row">
+      <label>群推送</label>
+      <input id="cfgWebhook" type="text" placeholder="飞书群机器人 Webhook 地址（盯盘异动/晨报推送）">
+      <button id="btnWebhookTest" class="btn ghost small-btn" style="flex:none">测试</button>
+    </div>
     <p class="form-tip">
       <span id="keyStatus"></span><br>
       <span id="feishuStatus"></span><br>
@@ -302,6 +323,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825i"></script>
+<script src="/static/app.js?v=0825j"></script>
 </body>
 </html>

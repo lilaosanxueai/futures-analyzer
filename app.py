@@ -132,8 +132,10 @@ async def _warmup():
 async def lifespan(_app):
     await _warmup()
     monitor_task = asyncio.create_task(monitor_loop())
+    report_task = asyncio.create_task(report_push_loop())
     yield
     monitor_task.cancel()
+    report_task.cancel()
 
 
 app = FastAPI(title="期货实时分析助手", lifespan=lifespan)
@@ -1028,6 +1030,154 @@ async def trade_eval(body: TradeEvalIn):
     }
 
 
+# ---------------------------------------------------------------- 交易日志与复盘统计
+
+TRADES_FILE = BASE_DIR / "trades.json"
+
+
+def _load_trades() -> list[dict]:
+    if TRADES_FILE.exists():
+        try:
+            return json.loads(TRADES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_trades(trades: list[dict]) -> None:
+    try:
+        TRADES_FILE.write_text(json.dumps(trades, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+@app.get("/api/trades")
+async def get_trades():
+    return {"ok": True, "items": list(reversed(_load_trades()))}  # 新的在前
+
+
+class TradeIn(BaseModel):
+    symbol: str
+    direction: str  # long / short
+    entry: float
+    stop_points: float
+    target_points: float
+    lots: float = 1
+    date: str = ""
+    ai_grade: str = ""   # AI 评估时的风险评级快照（低/中/高）
+
+
+@app.post("/api/trades")
+async def add_trade(body: TradeIn):
+    if body.direction not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="direction 仅支持 long/short")
+    trades = _load_trades()
+    trade = {
+        "id": f"t{int(datetime.now().timestamp() * 1000)}",
+        "ts": int(datetime.now().timestamp() * 1000),
+        "date": body.date.strip() or datetime.now().strftime("%Y-%m-%d"),
+        "symbol": body.symbol.strip().upper(),
+        "direction": body.direction,
+        "entry": body.entry,
+        "stop_points": body.stop_points,
+        "target_points": body.target_points,
+        "lots": body.lots,
+        "ai_grade": body.ai_grade.strip(),
+        "status": "open",     # open 待验证 / closed 已了结
+        "exit": None,         # 平仓价
+        "result_pts": None,   # 结果：盈亏点数（正/负）
+        "note": "",
+    }
+    trades.append(trade)
+    _save_trades(trades)
+    return {"ok": True, "item": trade}
+
+
+class TradePatch(BaseModel):
+    exit: Optional[float] = None       # 平仓价（与 result_pts 二选一）
+    result_pts: Optional[float] = None  # 直接填盈亏点数
+    note: Optional[str] = None
+    status: Optional[str] = None       # closed / open / 放弃可填 closed 且 result 0？约定：abandoned
+
+
+@app.patch("/api/trades/{trade_id}")
+async def patch_trade(trade_id: str, body: TradePatch):
+    trades = _load_trades()
+    for t in trades:
+        if t["id"] != trade_id:
+            continue
+        if body.exit is not None:
+            t["exit"] = body.exit
+            sign = 1 if t["direction"] == "long" else -1
+            t["result_pts"] = round(sign * (body.exit - t["entry"]), 1)
+        if body.result_pts is not None:
+            t["result_pts"] = body.result_pts
+        if body.note is not None:
+            t["note"] = body.note
+        if body.status:
+            if body.status not in ("open", "closed", "abandoned"):
+                raise HTTPException(status_code=400, detail="status 仅支持 open/closed/abandoned")
+            t["status"] = body.status
+        if t.get("result_pts") is not None or t["status"] == "abandoned":
+            if t["status"] == "open":
+                t["status"] = "closed"
+        _save_trades(trades)
+        return {"ok": True, "item": t}
+    raise HTTPException(status_code=404, detail="交易记录不存在")
+
+
+@app.delete("/api/trades/{trade_id}")
+async def del_trade(trade_id: str):
+    trades = _load_trades()
+    remain = [t for t in trades if t["id"] != trade_id]
+    if len(remain) == len(trades):
+        raise HTTPException(status_code=404, detail="交易记录不存在")
+    _save_trades(remain)
+    return {"ok": True}
+
+
+@app.get("/api/trades/stats")
+async def trades_stats():
+    """复盘统计：总览 + 分品种 + AI 评级采纳对比"""
+    trades = _load_trades()
+    closed = [t for t in trades if t["status"] == "closed" and t.get("result_pts") is not None]
+    open_n = sum(1 for t in trades if t["status"] == "open")
+    abandoned = sum(1 for t in trades if t["status"] == "abandoned")
+
+    def _summary(items):
+        if not items:
+            return {"count": 0}
+        pts = [t["result_pts"] for t in items]
+        wins = [p for p in pts if p > 0]
+        losses = [p for p in pts if p < 0]
+        plan_rr = [t["target_points"] / t["stop_points"] for t in items if t.get("stop_points")]
+        return {
+            "count": len(items),
+            "win_rate": round(len(wins) / len(items) * 100, 1),
+            "total_pts": round(sum(pts), 1),
+            "avg_win": round(sum(wins) / len(wins), 1) if wins else 0,
+            "avg_loss": round(sum(losses) / len(losses), 1) if losses else 0,
+            "avg_plan_rr": round(sum(plan_rr) / len(plan_rr), 2) if plan_rr else None,
+            "profit_factor": round(abs(sum(wins) / sum(losses)), 2) if losses and sum(losses) != 0 else None,
+        }
+
+    by_symbol = {}
+    for t in closed:
+        by_symbol.setdefault(t["symbol"], []).append(t)
+    by_grade = {}
+    for t in closed:
+        by_grade.setdefault(t.get("ai_grade") or "未评估", []).append(t)
+
+    return {
+        "ok": True,
+        "overview": _summary(closed),
+        "open_count": open_n,
+        "abandoned_count": abandoned,
+        "by_symbol": {s: _summary(v) for s, v in sorted(by_symbol.items())},
+        "by_grade": {g: _summary(v) for g, v in sorted(by_grade.items())},
+    }
+
+
 # ---------------------------------------------------------------- AI 盯盘引擎
 
 _MONITOR = {
@@ -1120,6 +1270,14 @@ async def _ai_comment_for_event(event: dict):
         event["ai"] = reply or "（AI 未返回有效解读，可稍后重试）"
     except Exception:
         event["ai"] = "（AI 解读不可用：未配置 Key 或调用失败）"
+    # 推送飞书群（配置了 webhook 时）
+    await _feishu_push(
+        f"🤖 盯盘异动\n"
+        f"{event['symbol']}（{name}）5分钟{'急涨' if event['dir'] == 'up' else '跳水'} {event['chg5']:+.2f}%，"
+        f"现价 {event['price']}\n"
+        f"15分钟 {event['chg15']:+.2f}% | 日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%\n\n"
+        f"💡 {event['ai'][:600]}"
+    )
 
 
 async def _check_symbol(sym: str, mult: float):
@@ -1405,6 +1563,24 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _feishu_token = {"token": "", "expire_at": 0.0}
 
 
+async def _feishu_push(text: str) -> bool:
+    """飞书群机器人 webhook 推送（未配置时静默跳过）"""
+    cfg = load_config()
+    url = (cfg.get("feishu") or {}).get("webhook_url")
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, json={"msg_type": "text", "content": {"text": text[:3900]}})
+        ok = r.status_code == 200 and r.json().get("code", 0) == 0
+        if not ok:
+            logging.getLogger("uvicorn.error").info(f"[feishu-push] 失败：{r.text[:120]}")
+        return ok
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[feishu-push] 异常：{e}")
+        return False
+
+
 def _feishu_cfg(cfg: dict) -> dict:
     return cfg.get("feishu") or {}
 
@@ -1540,6 +1716,7 @@ class FeishuCfgIn(BaseModel):
     app_id: str = ""
     app_secret: str = ""
     doc_title: str = "期货交易心得"
+    webhook_url: str = ""
     clear: bool = False
 
 
@@ -1557,10 +1734,24 @@ async def set_feishu_config(body: FeishuCfgIn):
         fs["app_secret"] = body.app_secret.strip()
     if body.doc_title.strip():
         fs["doc_title"] = body.doc_title.strip()
+    if body.webhook_url.strip():
+        fs["webhook_url"] = body.webhook_url.strip()
     # 凭证变更后重建文档关联
     if body.app_id.strip() or body.app_secret.strip():
         fs.pop("doc_id", None)
     save_config(cfg)
+    return {"ok": True}
+
+
+@app.post("/api/feishu/push-test")
+async def feishu_push_test():
+    """发送测试消息验证 webhook 配置"""
+    ok = await _feishu_push("✅ 期货助手推送测试：配置成功，盯盘异动与晨报将推送到本群。")
+    if not ok:
+        cfg = load_config()
+        if not (cfg.get("feishu") or {}).get("webhook_url"):
+            raise HTTPException(status_code=400, detail="未配置 webhook URL")
+        raise HTTPException(status_code=502, detail="推送失败，请检查 webhook 地址与群机器人设置")
     return {"ok": True}
 
 
@@ -1840,6 +2031,34 @@ async def _generate_report() -> str:
         [{"role": "user", "content": prompt}],
         max_tokens=min(4096, max_output_for(cfg["model"] or "")),
     )
+
+
+async def report_push_loop():
+    """晨/夜报定时生成并推送飞书：8:50 后生成当日晨报、20:50 后生成夜报（不依赖打开页面）"""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            now = datetime.now()
+            slot = _report_slot(now)
+            is_am = slot.endswith("-am")
+            due = (is_am and now.hour >= 8 and now.minute >= 50) or \
+                  (not is_am and now.hour >= 20 and now.minute >= 50) or \
+                  (not is_am and now.hour >= 21)
+            reports = _load_reports()
+            if due and slot not in reports:
+                import logging
+                logging.getLogger("uvicorn.error").info(f"[report-push] 定时生成 {slot}")
+                text = await _generate_report()
+                reports = _load_reports()
+                reports[slot] = {"ts": int(datetime.now().timestamp() * 1000), "report": text}
+                keep = sorted(reports.keys())[-6:]
+                _save_reports({k: reports[k] for k in keep})
+                kind = "晨报（日盘前瞻）" if is_am else "夜报（夜盘前瞻）"
+                await _feishu_push(f"📋 AI 交易{kind}\n\n{text[:1800]}")
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn.error").info(f"[report-push] 异常：{e}")
+        await asyncio.sleep(120)
 
 
 @app.get("/api/report")

@@ -532,6 +532,12 @@ input:focus, select:focus { border-color: var(--primary); }
 .report-body .md h2 { margin: 14px 0 8px; }
 .report-generating { text-align: center; padding: 40px 0; }
 
+/* ---------- 交易日志 ---------- */
+.trade-item { padding: 7px 14px; border-bottom: 1px solid rgba(43, 50, 69, .5); font-size: 12px; }
+.trade-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.trade-group-tables { padding: 0 14px 14px; overflow-x: auto; }
+.trade-group-tables .corr-table { margin-top: 4px; }
+
 /* ---------- 开仓风险评估 ---------- */
 .trade-eval {
   margin: 14px; padding: 12px;

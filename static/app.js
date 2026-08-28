@@ -1019,6 +1019,173 @@ $("btnTradeEval").addEventListener("click", async () => {
   }
 });
 
+/* ---------- 交易日志与复盘统计 ---------- */
+
+const tradesState = { items: [], loaded: false };
+
+async function loadTrades() {
+  try {
+    const d = await api("/api/trades");
+    tradesState.items = d.items || [];
+    tradesState.loaded = true;
+    renderTrades();
+    loadTradeStats();
+  } catch (e) {
+    $("tradesList").innerHTML = `<div class="muted small monitor-hint">加载失败：${e.message}</div>`;
+  }
+}
+
+async function loadTradeStats() {
+  try {
+    const d = await api("/api/trades/stats");
+    renderTradeStats(d);
+  } catch (e) { /* 统计失败不影响列表 */ }
+}
+
+function statCard(k, v, warn) {
+  return `<span class="cmp-stat"><span class="k">${k}</span><b class="${warn || ""}">${v}</b></span>`;
+}
+
+function renderTradeStats(d) {
+  const box = $("tradeStats");
+  if (!box) return;
+  const o = d.overview || {};
+  if (!o.count) {
+    box.innerHTML = `<span class="muted small">了结 ${d.open_count || 0} 笔待验证交易后，此处显示胜率/盈亏比/分品种统计</span>`;
+    return;
+  }
+  box.innerHTML = [
+    statCard("已了结", o.count),
+    statCard("胜率", `${o.win_rate}%`, o.win_rate >= 50 ? "up" : "down"),
+    statCard("累计", `${o.total_pts > 0 ? "+" : ""}${o.total_pts} 点`, o.total_pts >= 0 ? "up" : "down"),
+    statCard("均盈", `+${o.avg_win} 点`, "up"),
+    statCard("均亏", `${o.avg_loss} 点`, "down"),
+    o.profit_factor ? statCard("盈亏因子", o.profit_factor, o.profit_factor >= 1 ? "up" : "down") : "",
+    statCard("待验证", d.open_count || 0),
+    statCard("计划盈亏比", o.avg_plan_rr || "--"),
+  ].join("");
+  // 分品种 + AI 评级表
+  let tables = "";
+  if (Object.keys(d.by_symbol || {}).length) {
+    tables += `<div class="corr-head"><span class="kline-title">分品种表现</span></div>` +
+      tradeGroupTable(d.by_symbol, (s) => s);
+  }
+  if (Object.keys(d.by_grade || {}).length > 1 || (Object.keys(d.by_grade || {}).length === 1 && !d.by_grade["未评估"])) {
+    tables += `<div class="corr-head"><span class="kline-title">按 AI 风险评级（AI 建议值不值得听？）</span></div>` +
+      tradeGroupTable(d.by_grade, (g) => g);
+  }
+  const list = $("tradesList");
+  if (list && tables) {
+    list.insertAdjacentHTML("afterend", `<div id="tradeGroupTables" class="trade-group-tables">${tables}</div>`);
+  }
+}
+
+function tradeGroupTable(groups, keyFn) {
+  const rows = Object.entries(groups).map(([k, v]) => {
+    if (!v.count) return "";
+    return `<tr><td>${keyFn === (x => x) ? k : k}</td><td>${v.count}</td>
+      <td class="${v.win_rate >= 50 ? "up" : "down"}">${v.win_rate}%</td>
+      <td class="${v.total_pts >= 0 ? "up" : "down"}">${v.total_pts > 0 ? "+" : ""}${v.total_pts}</td>
+      <td>${v.avg_plan_rr ?? "--"}</td></tr>`;
+  }).join("");
+  return `<table class="corr-table"><tr><th>组</th><th>笔数</th><th>胜率</th><th>累计点数</th><th>计划盈亏比</th></tr>${rows}</table>`;
+}
+
+function renderTrades() {
+  const list = $("tradesList");
+  const items = tradesState.items;
+  if (!items.length) {
+    list.innerHTML = `<div class="muted small monitor-hint">暂无交易记录。在合约详情页做开仓评估后点「📥 记入日志」，事后在此了结并统计。</div>`;
+    return;
+  }
+  list.innerHTML = items.map((t) => {
+    const dirCls = t.direction === "long" ? "up" : "down";
+    const dirTxt = t.direction === "long" ? "多" : "空";
+    const res = t.result_pts == null ? "" : (t.result_pts > 0 ? "up" : "down");
+    const statusTxt = { open: "待验证", closed: "已了结", abandoned: "已放弃" }[t.status] || t.status;
+    return `<div class="trade-item" data-id="${t.id}">
+      <div class="trade-line">
+        <span class="note-time">${t.date}</span>
+        <b class="${dirCls}">${t.symbol} ${dirTxt}</b>
+        <span>@${t.entry} · SL ${t.stop_points}/TP ${t.target_points} · ${t.lots}手</span>
+        ${t.ai_grade ? `<span class="note-tag">AI:${t.ai_grade}</span>` : ""}
+        ${t.status === "closed" && t.result_pts != null ? `<b class="${res}">${t.result_pts > 0 ? "+" : ""}${t.result_pts}点</b>` : `<span class="muted small">${statusTxt}</span>`}
+        <span class="note-ops">
+          ${t.status === "open" ? `<button data-close="${t.id}" title="了结：输入平仓价或直接盈亏点数">✓了结</button>` : ""}
+          ${t.status === "open" ? `<button data-abandon="${t.id}" title="标记为放弃（未执行）">—放弃</button>` : ""}
+          <button data-del="${t.id}" title="删除">✕</button>
+        </span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+$("tradesList").addEventListener("click", async (e) => {
+  const close = e.target.closest("[data-close]");
+  const abandon = e.target.closest("[data-abandon]");
+  const del = e.target.closest("[data-del]");
+  const id = (close || abandon || del)?.dataset.close || (close || abandon || del)?.dataset.abandon || (close || abandon || del)?.dataset.del;
+  if (del) {
+    api(`/api/trades/${del.dataset.del}`, { method: "DELETE" }).then(loadTrades).catch(() => {});
+    return;
+  }
+  if (abandon) {
+    await api(`/api/trades/${abandon.dataset.abandon}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "abandoned" }),
+    });
+    loadTrades();
+    return;
+  }
+  if (close) {
+    const input = prompt("了结方式：输入平仓价（如 3130）或直接输入盈亏点数（如 +25 / -15）：", "");
+    if (input == null) return;
+    const v = parseFloat(input.replace("+", ""));
+    if (!Number.isFinite(v)) return toast("请输入数字", true);
+    const body = input.trim().startsWith("+") || input.trim().startsWith("-")
+      ? { result_pts: v }
+      : { exit: v };
+    try {
+      await api(`/api/trades/${close.dataset.close}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      loadTrades();
+      toast("已了结");
+    } catch (err) {
+      toast(`失败：${err.message}`, true);
+    }
+  }
+});
+
+/* 开仓评估面板：一键记入交易日志 */
+$("btnTradeLog").addEventListener("click", async () => {
+  const sym = state.selected;
+  if (!sym) return toast("请先选择合约", true);
+  const entry = parseFloat($("teEntry").value);
+  const sp = parseFloat($("teStop").value);
+  const tp = parseFloat($("teTarget").value);
+  if (!entry || !sp || !tp) return toast("请先填写完整的开仓计划", true);
+  // 抓取最近一次 AI 评估的风险评级（从结果区文本提取 低/中/高）
+  const resultText = $("teResult").textContent || "";
+  const gradeM = resultText.match(/风险评级[^低中高]*([低中高])/);
+  try {
+    await api("/api/trades", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: sym, direction: $("teDir").value, entry,
+        stop_points: sp, target_points: tp,
+        lots: parseFloat($("teLots").value) || 1,
+        ai_grade: gradeM ? gradeM[1] : "",
+      }),
+    });
+    toast("已记入交易日志（待验证）");
+  } catch (e) {
+    toast(`保存失败：${e.message}`, true);
+  }
+});
+
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
@@ -1425,7 +1592,7 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
 
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 
-const VIEW_ORDER = ["work", "detail", "compare", "news", "notes"];
+const VIEW_ORDER = ["work", "detail", "compare", "news", "notes", "trades"];
 
 function currentView() {
   const el = document.querySelector(".view:not(.hidden)");
@@ -1471,15 +1638,16 @@ function switchView(name) {
     if (d && !d.value) d.value = new Date().toISOString().slice(0, 10);
   }
   if (name === "news" && !newsState.loaded) pollNews();
+  if (name === "trades" && !tradesState.loaded) loadTrades();
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
-// 快捷键：Alt+1..5 切换视图
+// 快捷键：Alt+1..6 切换视图
 document.addEventListener("keydown", (e) => {
-  if (e.altKey && /^[1-5]$/.test(e.key)) {
+  if (e.altKey && /^[1-6]$/.test(e.key)) {
     switchView(VIEW_ORDER[Number(e.key) - 1]);
     e.preventDefault();
   }
@@ -1956,10 +2124,12 @@ $("btnSaveSettings").addEventListener("click", async () => {
         app_id: $("cfgFeishuId").value.trim(),
         app_secret: $("cfgFeishuSecret").value.trim(),
         doc_title: $("cfgFeishuTitle").value.trim() || "期货交易心得",
+        webhook_url: $("cfgWebhook").value.trim(),
       }),
     });
     $("cfgFeishuId").value = "";
     $("cfgFeishuSecret").value = "";
+    $("cfgWebhook").value = "";
     $("cfgApiKey").value = "";
     $("cfgStatus").textContent = "已保存 ✓";
     await loadAiConfig();
@@ -1970,8 +2140,23 @@ $("btnSaveSettings").addEventListener("click", async () => {
   }
 });
 
-$("btnClearKey").addEventListener("click", async () => {
+$("btnWebhookTest").addEventListener("click", async () => {
+  // 先保存输入框中的 webhook 再测试
   try {
+    await api("/api/feishu/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ webhook_url: $("cfgWebhook").value.trim() }),
+    });
+    await api("/api/feishu/push-test", { method: "POST" });
+    $("cfgWebhook").value = "";
+    $("cfgStatus").textContent = "推送测试已发送 ✓（去飞书群查看）";
+  } catch (e) {
+    $("cfgStatus").textContent = `推送测试失败：${e.message}`;
+  }
+});
+
+$("btnClearKey").addEventListener("click", async () => {  try {
     await api("/api/ai/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
