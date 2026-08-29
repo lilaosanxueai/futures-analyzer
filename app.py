@@ -622,6 +622,14 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         except Exception:
             pass
 
+        # 关联外盘行情（定价锚：内盘品种自动携带 WTI/COMEX金/美元指数/美豆等）
+        try:
+            intl = await _intl_context_for(symbol)
+            if intl:
+                parts.append(intl)
+        except Exception:
+            pass
+
         # 消息面（三层：品种产业/供需深研 + 金属行情快讯 + 全球要闻流）
         try:
             deep = await _variety_news_deep(symbol)
@@ -833,7 +841,100 @@ def _variety_prefix(symbol: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-# 品种搜索词（东财品种新闻 / SHMET 快讯过滤用）
+# ---------------------------------------------------------------- 国际期货行情（外盘参考）
+
+# 新浪外盘代码 → 展示配置（CL/OIL/GC/S 实测可用；美元指数走 hq.sinajs）
+INTL_SYMBOLS = {
+    "CL":  {"name": "WTI 原油", "kind": "sina"},
+    "OIL": {"name": "布伦特原油", "kind": "sina"},
+    "GC":  {"name": "COMEX 黄金", "kind": "sina"},
+    "XAU": {"name": "伦敦金", "kind": "sina"},
+    "S":   {"name": "CBOT 美豆", "kind": "sina"},
+    "DINIW": {"name": "美元指数", "kind": "hq"},
+}
+
+_intl_cache: dict = {"ts": 0.0, "items": []}
+INTL_TTL = 20.0
+
+
+async def _fetch_intl_one(code: str, conf: dict) -> dict:
+    if conf["kind"] == "hq":
+        # 新浪 hq 接口（美元指数）：时间,现价,买价,卖价,?,昨收...名称,日期
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"https://hq.sinajs.cn/list={code}",
+                headers={"Referer": "https://finance.sina.com.cn/futures/"},
+            )
+        m = re.search(r'"([^"]+)"', r.text)
+        if not m:
+            return {"symbol": code, "name": conf["name"], "error": "无数据"}
+        f = m.group(1).split(",")
+        last = float(f[1])
+        prev_close = float(f[5]) if len(f) > 5 and f[5] else None  # f[5]=昨收（f[8] 是现价重复）
+        chg = round((last / prev_close - 1) * 100, 2) if prev_close else None
+        return {"symbol": code, "name": conf["name"], "last": last,
+                "prev_close": prev_close, "change_pct": chg, "time": f[0], "date": f[10] if len(f) > 10 else ""}
+    # 新浪外盘期货（AkShare）
+    df = await call_ak(ak.futures_foreign_commodity_realtime, symbol=code)
+    r0 = df.iloc[0]
+    return {"symbol": code, "name": str(r0["名称"]), "last": _num(r0["最新价"]),
+            "prev_close": _num(r0["昨日结算价"]), "change_pct": _num(r0["涨跌幅"]),
+            "open": _num(r0["开盘价"]), "high": _num(r0["最高价"]), "low": _num(r0["最低价"]),
+            "cny": _num(r0["人民币报价"]), "time": str(r0["行情时间"]), "date": str(r0["日期"])}
+
+
+async def get_intl_quotes(force: bool = False) -> list[dict]:
+    loop_now = asyncio.get_event_loop().time()
+    if not force and loop_now - _intl_cache["ts"] < INTL_TTL:
+        return _intl_cache["items"]
+    items = []
+    for code, conf in INTL_SYMBOLS.items():
+        try:
+            items.append(await _fetch_intl_one(code, conf))
+        except Exception:
+            items.append({"symbol": code, "name": conf["name"], "error": "获取失败"})
+    _intl_cache["items"] = items
+    _intl_cache["ts"] = loop_now
+    return items
+
+
+@app.get("/api/intl-quotes")
+async def intl_quotes():
+    return {"ok": True, "items": await get_intl_quotes()}
+
+
+# 国内品种 → 关联外盘（AI 上下文联动）
+DOMESTIC_TO_INTL = {
+    "SC": ["CL", "OIL"], "FU": ["CL", "OIL"], "LU": ["CL", "OIL"], "NR": ["OIL"], "TA": ["OIL"], "MA": ["OIL"], "EG": ["OIL"], "PP": ["OIL"], "L": ["OIL"], "V": ["OIL"], "BU": ["OIL"], "PG": ["OIL"],
+    "AU": ["GC", "XAU", "DINIW"], "AG": ["XAU", "DINIW"],
+    "M": ["S"], "Y": ["S", "BO"], "P": ["BO"], "A": ["S"], "RM": ["S"], "OI": ["S"],
+    "C": ["C_INTL"], "RB": ["DINIW"], "HC": ["DINIW"], "I": ["DINW", "DINIW"], "CU": ["HG_INTL", "DINIW"], "NI": ["DINIW"], "SN": ["DINIW"],
+    "IF": ["DINIW"], "IH": ["DINIW"], "IC": ["DINIW"], "IM": ["DINIW"], "T": ["DINIW"],
+}
+
+
+async def _intl_context_for(symbol: str) -> str:
+    """为国内品种生成关联外盘行情上下文"""
+    related = DOMESTIC_TO_INTL.get(_variety_prefix(symbol))
+    if not related:
+        return ""
+    try:
+        quotes = await get_intl_quotes()
+        by_code = {q["symbol"]: q for q in quotes}
+        lines = []
+        for code in related:
+            q = by_code.get(code if code in INTL_SYMBOLS else "DINIW")
+            if q and not q.get("error") and q.get("last") is not None:
+                pct = f"{q['change_pct']:+.2f}%" if q.get("change_pct") is not None else "--"
+                cny = f"（人民币 {q['cny']:.0f}）" if q.get("cny") else ""
+                lines.append(f"- {q['name']}：{q['last']}{cny}，{pct}（{q.get('date', '')} {q.get('time', '')}）")
+        if lines:
+            return "【关联外盘行情（定价锚）】\n" + "\n".join(lines)
+    except Exception:
+        pass
+    return ""
+
+
 VARIETY_SEARCH = {
     "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "JM": "焦煤", "J": "焦炭",
     "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "NI": "沪镍", "SN": "沪锡", "SS": "不锈钢",

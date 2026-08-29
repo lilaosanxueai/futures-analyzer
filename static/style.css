@@ -278,6 +278,17 @@ body.splitter-dragging { user-select: none; }
 }
 .panel-head h2 { font-size: 14px; font-weight: 600; }
 
+/* ---------- 外盘参考条 ---------- */
+.intl-bar {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 5px 12px; border-bottom: 1px solid var(--border);
+  background: var(--panel-2); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.intl-bar .intl-title { flex-shrink: 0; }
+.intl-item { white-space: nowrap; cursor: default; }
+.intl-item .n { color: var(--muted); margin-right: 2px; }
+.intl-item b { font-weight: 600; }
+
 /* ---------- 自选列表（窄栏紧凑） ---------- */
 .add-row { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .add-row input { flex: 1; min-width: 0; }

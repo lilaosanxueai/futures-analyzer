@@ -165,6 +165,7 @@ async function doRefresh() {
       loadKline(state.selected);
     }
     if (state.refreshCount % 4 === 0) pollMonitor();
+    if (state.refreshCount % 4 === 0) pollIntl();
     if (state.refreshCount % 8 === 0) pollNews();
   } catch (e) {
     renderMarketStatus(null, e.message);
@@ -1075,6 +1076,25 @@ $("btnTradeLog").addEventListener("click", async () => {
     toast(`保存失败：${e.message}`, true);
   }
 });
+
+
+/* ---------- 外盘参考条（国际品种行情） ---------- */
+
+async function pollIntl() {
+  const bar = $("intlBar");
+  if (!bar) return;
+  try {
+    const d = await api("/api/intl-quotes");
+    const items = (d.items || []).filter((q) => !q.error && q.last != null);
+    if (!items.length) return;
+    bar.innerHTML = `<span class="intl-title muted small">🌍 外盘</span>` + items.map((q) => {
+      const cls = q.change_pct >= 0 ? "up" : "down";
+      const pct = q.change_pct != null ? `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%` : "--";
+      const short = q.name.replace("原油", "油").replace("COMEX ", "").replace("CBOT-", "").replace("WTI ", "WTI");
+      return `<span class="intl-item" title="${q.name} ${q.date} ${q.time}"><span class="n">${short}</span><b class="${cls}">${q.last}</b> <span class="${cls}">${pct}</span></span>`;
+    }).join("");
+  } catch (e) { /* 外盘失败静默 */ }
+}
 
 /* ---------- 价格预警 ---------- */
 
@@ -2393,6 +2413,7 @@ function initSplitters() {
   loadAiConfig();
   pollMonitor();
   pollNews();
+  pollIntl();
   // 顶级视图路由：?view=compare|news|notes（兼容旧 ?tab= 参数）；?report=1 直开晨报
   const params = new URLSearchParams(location.search);
   const legacyTab = params.get("tab");
