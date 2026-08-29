@@ -703,6 +703,21 @@ input:focus, select:focus { border-color: var(--primary); }
 .trump-ev { border-left: 2px solid #b45309; background: rgba(180, 83, 9, .06); }
 .trump-txt { line-height: 1.5; }
 
+
+/* ---------- 宏观日历条 ---------- */
+.cal-strip {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 6px 14px; border-bottom: 1px solid var(--border);
+  background: var(--panel-2); font-size: 11.5px; font-variant-numeric: tabular-nums;
+  max-height: 30vh; overflow-y: auto;
+}
+.cal-ev { white-space: nowrap; padding: 2px 8px; border-radius: 5px; background: var(--panel-solid); }
+.cal-ev .t { color: var(--muted); margin-right: 4px; }
+.cal-ev .star { color: var(--accent); margin-right: 3px; }
+.cal-ev.upcoming { border: 1px solid var(--accent); }
+.cal-ev .reg { color: var(--muted); margin-right: 3px; }
+.cal-ev b { font-weight: 600; }
+
 /* ---------- 交易日志 ---------- */
 .trade-item { padding: 7px 14px; border-bottom: 1px solid rgba(43, 50, 69, .5); font-size: 12px; }
 .trade-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }

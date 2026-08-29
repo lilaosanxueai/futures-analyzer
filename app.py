@@ -657,6 +657,14 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         profile = _variety_profile(symbol)
         if profile:
             parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
+
+        # 今日宏观事件日历（时机风险）
+        try:
+            cal = _calendar_context()
+            if cal:
+                parts.append(cal)
+        except Exception:
+            pass
     return "\n\n".join(parts)
 
 
@@ -1423,6 +1431,69 @@ async def trades_stats():
         "by_symbol": {s: _summary(v) for s, v in sorted(by_symbol.items())},
         "by_grade": {g: _summary(v) for g, v in sorted(by_grade.items())},
     }
+
+
+# ---------------------------------------------------------------- 宏观事件日历
+
+_calendar_cache: dict = {"date": "", "ts": 0.0, "items": []}
+CAL_TTL = 600.0
+
+
+async def get_calendar(date: str = "") -> list[dict]:
+    """当日宏观事件日历（百度财经，含公布/预期/前值/重要性）"""
+    date = date or datetime.now().strftime("%Y%m%d")
+    today = datetime.now().strftime("%Y%m%d")
+    loop_now = asyncio.get_event_loop().time()
+    if (_calendar_cache["date"] == date and loop_now - _calendar_cache["ts"] < CAL_TTL):
+        return _calendar_cache["items"]
+    try:
+        df = await call_ak(ak.news_economic_baidu, date=date)
+        items = [
+            {
+                "date": str(r.get("日期", "")),
+                "time": str(r.get("时间", "")),
+                "region": str(r.get("地区", "")),
+                "event": str(r.get("事件", "")),
+                "actual": str(r.get("公布", "") or ""),
+                "forecast": str(r.get("预期", "") or ""),
+                "previous": str(r.get("前值", "") or ""),
+                "importance": int(r.get("重要性") or 1),
+            }
+            for r in df.to_dict("records")
+        ]
+        items.sort(key=lambda x: x["time"])
+        _calendar_cache.update({"date": date, "ts": loop_now, "items": items})
+        return items
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[calendar] {date} 失败：{e}")
+        return _calendar_cache["items"] if _calendar_cache["date"] == date else []
+
+
+@app.get("/api/calendar")
+async def calendar(date: str = ""):
+    items = await get_calendar(date)
+    return {"ok": True, "items": items}
+
+
+def _calendar_context() -> str:
+    """今日重要宏观事件（未公布的优先），供 AI 判断时机风险"""
+    items = _calendar_cache["items"] if _calendar_cache["date"] == datetime.now().strftime("%Y%m%d") else []
+    if not items:
+        return ""
+    now_hm = datetime.now().strftime("%H:%M")
+    key = [it for it in items if it["importance"] >= 2]
+    upcoming = [it for it in key if it["time"] > now_hm]
+    released = [it for it in key if it["time"] <= now_hm][-5:]
+    lines = []
+    if upcoming:
+        lines.append("即将公布（留意时段风险）：" + "；".join(
+            f"{it['time']} {it['region']}{it['event']}（预期{it['forecast'] or '--'}）" for it in upcoming[:6]))
+    if released:
+        lines.append("已公布：" + "；".join(
+            f"{it['time']} {it['event']} 公布{it['actual'] or '--'}预期{it['forecast'] or '--'}" for it in released))
+    if not lines:
+        return ""
+    return "【今日宏观事件日历（重要性≥2）】\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------- AI 盯盘引擎
