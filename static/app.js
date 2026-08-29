@@ -2025,14 +2025,21 @@ $("detailSym").addEventListener("change", (e) => {
 
 /* ---------- 对比分析 ---------- */
 
-const cmpState = { loaded: false, a: "RB0", b: "HC0" };
+const cmpState = { loaded: false, a: null, b: null };  // 默认取自选前两个
 
 function fillCmpOptions() {
-  const opts = state.candidates.length
-    ? state.candidates.map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("")
-    : ["RB0", "HC0"].map((s) => `<option value="${s}">${s}</option>`).join("");
+  const dom = state.watchlist
+    .map((s) => `<option value="${s}">${s} ${state.names[s] || ""}</option>`).join("");
+  const intl = INTL_LIST
+    .map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("");
+  const opts = `<optgroup label="🇨🇳 国内自选">${dom}</optgroup><optgroup label="🌍 国际品种">${intl}</optgroup>`;
   $("cmpA").innerHTML = opts;
   $("cmpB").innerHTML = opts;
+  // 默认：自选前两个；不足则用国际补位
+  if (!cmpState.a) cmpState.a = state.watchlist[0] || "CL";
+  if (!cmpState.b || cmpState.b === cmpState.a) {
+    cmpState.b = state.watchlist[1] || (INTL_LIST[0].symbol !== cmpState.a ? "CL" : "GC");
+  }
   $("cmpA").value = cmpState.a;
   $("cmpB").value = cmpState.b;
 }

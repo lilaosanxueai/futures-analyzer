@@ -1810,12 +1810,20 @@ async def monitor_test():
 # ---------------------------------------------------------------- 对比与相关性
 
 
+async def _symbol_closes(symbol: str) -> dict:
+    """单品种 {日期: 收盘价}（国内 sina 日线 / 国际 foreign_hist 自动分流）"""
+    if symbol in INTL_SYMBOLS:
+        df = await call_ak(ak.futures_foreign_hist, symbol=symbol)
+        return {str(r["date"])[:10]: _num(r["close"]) for r in df.to_dict("records") if _num(r.get("close"))}
+    daily = await get_daily(symbol)
+    return {str(r["date"]): r["close"] for r in daily if r.get("close")}
+
+
 async def _aligned_closes(syms: list[str], limit: int) -> tuple[list[str], dict]:
-    """多品种日线收盘价按日期对齐，返回（公共日期列表, {sym: {date: close}}）"""
+    """多品种日线收盘价按日期对齐（支持国内+国际混合），返回（公共日期列表, {sym: {date: close}}）"""
     closes = {}
     for s in syms:
-        daily = await get_daily(s)
-        closes[s] = {str(r["date"]): r["close"] for r in daily if r.get("close")}
+        closes[s] = await _symbol_closes(s)
     common = sorted(set.intersection(*[set(c) for c in closes.values()]))[-limit:]
     return common, closes
 
