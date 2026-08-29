@@ -610,6 +610,28 @@ input:focus, select:focus { border-color: var(--primary); }
 }
 .kline-toggle.on { color: var(--accent); border-color: var(--accent); background: rgba(245, 166, 35, .1); }
 
+
+/* ---------- 自检徽章与弹层 ---------- */
+.health-badge {
+  font-size: 13px; cursor: pointer; padding: 3px 6px;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2);
+  user-select: none;
+}
+.health-badge:hover { border-color: var(--muted); }
+.health-badge.ok { border-color: var(--down); }
+.health-badge.warn { border-color: var(--accent); }
+.health-badge.fail { border-color: var(--up); }
+.health-pop { width: 340px; }
+.health-list { max-height: 320px; overflow-y: auto; }
+.health-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 4px 6px; font-size: 12px; border-radius: 5px;
+}
+.health-row:hover { background: var(--panel-2); }
+.health-row .ok { color: var(--down); }
+.health-row .fail { color: var(--up); font-weight: 600; }
+.health-row .ms { color: var(--muted); font-size: 10.5px; }
+
 /* ---------- 其它 ---------- */
 .muted { color: var(--muted); }
 .small { font-size: 12px; }

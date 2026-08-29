@@ -133,9 +133,11 @@ async def lifespan(_app):
     await _warmup()
     monitor_task = asyncio.create_task(monitor_loop())
     report_task = asyncio.create_task(report_push_loop())
+    selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     monitor_task.cancel()
     report_task.cancel()
+    selfcheck_task.cancel()
 
 
 app = FastAPI(title="期货实时分析助手", lifespan=lifespan)
@@ -931,12 +933,13 @@ async def get_intl_quotes(force: bool = False) -> list[dict]:
                 if _intl_cache["items"] else {})
     if not force and loop_now - _intl_cache["ts"] < INTL_TTL:
         return _intl_cache["items"]
-    items = []
-    for code, conf in INTL_SYMBOLS.items():
+    async def safe_fetch(code, conf):
         try:
-            items.append(await _fetch_intl_one(code, conf))
+            return await _fetch_intl_one(code, conf)
         except Exception:
-            items.append({"symbol": code, "name": conf["name"], "error": "获取失败"})
+            return {"symbol": code, "name": conf["name"], "error": "获取失败"}
+
+    items = list(await asyncio.gather(*(safe_fetch(c, cf) for c, cf in INTL_SYMBOLS.items())))
     _intl_cache["items"] = items
     _intl_cache["ts"] = loop_now
 
@@ -2433,6 +2436,158 @@ async def _check_trump_news():
         if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
             _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
         await _feishu_push(f"🇺🇸 特朗普表态监控\n{it['title']}\n[{it['time'][5:16]}] {it.get('source', '')}")
+
+
+# ---------------------------------------------------------------- 定期自检
+
+_health = {"ts": 0, "results": [], "running": False}
+_APP_STARTED = datetime.now()
+
+
+async def _selfcheck_run(ping_ai: bool = False) -> list:
+    """并发执行全部自检项，结果写入 _health（单项超时 12s，总耗时≈最慢项）"""
+    import time as _time
+    results = []
+
+    async def probe_quote():
+        q = await fetch_quote("RB0")
+        if q.get("error"):
+            raise RuntimeError(q["error"])
+        return f"RB0 {q.get('last')}"
+
+    async def probe_kline():
+        d = await get_daily("RB0")
+        return f"{len(d)} 根日线"
+
+    async def probe_minute():
+        rows = await get_minute("RB0", "1")
+        return f"{len(rows)} 根分钟线"
+
+    async def probe_intl():
+        items = await get_intl_quotes()
+        bad = [q["symbol"] for q in items if q.get("error")]
+        base = f"{len(items) - len(bad)}/{len(items)} 品种正常"
+        return base + (f"（异常：{','.join(bad)}）" if bad else "")
+
+    async def probe_news():
+        d = await news()
+        return f"{len(d.get('items', []))} 条缓存"
+
+    async def probe_deep():
+        items = await _variety_news_deep("RB0")
+        if not items:
+            raise RuntimeError("无结果")
+        return f"{len(items)} 条"
+
+    async def probe_shmet():
+        items = await _shmet_news()
+        if not items:
+            raise RuntimeError("无结果")
+        return f"{len(items)} 条"
+
+    async def probe_calendar():
+        items = await get_calendar()
+        if not items:
+            raise RuntimeError("无结果")
+        return f"{len(items)} 个事件"
+
+    async def probe_monitor():
+        lc = _MONITOR.get("last_check")
+        if not lc:
+            uptime = (datetime.now() - _APP_STARTED).total_seconds()
+            if uptime < 90:
+                return f"启动初始化中（{int(uptime)}s，首轮巡检未完成）"
+            raise RuntimeError("盯盘循环尚未运行")
+        return f"最近巡检 {lc}"
+
+    async def probe_feishu():
+        fs = load_config().get("feishu") or {}
+        if not fs.get("app_id"):
+            return "未配置（跳过）"
+        await _feishu_get_token(force=True)
+        return "token 正常"
+
+    async def probe_ai():
+        cfg = load_config()
+        p = cfg["provider"]
+        if not cfg["api_keys"].get(p):
+            raise RuntimeError("未配置 Key")
+        if not ping_ai:
+            return f"已配置 {PROVIDERS[p]['label']}（未实测调用）"
+        out = await _call_ai_simple([{"role": "user", "content": "只回复两个字：正常"}], max_tokens=2048)
+        if not out:
+            raise RuntimeError("空输出")
+        return f"{PROVIDERS[p]['label']} 调用正常"
+
+    async def probe_disk():
+        for f in ("config.json", "notes.json", "trades.json"):
+            fp = BASE_DIR / f
+            if fp.exists():
+                json.loads(fp.read_text(encoding="utf-8"))
+        return "数据文件完整"
+
+    checks = [
+        ("国内实时行情", probe_quote), ("国内日K", probe_kline),
+        ("国内分钟线", probe_minute), ("国际行情", probe_intl),
+        ("快讯流(新浪/东财)", probe_news), ("产业深研(东财)", probe_deep),
+        ("金属快讯(SHMET)", probe_shmet), ("宏观日历", probe_calendar),
+        ("盯盘循环", probe_monitor), ("飞书", probe_feishu),
+        ("AI 服务", probe_ai), ("本地数据", probe_disk),
+    ]
+
+    async def guarded(name, fn):
+        t0 = _time.time()
+        try:
+            detail = await asyncio.wait_for(fn(), timeout=20)
+            results.append({"name": name, "ok": True, "detail": str(detail)[:100],
+                            "ms": int((_time.time() - t0) * 1000)})
+        except Exception as e:
+            results.append({"name": name, "ok": False,
+                            "detail": f"{type(e).__name__}: {str(e)[:90]}",
+                            "ms": int((_time.time() - t0) * 1000)})
+
+    _health["running"] = True
+    t0 = _time.time()
+    try:
+        await asyncio.gather(*(guarded(n, f) for n, f in checks))
+    finally:
+        _health["running"] = False
+        _health["results"] = results
+        _health["ts"] = int(datetime.now().timestamp() * 1000)
+        import logging
+        bad = [r["name"] for r in results if not r["ok"]]
+        logging.getLogger("uvicorn.error").info(
+            f"[selfcheck] 完成（{int((_time.time() - t0) * 1000)}ms）"
+            + (f" 异常：{','.join(bad)}" if bad else " 全部通过"))
+
+
+async def selfcheck_loop():
+    """每 10 分钟自动自检一轮"""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await _selfcheck_run(ping_ai=False)
+        except Exception:
+            pass
+        await asyncio.sleep(600)
+
+
+@app.get("/api/health")
+async def health_get():
+    age = int(datetime.now().timestamp() * 1000) - _health["ts"] if _health["ts"] else None
+    stale = age is None or age > 30 * 60 * 1000
+    if stale and not _health["running"]:
+        asyncio.create_task(_selfcheck_run(ping_ai=False))
+    return {"ok": True, "running": _health["running"], "ts": _health["ts"],
+            "age_ms": age, "results": _health["results"]}
+
+
+@app.post("/api/health/run")
+async def health_run(ping_ai: bool = False):
+    if _health["running"]:
+        return {"ok": True, "running": True}
+    asyncio.create_task(_selfcheck_run(ping_ai=ping_ai))
+    return {"ok": True, "running": True}
 
 
 # ---------------------------------------------------------------- AI 晨报

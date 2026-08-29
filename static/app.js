@@ -1963,6 +1963,103 @@ function setDocTitle() {
   }
 }
 
+/* ---------- 系统自检 ---------- */
+
+const healthState = { poll: null };
+
+function healthBadgeRender(d) {
+  const badge = $("healthBadge");
+  if (!badge) return;
+  const results = d.results || [];
+  if (d.running) {
+    badge.textContent = "🩺检中";
+    badge.className = "health-badge warn";
+    return;
+  }
+  if (!results.length) {
+    badge.textContent = "🩺…";
+    badge.className = "health-badge";
+    return;
+  }
+  const fails = results.filter((r) => !r.ok).length;
+  badge.textContent = fails ? `🩺${fails}项异常` : "🩺正常";
+  badge.className = "health-badge " + (fails ? "fail" : "ok");
+}
+
+async function pollHealth() {
+  try {
+    const d = await api("/api/health");
+    healthBadgeRender(d);
+    if ($("healthPop") && !$("healthPop").classList.contains("hidden")) renderHealthList(d);
+  } catch (e) { /* 静默 */ }
+}
+
+function renderHealthList(d) {
+  const list = $("healthList");
+  if (!list) return;
+  $("healthTime").textContent = d.ts ? new Date(d.ts).toLocaleString("zh-CN") : "";
+  const results = d.results || [];
+  list.innerHTML = results.length
+    ? results.map((r) => `<div class="health-row">
+        <span class="${r.ok ? "ok" : "fail"}">${r.ok ? "✓" : "✕"} ${r.name}</span>
+        <span style="text-align:right"><span class="muted small">${r.detail}</span> <span class="ms">${r.ms}ms</span></span>
+      </div>`).join("")
+    : `<div class="muted small">${d.running ? "自检运行中…" : "尚未运行自检"}</div>`;
+}
+
+$("healthBadge").addEventListener("click", async () => {
+  $("healthPop").classList.toggle("hidden");
+  if (!$("healthPop").classList.contains("hidden")) {
+    renderHealthList({ results: [], running: false });
+    await pollHealth();
+  }
+});
+$("btnHealthRun").addEventListener("click", async () => {
+  const btn = $("btnHealthRun");
+  btn.disabled = true;
+  btn.textContent = "自检运行中…（约 10 秒）";
+  try {
+    await api("/api/health/run", { method: "POST" });
+    // 轮询直到完成
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const d = await api("/api/health");
+      if (!d.running && d.results.length) { healthBadgeRender(d); renderHealthList(d); break; }
+    }
+  } catch (e) {
+    toast(`自检失败：${e.message}`, true);
+  }
+  btn.disabled = false;
+  btn.textContent = "🔄 立即重新自检";
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#healthPop") && !e.target.closest("#healthBadge")) {
+    $("healthPop")?.classList.add("hidden");
+  }
+});
+
+/* ---------- 旧数据自动清理（标注保留 60 天） ---------- */
+
+function pruneOldAnnotations() {
+  try {
+    const store = JSON.parse(localStorage.getItem("fa_annot") || "{}");
+    const cutoff = Date.now() - 60 * 86400000;
+    let removed = 0;
+    for (const sym of Object.keys(store)) {
+      for (const date of Object.keys(store[sym])) {
+        const keep = (store[sym][date] || []).filter((a) => (a.ts || 0) >= cutoff);
+        removed += (store[sym][date] || []).length - keep.length;
+        if (keep.length) store[sym][date] = keep; else delete store[sym][date];
+      }
+      if (!Object.keys(store[sym]).length) delete store[sym];
+    }
+    if (removed) {
+      localStorage.setItem("fa_annot", JSON.stringify(store));
+      toast(`已自动清理 ${removed} 条 60 天前的旧标注`);
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 
 const VIEW_ORDER = ["work", "detail", "compare", "news", "notes", "trades"];
@@ -2752,6 +2849,9 @@ function initSplitters() {
   pollMonitor();
   pollNews();
   pollIntl();
+  pruneOldAnnotations();
+  pollHealth();
+  setInterval(pollHealth, 5 * 60000);
   // 顶级视图路由：?view=compare|news|notes（兼容旧 ?tab= 参数）；?report=1 直开晨报
   const params = new URLSearchParams(location.search);
   const legacyTab = params.get("tab");
