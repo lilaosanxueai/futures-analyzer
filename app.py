@@ -412,6 +412,39 @@ async def kline(symbol: str, period: str = "day", limit: int = 120):
     period = period if period in KLINE_PERIODS else "day"
     limit = min(max(limit, 30), 500)
     symbol = symbol.upper()
+    if symbol in INTL_SYMBOLS:
+        # 国际品种：新浪外盘日 K（futures_foreign_hist），分钟级暂不提供
+        try:
+            df = await call_ak(ak.futures_foreign_hist, symbol=symbol)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"国际K线获取失败：{e}")
+        rows = [
+            {"datetime": str(r.get("date") or ""), "open": _num(r.get("open")),
+             "high": _num(r.get("high")), "low": _num(r.get("low")),
+             "close": _num(r.get("close")), "volume": _num(r.get("volume")),
+             "position": None}
+            for r in df.to_dict("records")
+        ][-limit:]
+        if not rows:
+            raise HTTPException(status_code=502, detail="国际K线数据为空")
+        df2 = pd.DataFrame(rows)
+        for n in (5, 10, 20):
+            df2[f"ma{n}"] = df2["close"].rolling(n).mean()
+        _mid = df2["close"].rolling(20).mean()
+        _std = df2["close"].rolling(20).std(ddof=0)
+        df2["boll_up"] = _mid + 2 * _std
+        df2["boll_mid"] = _mid
+        df2["boll_low"] = _mid - 2 * _std
+        items = [
+            {**r, "ma5": _round_ma(v) if (v := r.get("ma5")) is not None else None,
+             "ma10": _round_ma(v) if (v := r.get("ma10")) is not None else None,
+             "ma20": _round_ma(v) if (v := r.get("ma20")) is not None else None,
+             "boll_up": _round_ma(v) if (v := r.get("boll_up")) is not None else None,
+             "boll_mid": _round_ma(v) if (v := r.get("boll_mid")) is not None else None,
+             "boll_low": _round_ma(v) if (v := r.get("boll_low")) is not None else None}
+            for r in df2.to_dict("records")
+        ]
+        return {"ok": True, "period": "day", "intl": True, "items": items, "signals": []}
     try:
         if period == "day":
             raw = await get_daily(symbol)
@@ -858,6 +891,7 @@ INTL_SYMBOLS = {
     "GC":  {"name": "COMEX 黄金", "kind": "sina"},
     "XAU": {"name": "伦敦金", "kind": "sina"},
     "S":   {"name": "CBOT 美豆", "kind": "sina"},
+    "HG":  {"name": "COMEX 铜", "kind": "sina"},
     "DINIW": {"name": "美元指数", "kind": "hq"},
 }
 
@@ -868,7 +902,7 @@ INTL_TTL = 20.0
 async def _fetch_intl_one(code: str, conf: dict) -> dict:
     if conf["kind"] == "hq":
         # 新浪 hq 接口（美元指数）：时间,现价,买价,卖价,?,昨收...名称,日期
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 f"https://hq.sinajs.cn/list={code}",
                 headers={"Referer": "https://finance.sina.com.cn/futures/"},
@@ -949,7 +983,7 @@ DOMESTIC_TO_INTL = {
     "SC": ["CL", "OIL"], "FU": ["CL", "OIL"], "LU": ["CL", "OIL"], "NR": ["OIL"], "TA": ["OIL"], "MA": ["OIL"], "EG": ["OIL"], "PP": ["OIL"], "L": ["OIL"], "V": ["OIL"], "BU": ["OIL"], "PG": ["OIL"],
     "AU": ["GC", "XAU", "DINIW"], "AG": ["XAU", "DINIW"],
     "M": ["S"], "Y": ["S", "BO"], "P": ["BO"], "A": ["S"], "RM": ["S"], "OI": ["S"],
-    "C": ["C_INTL"], "RB": ["DINIW"], "HC": ["DINIW"], "I": ["DINW", "DINIW"], "CU": ["HG_INTL", "DINIW"], "NI": ["DINIW"], "SN": ["DINIW"],
+    "C": ["C"], "RB": ["DINIW"], "HC": ["DINIW"], "I": ["DINIW"], "CU": ["HG", "DINIW"], "AL": ["DINIW"], "ZN": ["DINIW"], "NI": ["DINIW"], "SN": ["DINIW"],
     "IF": ["DINIW"], "IH": ["DINIW"], "IC": ["DINIW"], "IM": ["DINIW"], "T": ["DINIW"],
 }
 
@@ -1439,6 +1473,27 @@ async def trades_stats():
 async def tick_quote(symbol: str):
     """单合约轻量行情（新浪 hq 原始接口，供前端 2 秒 Tick 采样）"""
     symbol = symbol.strip().upper()
+    if symbol in INTL_SYMBOLS and symbol != "DINIW":
+        # 国际品种：新浪 hf_ 前缀。[0]最新 [2]买 [3]卖 [4]高 [5]低 [6]时间 [7]昨结 [8]开 [11]日期 [12]名称
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(
+                f"https://hq.sinajs.cn/list=hf_{symbol}",
+                headers={"Referer": "https://finance.sina.com.cn/futures/"},
+            )
+        m = re.search(r'"([^"]+)"', r.text)
+        if not m:
+            raise HTTPException(status_code=502, detail="无数据")
+        f = m.group(1).split(",")
+        if len(f) < 13 or not f[0]:
+            raise HTTPException(status_code=502, detail="行情字段异常")
+        return {"ok": True, "symbol": symbol, "intl": True, "name": INTL_SYMBOLS[symbol]["name"],
+                "time": f[6], "date": f[11],
+                "last": _num(f[0]), "bid": _num(f[2]), "ask": _num(f[3]),
+                "high": _num(f[4]), "low": _num(f[5]),
+                "open": _num(f[8]), "prev_settle": _num(f[7]),
+                "position": _num(f[13]), "volume": None}
+    if symbol == "DINIW":
+        return await _fetch_intl_one("DINIW", INTL_SYMBOLS["DINIW"])
     async with httpx.AsyncClient(timeout=8) as client:
         r = await client.get(
             f"https://hq.sinajs.cn/list=nf_{symbol}",

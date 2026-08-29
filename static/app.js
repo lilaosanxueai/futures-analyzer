@@ -343,7 +343,7 @@ function selectSymbol(sym) {
   if (currentView() === "detail") {
     // 详情视图可见才绘制图表（隐藏容器 clientWidth=0，无法绘图）
     renderAnalysisArea();
-    renderSignalArea();
+    if (!isIntl(sym)) renderSignalArea(); else $("sigArea").innerHTML = "";
     syncTradeEvalEntry();
   }
   updateAlarmRow();
@@ -358,7 +358,18 @@ function renderQuoteArea() {
     box.innerHTML = `<div class="muted center pad">在左侧列表中选择一个合约查看详情</div>`;
     return;
   }
-  const q = state.quotes[sym];
+  let q = state.quotes[sym];
+  if (isIntl(sym)) {
+    const iq = (state.intlQuotes || []).find((x) => x.symbol === sym);
+    if (iq && iq.last != null) {
+      q = { symbol: sym, name: iq.name, exchange: "国际", last: iq.last,
+            open: iq.open, high: iq.high, low: iq.low, prev_settle: iq.prev_close,
+            change: iq.prev_close ? +(iq.last - iq.prev_close).toFixed(2) : null,
+            change_pct: iq.change_pct, volume: null, position: null,
+            time: iq.time, date: iq.date, digits: 2 };
+      state.quotes[sym] = q;
+    }
+  }
   if (!q) {
     box.innerHTML = `<div class="muted center pad">加载 ${sym} …</div>`;
     return;
@@ -403,9 +414,13 @@ async function renderAnalysisArea() {
   const sym = state.selected;
   const box = $("chartArea");
   if (!sym) { box.innerHTML = ""; return; }
-  box.innerHTML = `
-    <div class="intraday-wrap">
-      <div class="intraday-legend">
+  const intl = isIntl(sym);
+
+  // 分时区：国际品种无分钟历史，仅提示；国内含标注工具条
+  const intradayHtml = intl
+    ? `<div class="muted small" style="margin-bottom:6px">🌍 国际品种暂无分钟级历史分时，下方 Tick 采样在开盘时段自动记录。</div>
+       <div id="intradayChart"><span class="muted small">开盘后 Tick 自动记录…</span></div>`
+    : `<div class="intraday-legend">
         <span><i class="legend-dot" style="background:#f5c542"></i>价格</span>
         <span><i class="legend-dot" style="background:#7aa2f7"></i>均价</span>
         <span id="intradayDate" class="muted"></span>
@@ -420,11 +435,10 @@ async function renderAnalysisArea() {
           <button class="annot-btn" id="btnAnnotNote" title="把标注保存为一条交易心得">💾</button>
         </span>
       </div>
-      <div id="intradayChart"><span class="muted small">分时加载中…</span></div>
-    </div>
-    <div class="kline-wrap">
-      <div class="kline-head">
-        <span class="kline-title">K 线 · <span class="muted">MA5 <i class="legend-dot" style="background:#ffffff"></i> MA10 <i class="legend-dot" style="background:#f5c542"></i> MA20 <i class="legend-dot" style="background:#c084fc"></i></span></span>
+      <div id="intradayChart"><span class="muted small">分时加载中…</span></div>`;
+
+  // K 线头：国际品种仅日线（隐藏周期/开关）
+  const klineCtrl = intl ? "" : `
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <div class="period-tabs" id="periodTabs">
             ${Object.keys(PERIOD_LABEL).map((p) => `<button data-p="${p}" class="${state.klinePeriod === p ? "active" : ""}">${PERIOD_LABEL[p]}</button>`).join("")}
@@ -432,39 +446,50 @@ async function renderAnalysisArea() {
           <button class="kline-toggle${state.klineShowMA !== false ? " on" : ""}" id="tglMA" title="均线开关">MA</button>
           <button class="kline-toggle${state.klineShowBoll ? " on" : ""}" id="tglBoll" title="布林带开关">BOLL</button>
           <span class="muted small" title="滚轮缩放 · 拖拽平移 · 双击复位">🖱️缩放/平移</span>
-        </div>
+        </div>`;
+
+  box.innerHTML = `
+    <div class="intraday-wrap">
+      ${intradayHtml}
+    </div>
+    <div class="kline-wrap">
+      <div class="kline-head">
+        <span class="kline-title">K 线 · <span class="muted">MA5 <i class="legend-dot" style="background:#ffffff"></i> MA10 <i class="legend-dot" style="background:#f5c542"></i> MA20 <i class="legend-dot" style="background:#c084fc"></i>${intl ? " · 国际品种仅日线" : ""}</span></span>
+        ${klineCtrl}
       </div>
       <div class="kline-chart-box">
         <div id="klineChart"><span class="muted small">K线加载中…</span></div>
         <div id="klineTip" class="kline-tip hidden"></div>
       </div>
     </div>`;
-  loadIntraday(sym);
+  if (!intl) loadIntraday(sym);
   loadKline(sym);
-  $("periodTabs").addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-p]");
-    if (!b || b.dataset.p === state.klinePeriod) return;
-    state.klinePeriod = b.dataset.p;
-    loadKline(sym);
-  });
-  $("tglMA").addEventListener("click", () => {
-    state.klineShowMA = state.klineShowMA === false;
-    $("tglMA").classList.toggle("on", state.klineShowMA !== false);
-    const el = $("klineChart");
-    if (el && el._kfull) renderKlineChart(el, el._kfull);
-  });
-  $("tglBoll").addEventListener("click", () => {
-    state.klineShowBoll = !state.klineShowBoll;
-    $("tglBoll").classList.toggle("on", state.klineShowBoll);
-    const el = $("klineChart");
-    if (el && el._kfull) renderKlineChart(el, el._kfull);
-  });
+  if (!intl) {
+    $("periodTabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-p]");
+      if (!b || b.dataset.p === state.klinePeriod) return;
+      state.klinePeriod = b.dataset.p;
+      loadKline(sym);
+    });
+    $("tglMA").addEventListener("click", () => {
+      state.klineShowMA = state.klineShowMA === false;
+      $("tglMA").classList.toggle("on", state.klineShowMA !== false);
+      const el = $("klineChart");
+      if (el && el._kfull) renderKlineChart(el, el._kfull);
+    });
+    $("tglBoll").addEventListener("click", () => {
+      state.klineShowBoll = !state.klineShowBoll;
+      $("tglBoll").classList.toggle("on", state.klineShowBoll);
+      const el = $("klineChart");
+      if (el && el._kfull) renderKlineChart(el, el._kfull);
+    });
+  }
 }
 
 async function renderSignalArea() {
   const sym = state.selected;
   const box = $("sigArea");
-  if (!sym) { box.innerHTML = ""; return; }
+  if (!sym || isIntl(sym)) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标（日线）</div><span class="muted small">加载中…</span></div>`;
   try {
     const d = await api(`/api/indicators/${sym}`);
@@ -558,6 +583,14 @@ function renderLines(container, series, opts = {}) {
 }
 
 /* ---------- K 线蜡烛图（红涨绿跌 + MA + 成交量副图 + 信号标记 + 十字光标） ---------- */
+
+const INTL_LIST = [
+  { symbol: "CL", name: "WTI 原油" }, { symbol: "OIL", name: "布伦特原油" },
+  { symbol: "GC", name: "COMEX 黄金" }, { symbol: "XAU", name: "伦敦金" },
+  { symbol: "S", name: "CBOT 美豆" }, { symbol: "HG", name: "COMEX 铜" },
+  { symbol: "DINIW", name: "美元指数" },
+];
+const isIntl = (sym) => INTL_LIST.some((s) => s.symbol === sym);
 
 const PERIOD_LABEL = { "1m": "1分", "5m": "5分", "15m": "15分", "30m": "30分", "60m": "60分", "day": "日K" };
 
@@ -1276,7 +1309,8 @@ async function pollIntl() {
   if (!bar) return;
   try {
     const d = await api("/api/intl-quotes");
-    const items = (d.items || []).filter((q) => !q.error && q.last != null);
+    state.intlQuotes = (d.items || []).filter((q) => !q.error && q.last != null);
+    const items = state.intlQuotes;
     if (!items.length) return;
     bar.innerHTML = `<span class="intl-title muted small">🌍 外盘</span>` + items.map((q) => {
       const cls = q.change_pct >= 0 ? "up" : "down";
@@ -1934,10 +1968,11 @@ function syncDetailSymSelect() {
 function fillDetailSymOptions() {
   const sel = $("detailSym");
   if (!sel) return;
-  const opts = state.candidates.length
-    ? state.candidates.map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("")
-    : state.watchlist.map((s) => `<option value="${s}">${s}</option>`).join("");
-  sel.innerHTML = opts;
+  const dom = state.watchlist
+    .map((s) => `<option value="${s}">${s} ${state.names[s] || ""}</option>`).join("");
+  const intl = INTL_LIST
+    .map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("");
+  sel.innerHTML = `<optgroup label="🇨🇳 国内自选">${dom}</optgroup><optgroup label="🌍 国际品种">${intl}</optgroup>`;
   sel.value = state.selected || "";
 }
 
