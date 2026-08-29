@@ -885,6 +885,8 @@ async def _fetch_intl_one(code: str, conf: dict) -> dict:
 
 async def get_intl_quotes(force: bool = False) -> list[dict]:
     loop_now = asyncio.get_event_loop().time()
+    prev_map = ({q["symbol"]: q for q in _intl_cache["items"] if not q.get("error")}
+                if _intl_cache["items"] else {})
     if not force and loop_now - _intl_cache["ts"] < INTL_TTL:
         return _intl_cache["items"]
     items = []
@@ -895,6 +897,37 @@ async def get_intl_quotes(force: bool = False) -> list[dict]:
             items.append({"symbol": code, "name": conf["name"], "error": "获取失败"})
     _intl_cache["items"] = items
     _intl_cache["ts"] = loop_now
+
+    # 外盘异动检测：与上次抓取比较，超阈值即入事件流 + 推送飞书
+    for q in items:
+        pp = prev_map.get(q.get("symbol"))
+        if not pp or not pp.get("last") or not q.get("last"):
+            continue
+        delta = (q["last"] / pp["last"] - 1) * 100
+        thr = 0.25 if q["symbol"] == "DINIW" else 0.5
+        if abs(delta) < thr:
+            continue
+        direction = "up" if delta > 0 else "down"
+        now_ts = asyncio.get_event_loop().time()
+        if now_ts - _MONITOR["cooldown"].get((q["symbol"], direction), 0) < MONITOR_COOLDOWN:
+            continue
+        _MONITOR["cooldown"][(q["symbol"], direction)] = now_ts
+        event = {
+            "id": f"{q['symbol']}-{direction}-{int(now_ts)}",
+            "ts": int(datetime.now().timestamp() * 1000),
+            "symbol": q["symbol"], "name": q["name"], "dir": direction,
+            "chg5": round(delta, 2), "chg15": delta, "day_chg": None,
+            "price": q["last"], "from": pp["last"], "pos_chg": None,
+            "threshold": thr, "intl": True, "time_str": f"{q.get('date', '')} {q.get('time', '')}",
+            "ai": None,
+        }
+        _MONITOR["events"].append(event)
+        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+        asyncio.create_task(_feishu_push(
+            f"🌍 外盘异动\n{q['name']} {'急涨' if delta > 0 else '急跌'} {delta:+.2f}% → {q['last']}"
+            f"\n（{q.get('date', '')} {q.get('time', '')}）"
+        ))
     return items
 
 
@@ -2031,7 +2064,7 @@ NEWS_TOPICS = {
     # 美伊冲突：核心方言论与动作
     "usiran": [
         # 美方
-        "特朗普", "白宫", "美国国务院", "五角大楼", "美国国防部", "美军", "美国中央司令部",
+        "特朗普", "川普", "白宫", "美国国务院", "五角大楼", "美国国防部", "美军", "美国中央司令部",
         "美国官员", "华盛顿号",
         # 伊朗方
         "伊朗", "德黑兰", "哈梅内伊", "伊朗总统", "伊朗外长", "革命卫队", "伊朗核",
@@ -2039,6 +2072,8 @@ NEWS_TOPICS = {
         # 冲突动作与关联方（保持聚焦，泛词如"地缘/俄乌"归 oilgold 主题）
         "空袭", "霍尔木兹", "红海", "胡塞", "停火谈判", "以色列", "沙特遇袭", "对伊制裁",
     ],
+    # 特朗普表态专项监控（言论/动作，独立通知）
+    "trump": ["特朗普", "川普", "白宫", "美国总统", "特朗普政府", "椭圆形办公室", "truth social"],
 }
 
 _news_cache: dict = {"ts": 0.0, "items": []}
@@ -2184,6 +2219,7 @@ async def news(topic: str = ""):
         items.sort(key=lambda x: x["time"], reverse=True)
         _news_cache["items"] = items[:80]
         _news_cache["ts"] = loop_now
+        asyncio.create_task(_check_trump_news())
 
     result_items = _news_cache["items"]
     if topic in NEWS_TOPICS:
@@ -2204,6 +2240,39 @@ async def news(topic: str = ""):
             "tags": {str(k): v for k, v in ai_tags.items()},
         },
     }
+
+
+# ---------------------------------------------------------------- 特朗普表态监控
+
+_trump_seen: set = set()
+_trump_first = {"done": False}
+
+
+async def _check_trump_news():
+    """扫描快讯流中的特朗普相关新条目 → 事件流 + 飞书推送（首次扫描只建档不推送）"""
+    items = [it for it in _news_cache["items"] if "trump" in (it.get("topics") or [])]
+    if not _trump_first["done"]:
+        for it in items:
+            _trump_seen.add(it["title"])
+        _trump_first["done"] = True
+        return
+    new_items = [it for it in items if it["title"] not in _trump_seen]
+    for it in new_items:
+        _trump_seen.add(it["title"])
+        event = {
+            "id": f"trump-{abs(hash(it['title'])) % 10 ** 10}",
+            "ts": int(datetime.now().timestamp() * 1000),
+            "symbol": "TRUMP", "name": "特朗普表态", "dir": "trump",
+            "chg5": 0, "chg15": 0, "day_chg": None, "price": "", "from": "",
+            "pos_chg": None, "threshold": 0,
+            "text": it["title"], "summary": (it.get("summary") or "")[:150],
+            "source": it.get("source", ""), "link": it.get("link", ""),
+            "ai": None,
+        }
+        _MONITOR["events"].append(event)
+        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+        await _feishu_push(f"🇺🇸 特朗普表态监控\n{it['title']}\n[{it['time'][5:16]}] {it.get('source', '')}")
 
 
 # ---------------------------------------------------------------- AI 晨报

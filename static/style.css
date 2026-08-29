@@ -699,6 +699,10 @@ input:focus, select:focus { border-color: var(--primary); }
 .report-body .md h2 { margin: 14px 0 8px; }
 .report-generating { text-align: center; padding: 40px 0; }
 
+
+.trump-ev { border-left: 2px solid #b45309; background: rgba(180, 83, 9, .06); }
+.trump-txt { line-height: 1.5; }
+
 /* ---------- 交易日志 ---------- */
 .trade-item { padding: 7px 14px; border-bottom: 1px solid rgba(43, 50, 69, .5); font-size: 12px; }
 .trade-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }

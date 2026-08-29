@@ -1244,29 +1244,47 @@ async function pollMonitor() {
     if (monitorState.seen.size) {
       for (const e of d.events) {
         if (!monitorState.seen.has(e.id)) {
-          const word = e.dir === "up" ? "急涨" : "跳水";
-          toast(`🤖 ${e.symbol} ${word} ${e.chg5 > 0 ? "+" : ""}${e.chg5}% → ${e.price}`, true);
-          flashTitle(`${e.symbol} ${word}${e.chg5 > 0 ? "+" : ""}${e.chg5}%`);
+          if (e.dir === "trump") {
+            toast(`🇺🇸 特朗普：${(e.text || "").slice(0, 44)}`, true);
+            flashTitle("特朗普新表态");
+          } else {
+            const word = e.dir === "up" ? "急涨" : "跳水";
+            const tag = e.intl ? "🌍 " : "🤖 ";
+            toast(`${tag}${e.symbol} ${word} ${e.chg5 > 0 ? "+" : ""}${e.chg5}% → ${e.price}`, true);
+            flashTitle(`${e.symbol} ${word}${e.chg5 > 0 ? "+" : ""}${e.chg5}%`);
+          }
           monitorBeep();
         }
       }
     }
     d.events.forEach((e) => monitorState.seen.add(e.id));
+    const esc = (s) => String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     list.innerHTML = d.events
       .map((e) => {
         const t = new Date(e.ts);
         const hhmm = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+        // 特朗普表态事件
+        if (e.dir === "trump") {
+          return `<div class="mon-event trump-ev">
+            <div class="mon-line"><span class="mon-time">${hhmm}</span><b>🇺🇸 特朗普</b>
+            <span class="trump-txt">${esc(e.text)}</span>
+            ${e.source ? `<span class="muted small">${e.source}</span>` : ""}</div>
+          </div>`;
+        }
         const cls = e.dir === "up" ? "up" : "down";
         const word = e.dir === "up" ? "急涨" : "跳水";
         const sign = e.chg5 > 0 ? "+" : "";
+        const tag = e.intl ? "🌍 " : "";
+        const symHtml = e.intl ? `<b>${e.name || e.symbol}</b>` : `<b>${e.symbol}</b>`;
+        const range = e.intl && e.time_str ? `<span class="muted small">${e.time_str}</span>` : `<span class="muted small">5分 / 阈值${e.threshold}%</span>`;
         return `<div class="mon-event" data-sym="${e.symbol}">
           <div class="mon-line">
-            <span class="mon-time">${hhmm}</span><b>${e.symbol}</b>
+            <span class="mon-time">${hhmm}</span>${tag}${symHtml}
             <span class="${cls}">${word} ${sign}${e.chg5}%</span>
             <span>→ ${e.price}</span>
-            <span class="muted small">5分 / 阈值${e.threshold}%</span>
+            ${range}
           </div>
-          ${e.ai ? `<div class="mon-ai">💡 ${e.ai}</div>` : `<div class="mon-ai muted">AI 解读生成中…</div>`}
+          ${e.ai ? `<div class="mon-ai">💡 ${e.ai}</div>` : (e.intl ? "" : `<div class="mon-ai muted">AI 解读生成中…</div>`)}
         </div>`;
       })
       .join("");
