@@ -1304,22 +1304,34 @@ $("btnTradeLog").addEventListener("click", async () => {
 
 /* ---------- 外盘参考条（国际品种行情） ---------- */
 
+const INTL_CORE = ["CL", "GC", "DINIW"];  // 紧凑模式只显示：WTI / COMEX金 / 美元
+
 async function pollIntl() {
   const bar = $("intlBar");
   if (!bar) return;
   try {
     const d = await api("/api/intl-quotes");
     state.intlQuotes = (d.items || []).filter((q) => !q.error && q.last != null);
-    const items = state.intlQuotes;
+    const expanded = localStorage.getItem("fa_intl_expanded") === "1";
+    let items = state.intlQuotes;
+    if (!expanded) items = items.filter((q) => INTL_CORE.includes(q.symbol));
     if (!items.length) return;
-    bar.innerHTML = `<span class="intl-title muted small">🌍 外盘</span>` + items.map((q) => {
+    bar.classList.toggle("expanded", expanded);
+    bar.innerHTML = `<span class="intl-title muted small" title="点击展开/收起">🌍 外盘${expanded ? " ▾" : " ▸"}</span>` + items.map((q) => {
       const cls = q.change_pct >= 0 ? "up" : "down";
       const pct = q.change_pct != null ? `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%` : "--";
-      const short = q.name.replace("原油", "油").replace("COMEX ", "").replace("CBOT-", "").replace("WTI ", "WTI");
-      return `<span class="intl-item" title="${q.name} ${q.date} ${q.time}"><span class="n">${short}</span><b class="${cls}">${q.last}</b> <span class="${cls}">${pct}</span></span>`;
+      const short = q.name.replace("原油", "油").replace("COMEX ", "").replace("CBOT-", "").replace("WTI ", "WTI").replace("美元指数", "美元");
+      const price = q.last >= 1000 ? Math.round(q.last).toLocaleString() : q.last;
+      return `<span class="intl-item" title="${q.name} ${q.date} ${q.time}"><span class="n">${short}</span><b class="${cls}">${price}</b> <span class="${cls}">${pct}</span></span>`;
     }).join("");
   } catch (e) { /* 外盘失败静默 */ }
 }
+
+$("intlBar").addEventListener("click", () => {
+  const next = localStorage.getItem("fa_intl_expanded") === "1" ? "0" : "1";
+  localStorage.setItem("fa_intl_expanded", next);
+  pollIntl();
+});
 
 /* ---------- 宏观事件日历 ---------- */
 

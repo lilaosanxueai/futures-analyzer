@@ -280,10 +280,15 @@ body.splitter-dragging { user-select: none; }
 
 /* ---------- 外盘参考条 ---------- */
 .intl-bar {
-  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
-  padding: 5px 12px; border-bottom: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap;
+  overflow-x: auto; scrollbar-width: none;
+  padding: 4px 10px; border-bottom: 1px solid var(--border);
   background: var(--panel-2); font-size: 11px; font-variant-numeric: tabular-nums;
+  cursor: pointer;
 }
+.intl-bar::-webkit-scrollbar { display: none; }
+.intl-bar.expanded { flex-wrap: wrap; row-gap: 3px; }
+.intl-bar .intl-title { flex-shrink: 0; }
 .intl-bar .intl-title { flex-shrink: 0; }
 .intl-item { white-space: nowrap; cursor: default; }
 .intl-item .n { color: var(--muted); margin-right: 2px; }
