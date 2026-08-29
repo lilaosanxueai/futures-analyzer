@@ -294,6 +294,27 @@ body.splitter-dragging { user-select: none; }
 .intl-item .n { color: var(--muted); margin-right: 2px; }
 .intl-item b { font-weight: 600; }
 
+
+/* ---------- 涨跌热力条 ---------- */
+.heat-strip {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 4px 10px 3px; border-bottom: 1px solid var(--border);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.heat-title { flex-shrink: 0; color: var(--muted); cursor: pointer; padding-top: 5px; user-select: none; }
+.heat-title:hover { color: var(--text); }
+.heat-tiles { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; flex: 1; }
+.heat-tiles::-webkit-scrollbar { display: none; }
+.heat-strip.collapsed .heat-tiles { display: none; }
+.heat-tile {
+  flex: 0 0 auto; min-width: 60px; text-align: center;
+  padding: 2px 6px; border-radius: 6px; border: 1px solid var(--border);
+  cursor: pointer; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+.heat-tile:hover { border-color: var(--muted); }
+.heat-tile .s { display: block; font-weight: 600; font-size: 11px; }
+.heat-tile .p { font-size: 10.5px; }
+
 /* ---------- 自选列表（窄栏紧凑） ---------- */
 .add-row { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .add-row input { flex: 1; min-width: 0; }

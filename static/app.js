@@ -151,6 +151,7 @@ async function doRefresh() {
     renderTable();
     renderMarketStatus(data.market_open);
     $("marketStatus").textContent += ` · ${sessionCountdown()}`;
+    renderHeat();
     setDocTitle();
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
     if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
@@ -1346,6 +1347,7 @@ async function pollIntl() {
       const price = q.last >= 1000 ? Math.round(q.last).toLocaleString() : q.last;
       return `<span class="intl-item" title="${q.name} ${q.date} ${q.time}"><span class="n">${short}</span><b class="${cls}">${price}</b> <span class="${cls}">${pct}</span></span>`;
     }).join("");
+    renderHeat();
   } catch (e) { /* 外盘失败静默 */ }
 }
 
@@ -1513,6 +1515,51 @@ function sessionCountdown() {
   }
   return "今日已收盘";
 }
+
+
+/* ---------- 涨跌热力条（国内自选 + 国际，强度着色） ---------- */
+
+const heatState = { collapsed: localStorage.getItem("fa_heat_collapse") === "1" };
+
+function renderHeat() {
+  const strip = $("heatStrip");
+  if (!strip) return;
+  strip.classList.toggle("collapsed", heatState.collapsed);
+  const arrow = $("heatArrow");
+  if (arrow) arrow.textContent = heatState.collapsed ? "▸" : "▾";
+  const tilesEl = strip.querySelector(".heat-tiles");
+  if (!tilesEl || heatState.collapsed) return;
+  const tiles = [];
+  for (const sym of state.watchlist) {
+    const q = state.quotes[sym];
+    if (q && q.change_pct != null) tiles.push({ sym, name: state.names[sym] || sym, pct: q.change_pct });
+  }
+  for (const q of state.intlQuotes || []) tiles.push({ sym: q.symbol, name: q.name, pct: q.change_pct });
+  tiles.sort((a, b) => b.pct - a.pct);
+  if (!tiles.length) { tilesEl.innerHTML = `<span class="muted small">等待行情…</span>`; return; }
+  tilesEl.innerHTML = tiles.map((t) => {
+    const a = Math.min(Math.abs(t.pct) / 3, 1) * 0.72 + 0.08;
+    const bg = t.pct >= 0 ? `rgba(243,78,78,${a.toFixed(2)})` : `rgba(34,197,94,${a.toFixed(2)})`;
+    const tag = isIntl(t.sym) ? "🌍" : "";
+    return `<span class="heat-tile" data-hsym="${t.sym}" style="background:${bg}" title="${t.name}（点击看详情）">
+      <span class="s">${tag}${t.sym}</span><span class="p">${t.pct >= 0 ? "+" : ""}${t.pct.toFixed(2)}%</span>
+    </span>`;
+  }).join("");
+}
+
+$("heatStrip").addEventListener("click", (e) => {
+  if (e.target.closest(".heat-title")) {
+    heatState.collapsed = !heatState.collapsed;
+    localStorage.setItem("fa_heat_collapse", heatState.collapsed ? "1" : "0");
+    renderHeat();
+    return;
+  }
+  const tile = e.target.closest("[data-hsym]");
+  if (tile) {
+    selectSymbol(tile.dataset.hsym);
+    switchView("detail");
+  }
+});
 
 /* ---------- 价格预警 ---------- */
 
