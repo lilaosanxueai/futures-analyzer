@@ -32,6 +32,7 @@
   <button class="view-tab" data-view="news">📰 资讯要闻</button>
   <button class="view-tab" data-view="notes">📝 交易心得</button>
   <button class="view-tab" data-view="trades">📒 交易日志</button>
+  <button class="view-tab" data-view="heat">🔥 热力图</button>
 </nav>
 
 <main class="views">
@@ -55,10 +56,6 @@
         <div class="intl-bar" id="intlBar">
           <span class="intl-title muted small">🌍 外盘</span>
           <span class="muted small">加载中…</span>
-        </div>
-        <div class="heat-strip" id="heatStrip">
-          <span class="heat-title" title="点击收起/展开">🔥 热力 <span id="heatArrow">▾</span></span>
-          <div class="heat-tiles"><span class="muted small">等待行情…</span></div>
         </div>
         <div class="table-wrap">
           <table class="quote-table">
@@ -247,6 +244,20 @@
             <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
           </div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 视图：热力图（全宽） -->
+  <section class="view hidden" data-view="heat">
+    <div class="panel view-panel">
+      <div class="panel-head">
+        <h2>🔥 涨跌热力图</h2>
+        <span id="heatStats" class="muted small"></span>
+      </div>
+      <div class="heat-view">
+        <div id="heatDomestic" class="heat-group"></div>
+        <div id="heatIntl" class="heat-group"></div>
       </div>
     </div>
   </section>

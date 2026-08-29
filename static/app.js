@@ -151,7 +151,7 @@ async function doRefresh() {
     renderTable();
     renderMarketStatus(data.market_open);
     $("marketStatus").textContent += ` · ${sessionCountdown()}`;
-    renderHeat();
+    renderHeatView();
     setDocTitle();
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
     if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
@@ -1347,7 +1347,7 @@ async function pollIntl() {
       const price = q.last >= 1000 ? Math.round(q.last).toLocaleString() : q.last;
       return `<span class="intl-item" title="${q.name} ${q.date} ${q.time}"><span class="n">${short}</span><b class="${cls}">${price}</b> <span class="${cls}">${pct}</span></span>`;
     }).join("");
-    renderHeat();
+    renderHeatView();
   } catch (e) { /* 外盘失败静默 */ }
 }
 
@@ -1517,43 +1517,54 @@ function sessionCountdown() {
 }
 
 
-/* ---------- 涨跌热力条（国内自选 + 国际，强度着色） ---------- */
+/* ---------- 涨跌热力图（独立视图：国内自选 + 国际，强度着色） ---------- */
 
-const heatState = { collapsed: localStorage.getItem("fa_heat_collapse") === "1" };
-
-function renderHeat() {
-  const strip = $("heatStrip");
-  if (!strip) return;
-  strip.classList.toggle("collapsed", heatState.collapsed);
-  const arrow = $("heatArrow");
-  if (arrow) arrow.textContent = heatState.collapsed ? "▸" : "▾";
-  const tilesEl = strip.querySelector(".heat-tiles");
-  if (!tilesEl || heatState.collapsed) return;
+function heatTiles() {
   const tiles = [];
   for (const sym of state.watchlist) {
     const q = state.quotes[sym];
-    if (q && q.change_pct != null) tiles.push({ sym, name: state.names[sym] || sym, pct: q.change_pct });
+    if (q && q.change_pct != null) tiles.push({ sym, name: state.names[sym] || sym, pct: q.change_pct, last: q.last, intl: false });
   }
-  for (const q of state.intlQuotes || []) tiles.push({ sym: q.symbol, name: q.name, pct: q.change_pct });
+  for (const q of state.intlQuotes || []) tiles.push({ sym: q.symbol, name: q.name, pct: q.change_pct, last: q.last, intl: true });
   tiles.sort((a, b) => b.pct - a.pct);
-  if (!tiles.length) { tilesEl.innerHTML = `<span class="muted small">等待行情…</span>`; return; }
-  tilesEl.innerHTML = tiles.map((t) => {
-    const a = Math.min(Math.abs(t.pct) / 3, 1) * 0.72 + 0.08;
-    const bg = t.pct >= 0 ? `rgba(243,78,78,${a.toFixed(2)})` : `rgba(34,197,94,${a.toFixed(2)})`;
-    const tag = isIntl(t.sym) ? "🌍" : "";
-    return `<span class="heat-tile" data-hsym="${t.sym}" style="background:${bg}" title="${t.name}（点击看详情）">
-      <span class="s">${tag}${t.sym}</span><span class="p">${t.pct >= 0 ? "+" : ""}${t.pct.toFixed(2)}%</span>
-    </span>`;
-  }).join("");
+  return tiles;
 }
 
-$("heatStrip").addEventListener("click", (e) => {
-  if (e.target.closest(".heat-title")) {
-    heatState.collapsed = !heatState.collapsed;
-    localStorage.setItem("fa_heat_collapse", heatState.collapsed ? "1" : "0");
-    renderHeat();
+function renderHeatView() {
+  const dom = $("heatDomestic"), intlBox = $("heatIntl"), stats = $("heatStats");
+  if (!dom || currentView() !== "heat") return;
+  const tiles = heatTiles();
+  if (!tiles.length) {
+    dom.innerHTML = `<span class="muted small">等待行情数据…</span>`;
+    intlBox.innerHTML = "";
     return;
   }
+  const up = tiles.filter((t) => t.pct > 0).length;
+  const down = tiles.filter((t) => t.pct < 0).length;
+  const flat = tiles.length - up - down;
+  const avg = (tiles.reduce((s, t) => s + t.pct, 0) / tiles.length).toFixed(2);
+  stats.textContent = `涨 ${up} · 跌 ${down} · 平 ${flat} · 平均 ${avg > 0 ? "+" : ""}${avg}% · 强者居左`;
+
+  const tileHtml = (t) => {
+    const a = Math.min(Math.abs(t.pct) / 3, 1) * 0.72 + 0.08;
+    const bg = t.pct >= 0 ? `rgba(243,78,78,${a.toFixed(2)})` : `rgba(34,197,94,${a.toFixed(2)})`;
+    const tag = t.intl ? "🌍 " : "";
+    const lp = t.last != null ? (t.last >= 1000 ? Math.round(t.last).toLocaleString() : t.last) : "--";
+    return `<div class="heat-big" data-hsym="${t.sym}" style="background:${bg}" title="${t.name}">
+      <span class="hs">${tag}${t.sym}</span><span class="hn">${t.name}</span>
+      <span class="hp">${t.pct >= 0 ? "+" : ""}${t.pct.toFixed(2)}%</span>
+      <span class="hl">${lp}</span>
+    </div>`;
+  };
+  const domTiles = tiles.filter((t) => !t.intl);
+  const intlTiles = tiles.filter((t) => t.intl);
+  dom.innerHTML = domTiles.length ? `<div class="heat-grid">${domTiles.map(tileHtml).join("")}</div>` : `<span class="muted small">暂无国内自选</span>`;
+  intlBox.innerHTML = intlTiles.length ? `<div class="heat-group-title">🌍 国际品种</div><div class="heat-grid">${intlTiles.map(tileHtml).join("")}</div>` : "";
+}
+
+
+// 热力图色块点击 → 直达详情
+document.querySelector(".heat-view").addEventListener("click", (e) => {
   const tile = e.target.closest("[data-hsym]");
   if (tile) {
     selectSymbol(tile.dataset.hsym);
@@ -1561,6 +1572,7 @@ $("heatStrip").addEventListener("click", (e) => {
   }
 });
 
+/* ---------- 价格预警 ---------- */
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
@@ -2039,6 +2051,7 @@ const CMDK_COMMANDS = [
   { key: "资讯/要闻", desc: "视图", run: () => switchView("news") },
   { key: "心得", desc: "视图", run: () => switchView("notes") },
   { key: "交易日志", desc: "视图", run: () => switchView("trades") },
+  { key: "热力图", desc: "视图", run: () => switchView("heat") },
   { key: "晨报", desc: "生成/查看 AI 简报", run: () => $("btnReport").click() },
   { key: "皮肤", desc: "切换界面皮肤", run: () => $("btnSkin").click() },
   { key: "设置", desc: "AI/飞书/盯盘配置", run: () => $("btnSettings").click() },
@@ -2218,7 +2231,7 @@ function pruneOldAnnotations() {
 
 /* ---------- 顶级视图路由（标签切换界面） ---------- */
 
-const VIEW_ORDER = ["work", "detail", "compare", "news", "notes", "trades"];
+const VIEW_ORDER = ["work", "detail", "compare", "news", "notes", "trades", "heat"];
 
 function currentView() {
   const el = document.querySelector(".view:not(.hidden)");
@@ -2269,6 +2282,7 @@ function switchView(name) {
     if (!calLoaded) { calLoaded = true; loadCalendar(); }
   }
   if (name === "trades" && !tradesState.loaded) loadTrades();
+  if (name === "heat") renderHeatView();
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -2280,7 +2294,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "?" && !["INPUT", "SELECT", "TEXTAREA"].includes((document.activeElement || {}).tagName)) {
     toggleShortcuts();
   }
-  if (e.altKey && /^[1-6]$/.test(e.key)) {
+  if (e.altKey && /^[1-7]$/.test(e.key)) {
     switchView(VIEW_ORDER[Number(e.key) - 1]);
     e.preventDefault();
   }
