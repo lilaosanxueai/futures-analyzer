@@ -539,14 +539,6 @@ async function renderSignalArea() {
 
 /* ---------- 实时走势（本次会话的 5 秒采样轨迹） ---------- */
 
-function recordTick() {
-  const sym = state.selected;
-  const q = sym && state.quotes[sym];
-  if (!q || q.last == null) return;
-  if (state.ticks.sym !== sym) state.ticks = { sym, points: [] };
-  state.ticks.points.push({ t: Date.now(), p: q.last, v: q.volume });
-  if (state.ticks.points.length > 300) state.ticks.points.shift(); // 2秒/笔 ≈ 10 分钟
-}
 
 function renderTickChart() {
   const box = $("tickChart");
@@ -581,29 +573,6 @@ function dg(k, v) {
 }
 
 /* SVG 折线图（一条或多条） */
-function renderLines(container, series, opts = {}) {
-  const w = opts.width || 600;
-  const h = opts.height || 110;
-  const pad = 4;
-  const all = series.flatMap((s) => s.points.filter((p) => p != null));
-  if (all.length < 2) { container.textContent = "暂无数据"; return; }
-  const min = Math.min(...all), max = Math.max(...all);
-  const span = max - min || 1;
-  const n = Math.max(...series.map((s) => s.points.length));
-  const polylines = series
-    .map((s) => {
-      const pts = s.points.map((c, i) => {
-        if (c == null) return null;
-        const x = pad + (i / (n - 1)) * (w - pad * 2);
-        const y = pad + (1 - (c - min) / span) * (h - pad * 2);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      }).filter(Boolean);
-      return `<polyline points="${pts.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.4"/>`;
-    })
-    .join("");
-  const label = opts.minMax !== false ? `<text x="${pad}" y="11" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="10">${max}</text><text x="${pad}" y="${h - 5}" fill="#8a93a6" style="fill:var(--chart-axis)" font-size="10">${min}</text>` : "";
-  container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${polylines}${label}</svg>`;
-}
 
 /* ---------- K 线蜡烛图（红涨绿跌 + MA + 成交量副图 + 信号标记 + 十字光标） ---------- */
 
@@ -1069,22 +1038,6 @@ async function loadIntraday(sym) {
   }
 }
 
-async function loadSparkline(sym) { /* 已被 K 线图替代，保留空实现避免旧引用 */ }
-
-/* ---------- 开仓风险评估（日内短线） ---------- */
-
-const teState = { entryTouched: false };
-
-// 切换合约时若用户未手动改过开仓价，自动跟随现价
-function syncTradeEvalEntry() {
-  const input = $("teEntry");
-  if (!input) return;
-  if (!teState.entryTouched || !input.value) {
-    const q = state.selected && state.quotes[state.selected];
-    if (q && q.last != null) input.value = q.last;
-  }
-  renderTeCalc();
-}
 
 // 输入变化即实时计算止损/止盈价与盈亏比（不调 AI）
 function renderTeCalc() {

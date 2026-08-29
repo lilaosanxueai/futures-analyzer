@@ -934,8 +934,11 @@ async def get_intl_quotes(force: bool = False) -> list[dict]:
     if not force and loop_now - _intl_cache["ts"] < INTL_TTL:
         return _intl_cache["items"]
     async def safe_fetch(code, conf):
+        # 单项 6 秒封顶：最慢的外网请求不拖累整批（失败者下轮重试）
         try:
-            return await _fetch_intl_one(code, conf)
+            return await asyncio.wait_for(_fetch_intl_one(code, conf), timeout=8)
+        except asyncio.TimeoutError:
+            return {"symbol": code, "name": conf["name"], "error": "超时"}
         except Exception:
             return {"symbol": code, "name": conf["name"], "error": "获取失败"}
 
