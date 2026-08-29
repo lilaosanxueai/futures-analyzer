@@ -1433,6 +1433,32 @@ async def trades_stats():
     }
 
 
+# ---------------------------------------------------------------- Tick 逐笔采样（2 秒）
+
+@app.get("/api/tick/{symbol}")
+async def tick_quote(symbol: str):
+    """单合约轻量行情（新浪 hq 原始接口，供前端 2 秒 Tick 采样）"""
+    symbol = symbol.strip().upper()
+    async with httpx.AsyncClient(timeout=8) as client:
+        r = await client.get(
+            f"https://hq.sinajs.cn/list=nf_{symbol}",
+            headers={"Referer": "https://finance.sina.com.cn/futures/"},
+        )
+    m = re.search(r'"([^"]+)"', r.text)
+    if not m:
+        raise HTTPException(status_code=502, detail="无数据")
+    f = m.group(1).split(",")
+    if len(f) < 15 or not f[8]:
+        raise HTTPException(status_code=502, detail="行情字段异常")
+    t = f[1]
+    return {"ok": True, "symbol": symbol, "name": f[0],
+            "time": f"{t[0:2]}:{t[2:4]}:{t[4:6]}" if re.fullmatch(r"\d{6}", t) else t,
+            "last": _num(f[8]), "bid": _num(f[6]), "ask": _num(f[7]),
+            "bid_vol": _num(f[11]), "ask_vol": _num(f[12]),
+            "position": _num(f[13]), "volume": _num(f[14]),
+            "prev_settle": _num(f[10])}
+
+
 # ---------------------------------------------------------------- 宏观事件日历
 
 _calendar_cache: dict = {"date": "", "ts": 0.0, "items": []}

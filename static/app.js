@@ -152,7 +152,6 @@ async function doRefresh() {
     renderMarketStatus(data.market_open);
     setDocTitle();
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
-    recordTick();
     if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
     // 行情到达后补画一次分时图（选中时行情未到，昨结线缺失）
     if (state.selected && state.quotes[state.selected]?.prev_settle != null && !state.intradayDrawn) {
@@ -384,7 +383,7 @@ function renderQuoteArea() {
       ${dg("持仓量", fmt(q.position))}
     </div>
     <div class="tick-wrap">
-      <div class="spark-title">实时走势（本次会话）</div>
+      <div class="spark-title">Tick 实时走势（2 秒采样，详情页打开时记录）</div>
       <div id="tickChart"></div>
     </div>`;
   $("detailTime").textContent = q.time ? `行情时间：${q.time}` : "";
@@ -497,8 +496,8 @@ function recordTick() {
   const q = sym && state.quotes[sym];
   if (!q || q.last == null) return;
   if (state.ticks.sym !== sym) state.ticks = { sym, points: [] };
-  state.ticks.points.push({ t: Date.now(), p: q.last });
-  if (state.ticks.points.length > 240) state.ticks.points.shift(); // 保留约 20 分钟
+  state.ticks.points.push({ t: Date.now(), p: q.last, v: q.volume });
+  if (state.ticks.points.length > 300) state.ticks.points.shift(); // 2秒/笔 ≈ 10 分钟
 }
 
 function renderTickChart() {
@@ -1340,6 +1339,25 @@ document.addEventListener("keydown", (e) => {
     if (state.selected) loadKline(state.selected);
   }
 });
+
+
+/* ---------- Tick 轮询器（2 秒，仅详情视图可见时采样） ---------- */
+
+async function tickPoll() {
+  if (currentView() !== "detail" || !state.selected || pollPaused) return;
+  const sym = state.selected;
+  try {
+    const d = await api(`/api/tick/${sym}`);
+    if (d.last == null) return;
+    if (state.ticks.sym !== sym) state.ticks = { sym, points: [] };
+    // 与 watchlist 缓存互通（报价区数字用）
+    state.quotes[sym] = Object.assign({}, state.quotes[sym] || {}, { last: d.last, volume: d.volume, time: d.time });
+    state.ticks.points.push({ t: Date.now(), p: d.last, v: d.volume });
+    if (state.ticks.points.length > 300) state.ticks.points.shift();
+    renderTickChart();
+    renderQuoteArea();
+  } catch (e) { /* 非交易时段接口可能失败，静默 */ }
+}
 
 /* ---------- 价格预警 ---------- */
 
@@ -2688,6 +2706,7 @@ function initSplitters() {
   if (params.get("report") === "1") $("btnReport").click();
   await doRefresh();
   state.polling = setInterval(doRefresh, 5000);
+  setInterval(tickPoll, 2000);
 
   // 自检模式：打开 /?selftest=1 会自动发一条消息，用于验证对话链路
   if (new URLSearchParams(location.search).get("selftest") === "1") {
