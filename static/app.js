@@ -3,16 +3,16 @@
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  watchlist: JSON.parse(localStorage.getItem("fa_watchlist") || "null") || ["RB0", "CU0", "M0", "SC0", "IF0"],
-  selected: localStorage.getItem("fa_selected") || null,
+  watchlist: store.get("fa_watchlist", ["RB0", "CU0", "M0", "SC0", "IF0"]),
+  selected: store.get("fa_selected", null),
   quotes: {},        // symbol -> quote
   names: {},         // symbol -> name/exchange（来自主力列表）
-  chat: JSON.parse(localStorage.getItem("fa_chat_history") || "[]") || [],  // {role, content}，持久化到 localStorage
+  chat: store.get("fa_chat_history", []),  // {role, content}，持久化到 localStorage
   chatHistoryLen: 60,  // 自动存档条数上限
   aiReady: false,
   polling: null,
   sort: { key: null, dir: -1 },                          // 表格排序
-  alarms: JSON.parse(localStorage.getItem("fa_alarms") || "{}"), // {sym: {up, down}}
+  alarms: store.get("fa_alarms", {}), // {sym: {up, down}}
   prevLast: {},     // symbol -> 上次最新价（用于闪烁）
   ticks: { sym: null, points: [] },   // 实时走势：本次会话对选中合约的 5 秒采样
   refreshCount: 0,  // 轮询计数（分时图自动刷新节流）
@@ -133,7 +133,7 @@ function renderMarkdown(src) {
 }
 
 function saveWatchlist() {
-  localStorage.setItem("fa_watchlist", JSON.stringify(state.watchlist));
+  store.set("fa_watchlist", state.watchlist);
 }
 
 /* ---------- 行情轮询 ---------- */
@@ -349,7 +349,7 @@ $("symbolInput").addEventListener("keydown", (e) => {
 
 function selectSymbol(sym) {
   state.selected = sym || null;
-  localStorage.setItem("fa_selected", state.selected || "");
+  store.set("fa_selected", state.selected || "");
   state.intradayDrawn = false;
   renderTable();
   renderQuoteArea();
@@ -785,8 +785,8 @@ const ANNOT_INFO = {
   note: { label: "📝批注", color: "#ffffff" },
 };
 
-function annotStore() { return JSON.parse(localStorage.getItem("fa_annot") || "{}"); }
-function saveAnnotStore(s) { localStorage.setItem("fa_annot", JSON.stringify(s)); }
+function annotStore() { return store.get("fa_annot", {}); }
+function saveAnnotStore(s) { store.set("fa_annot", s); }
 function getAnnots(sym, date) { return (annotStore()[sym] || {})[date] || []; }
 function addAnnot(sym, date, a) {
   const s = annotStore();
@@ -1288,7 +1288,7 @@ async function pollIntl() {
   try {
     const d = await api("/api/intl-quotes");
     state.intlQuotes = (d.items || []).filter((q) => !q.error && q.last != null);
-    const expanded = localStorage.getItem("fa_intl_expanded") === "1";
+    const expanded = store.get("fa_intl_expanded") === "1";
     let items = state.intlQuotes;
     if (!expanded) items = items.filter((q) => INTL_CORE.includes(q.symbol));
     if (!items.length) return;
@@ -1305,8 +1305,8 @@ async function pollIntl() {
 }
 
 $("intlBar").addEventListener("click", () => {
-  const next = localStorage.getItem("fa_intl_expanded") === "1" ? "0" : "1";
-  localStorage.setItem("fa_intl_expanded", next);
+  const next = store.get("fa_intl_expanded") === "1" ? "0" : "1";
+  store.set("fa_intl_expanded", next);
   pollIntl();
 });
 
@@ -1529,7 +1529,7 @@ document.querySelector(".heat-view").addEventListener("click", (e) => {
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
-  localStorage.setItem("fa_alarms", JSON.stringify(state.alarms));
+  store.set("fa_alarms", state.alarms);
 }
 
 let alarmSymShown = null; // 防止轮询期间覆盖用户正在输入的值
@@ -1843,7 +1843,7 @@ $("notesList").addEventListener("click", (e) => {
 const newsState = {
   seen: new Set(), geopolSeen: new Set(), loaded: false,
   topics: {}, all: [], aiTags: {}, aiStatus: "off",
-  filter: localStorage.getItem("fa_news_filter") || "all",
+  filter: store.get("fa_news_filter", "all"),
 };
 
 function highlightKeywords(text, topic) {
@@ -1943,7 +1943,7 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     document.querySelectorAll(".filter-chip").forEach((c) => c.classList.toggle("active", c === chip));
     newsState.filter = chip.dataset.filter;
-    localStorage.setItem("fa_news_filter", newsState.filter);
+    store.set("fa_news_filter", newsState.filter);
     renderNewsView();
   });
 });
@@ -1962,7 +1962,7 @@ const SKINS = [
 function applySkin(id) {
   if (!SKINS.some((s) => s.id === id)) id = "dark";
   document.body.dataset.skin = id;
-  localStorage.setItem("fa_skin", id);
+  store.set("fa_skin", id);
   renderSkinList();
   redrawCharts();
 }
@@ -2164,7 +2164,7 @@ document.addEventListener("click", (e) => {
 
 function pruneOldAnnotations() {
   try {
-    const store = JSON.parse(localStorage.getItem("fa_annot") || "{}");
+    const store = store.get("fa_annot", {});
     const cutoff = Date.now() - 60 * 86400000;
     let removed = 0;
     for (const sym of Object.keys(store)) {
@@ -2176,7 +2176,7 @@ function pruneOldAnnotations() {
       if (!Object.keys(store[sym]).length) delete store[sym];
     }
     if (removed) {
-      localStorage.setItem("fa_annot", JSON.stringify(store));
+      store.set("fa_annot", store);
       toast(`已自动清理 ${removed} 条 60 天前的旧标注`);
     }
   } catch (e) { /* 忽略 */ }
@@ -2658,7 +2658,7 @@ function renderStoredChat() {
 
 function clearChatHistory() {
   state.chat = [];
-  localStorage.removeItem("fa_chat_history");
+  store.remove("fa_chat_history");
   const box = $("chatBox");
   if (box) box.innerHTML = `<div class="chat-welcome"><p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p><p class="muted">例如：「螺纹钢现在的盘面怎么看？」「帮我对比一下豆粕和菜粕」「沪铜最近趋势如何」</p><p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p></div>`;
   toast("对话历史已清空");
@@ -2682,7 +2682,7 @@ function pushMsg(role, content, cls) {
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
   try {
-    localStorage.setItem("fa_chat_history", JSON.stringify(state.chat.slice(-state.chatHistoryLen)));
+    store.set("fa_chat_history", state.chat.slice(-state.chatHistoryLen));
   } catch (e) { /* 存储满/不可用时静默 */ }
   return div;
 }
@@ -2691,6 +2691,68 @@ function removeWelcome() {
   const w = document.querySelector(".chat-welcome");
   if (w) w.remove();
 }
+
+/* ---------- 统一存储层（版本号 + 迁移 + 容错） ---------- */
+
+const FA_STORE_VERSION = 2;
+
+const FA_STORE_KEYS = [
+  "fa_watchlist", "fa_selected", "fa_alarms", "fa_chat_history",
+  "fa_intl_expanded", "fa_news_filter", "fa_skin", "fa_split", "fa_heat_collapse",
+];
+
+const store = {
+  _cache: null,
+
+  _load() {
+    if (this._cache !== null) return this._cache;
+    let data = {};
+    try {
+      const raw = localStorage.getItem("fa_store");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.__v === FA_STORE_VERSION) data = parsed;
+      }
+    } catch (e) { /* 损坏则重建 */ }
+    // 迁移：从旧散键收编
+    let migrated = false;
+    for (const k of FA_STORE_KEYS) {
+      if (data[k] !== undefined) continue;
+      const v = localStorage.getItem(k);
+      if (v !== null) {
+        try { data[k] = JSON.parse(v); } catch (e) { data[k] = v; }
+        migrated = true;
+      }
+    }
+    this._cache = data;
+    if (migrated || !localStorage.getItem("fa_store")) this._flush();
+    return data;
+  },
+
+  _flush() {
+    try {
+      const out = Object.assign({ __v: FA_STORE_VERSION }, this._cache || {});
+      localStorage.setItem("fa_store", JSON.stringify(out));
+      // 迁移成功后清理旧散键
+      for (const k of FA_STORE_KEYS) localStorage.removeItem(k);
+    } catch (e) { /* 存储满：静默，内存态继续可用 */ }
+  },
+
+  get(key, fallback = null) {
+    const v = this._load()[key];
+    return v === undefined || v === null ? fallback : v;
+  },
+
+  set(key, value) {
+    this._load()[key] = value;
+    this._flush();
+  },
+
+  remove(key) {
+    delete this._load()[key];
+    this._flush();
+  },
+};
 
 /* 全局错误可见化：任何脚本错误都显示出来，不静默失败 */
 window.addEventListener("error", (e) => {
@@ -2905,16 +2967,16 @@ function saveSplitterState() {
   const watch = document.querySelector(".watch-panel");
   const cs = getComputedStyle(layout);
   const ws = getComputedStyle(watch);
-  localStorage.setItem("fa_split", JSON.stringify({
+  store.set("fa_split", {
     list: cs.getPropertyValue("--w-list").trim(),
     chat: cs.getPropertyValue("--w-chat").trim(),
     mon: ws.getPropertyValue("--h-monitor").trim(),
-  }));
+  });
 }
 
 function restoreSplitterState() {
   try {
-    const s = JSON.parse(localStorage.getItem("fa_split") || "{}");
+    const s = store.get("fa_split", {});
     if (s.list) document.querySelector(".layout").style.setProperty("--w-list", s.list);
     if (s.chat) document.querySelector(".layout").style.setProperty("--w-chat", s.chat);
     if (s.mon) document.querySelector(".watch-panel").style.setProperty("--h-monitor", s.mon);
@@ -2964,7 +3026,7 @@ function initSplitters() {
 
 (async function init() {
   const skinParam = new URLSearchParams(location.search).get("skin");
-  applySkin(skinParam || localStorage.getItem("fa_skin") || "dark");
+  applySkin(skinParam || store.get("fa_skin", "dark"));
   restoreSplitterState();
   initSplitters();
   renderTable();
