@@ -63,11 +63,12 @@
                 <th class="sortable" data-key="symbol">合约<span class="arrow" data-arrow="symbol"></span></th>
                 <th class="sortable num" data-key="last">最新价<span class="arrow" data-arrow="last"></span></th>
                 <th class="sortable num" data-key="change_pct">涨跌幅<span class="arrow" data-arrow="change_pct"></span></th>
+                <th style="width:48px">趋势</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="quoteBody">
-              <tr><td colspan="4" class="muted center pad">加载中…</td></tr>
+              <tr><td colspan="5" class="muted center pad">加载中…</td></tr>
             </tbody>
           </table>
         </div>
@@ -251,7 +252,10 @@
     <div class="panel view-panel">
       <div class="panel-head">
         <h2>📒 交易日志</h2>
-        <span class="muted small">在「合约详情 → 开仓评估」中存入计划，事后回来标记结果</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="muted small">开仓评估中「📥 记入日志」，事后了结统计</span>
+          <button id="btnTradesCsv" class="btn ghost small-btn">⬇ CSV</button>
+        </div>
       </div>
       <div id="tradeStats" class="cmp-stats" style="padding:12px 14px 0;"></div>
       <div id="tradesList" class="news-view-list" style="padding-top:8px;">
@@ -341,6 +345,17 @@
   <div class="skin-pop-title">🩺 系统自检 <span id="healthTime" class="muted small"></span></div>
   <div id="healthList" class="health-list"><div class="muted small">尚未运行自检</div></div>
   <button id="btnHealthRun" class="btn primary small-btn" style="width:100%;margin-top:8px">🔄 立即重新自检</button>
+</div>
+
+<!-- 快捷键速查表 -->
+<div id="shortcutModal" class="modal hidden">
+  <div class="modal-card" style="width:min(460px,92vw)">
+    <div class="modal-head">
+      <h2>⌨️ 快捷键</h2>
+      <button class="btn ghost small-btn" onclick="toggleShortcuts(false)">✕</button>
+    </div>
+    <div id="shortcutList"></div>
+  </div>
 </div>
 
 <!-- 皮肤选择弹层 -->

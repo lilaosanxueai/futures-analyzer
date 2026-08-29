@@ -141,7 +141,7 @@ function saveWatchlist() {
 async function doRefresh() {
   if (pollPaused) return;
   if (!state.watchlist.length) {
-    $("quoteBody").innerHTML = `<tr><td colspan="4" class="muted center pad">暂无自选合约，请在上方添加</td></tr>`;
+    $("quoteBody").innerHTML = `<tr><td colspan="5" class="muted center pad">暂无自选合约，请在上方添加</td></tr>`;
     return;
   }
   try {
@@ -150,6 +150,7 @@ async function doRefresh() {
     checkAlarms();
     renderTable();
     renderMarketStatus(data.market_open);
+    $("marketStatus").textContent += ` · ${sessionCountdown()}`;
     setDocTitle();
     $("lastUpdate").textContent = data.ts ? new Date(data.ts).toLocaleTimeString("zh-CN") : "";
     if (state.selected && state.quotes[state.selected] && currentView() === "detail") renderQuoteArea();
@@ -196,6 +197,7 @@ function renderMarketStatus(open, err) {
 function quoteRowHtml(sym) {
   return `<td class="sym">${sym}<span class="sym-sub"></span></td>
     <td class="num"></td><td class="num"></td>
+    <td class="spark-cell"></td>
     <td><button class="btn-del" data-del="${sym}" title="移除">✕</button></td>`;
 }
 
@@ -233,7 +235,7 @@ document.querySelector("thead").addEventListener("click", (e) => {
 function renderTable() {
   const tbody = $("quoteBody");
   if (!state.watchlist.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted center pad">暂无自选合约</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted center pad">暂无自选合约</td></tr>`;
     return;
   }
 
@@ -284,8 +286,18 @@ function renderTable() {
       tds[1].classList.add(flash);
     }
     if (q && q.last != null) state.prevLast[sym] = q.last;
+    const sp = tds[3];
+    if (sp) {
+      const svg = sparkSvg(sparkState.data[sym]);
+      if (sp.dataset.sig !== (svg ? svg.length + closesSig(sparkState.data[sym]) : "e")) {
+        sp.innerHTML = svg || "";
+        sp.dataset.sig = svg ? svg.length + closesSig(sparkState.data[sym]) : "e";
+      }
+    }
   }
 }
+
+function closesSig(arr) { return (arr || []).length + ":" + (arr ? arr[arr.length - 1] : ""); }
 
 $("quoteBody").addEventListener("click", (e) => {
   const del = e.target.closest("[data-del]");
@@ -445,6 +457,7 @@ async function renderAnalysisArea() {
           </div>
           <button class="kline-toggle${state.klineShowMA !== false ? " on" : ""}" id="tglMA" title="均线开关">MA</button>
           <button class="kline-toggle${state.klineShowBoll ? " on" : ""}" id="tglBoll" title="布林带开关">BOLL</button>
+          <button class="kline-toggle" id="btnKlineCsv" title="导出当前 K 线数据 CSV">⬇</button>
           <span class="muted small" title="滚轮缩放 · 拖拽平移 · 双击复位">🖱️缩放/平移</span>
         </div>`;
 
@@ -483,6 +496,15 @@ async function renderAnalysisArea() {
       const el = $("klineChart");
       if (el && el._kfull) renderKlineChart(el, el._kfull);
     });
+  $("btnKlineCsv").addEventListener("click", () => {
+    const el = $("klineChart");
+    const full = el && el._kfull;
+    if (!full || !full.items.length) return toast("暂无 K 线数据", true);
+    const rows = [["时间", "开", "高", "低", "收", "成交量"]];
+    full.items.forEach((it) => rows.push([it.datetime, it.open, it.high, it.low, it.close, it.volume ?? ""]));
+    downloadCSV(`K线_${sym}_${state.klinePeriod}.csv`, rows);
+    toast(`已导出 ${full.items.length} 根 K 线`);
+  });
   }
 }
 
@@ -1405,6 +1427,93 @@ async function tickPoll() {
   } catch (e) { /* 非交易时段接口可能失败，静默 */ }
 }
 
+/* ---------- 自选迷你走势线（sparkline） ---------- */
+
+const sparkState = { data: {}, ts: 0 };
+
+async function loadSparklines(force = false) {
+  const now = Date.now();
+  if (!force && now - sparkState.ts < 5 * 60000) return;
+  sparkState.ts = now;
+  await Promise.all(state.watchlist.map(async (sym) => {
+    try {
+      const d = await api(`/api/daily/${sym}?limit=30`);
+      sparkState.data[sym] = d.items.map((it) => it.close).filter((c) => c != null);
+    } catch (e) { /* 单品种失败静默 */ }
+  }));
+  renderTable();
+}
+
+function sparkSvg(closes) {
+  if (!closes || closes.length < 2) return "";
+  const w = 44, h = 16;
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const span = max - min || 1;
+  const pts = closes.map((c, i) => `${(2 + (i / (closes.length - 1)) * (w - 4)).toFixed(1)},${(2 + (1 - (c - min) / span) * (h - 4)).toFixed(1)}`).join(" ");
+  const up = closes[closes.length - 1] >= closes[0];
+  return `<svg width="${w}" height="${h}" style="display:block"><polyline points="${pts}" fill="none" stroke="${up ? "#f34e4e" : "#22c55e"}" stroke-width="1.2"/></svg>`;
+}
+
+/* ---------- CSV 导出 ---------- */
+
+function downloadCSV(name, rows) {
+  const csv = "﻿" + rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join("," + String.fromCharCode(10)));
+const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$("btnTradesCsv").addEventListener("click", () => {
+  const rows = [["日期", "品种", "方向", "开仓价", "止损点", "止盈点", "手数", "AI评级", "状态", "结果(点)", "备注"]];
+  tradesState.items.forEach((t) => rows.push([
+    t.date, t.symbol, t.direction === "long" ? "多" : "空", t.entry, t.stop_points,
+    t.target_points, t.lots, t.ai_grade || "", t.status, t.result_pts ?? "", t.note || "",
+  ]));
+  downloadCSV(`交易日志_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+});
+
+/* ---------- 快捷键速查表 ---------- */
+
+const SHORTCUTS = [
+  ["Ctrl + K", "命令面板（搜合约/跳页面/开功能）"],
+  ["Alt + 1~6", "切换六个页面"],
+  ["1 ~ 6", "K 线周期（详情页，非输入状态）"],
+  ["滚轮 / 拖拽", "K 线缩放 / 平移（双击复位）"],
+  ["点击分时图", "放置当前标注（双击标注删除）"],
+  ["点击 🌍 外盘", "展开/收起外盘全量"],
+  ["⏸", "暂停/恢复行情轮询"],
+  ["Esc", "关闭弹层"],
+];
+
+function toggleShortcuts(force) {
+  const m = $("shortcutModal");
+  const show = force !== undefined ? force : m.classList.contains("hidden");
+  m.classList.toggle("hidden", !show);
+}
+
+/* ---------- 开收盘倒计时 ---------- */
+
+const SESSIONS = [["09:00", "10:15"], ["10:30", "11:30"], ["13:30", "15:00"], ["21:00", "23:00"]];
+
+function sessionCountdown() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return "周末休市";
+  const mins = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+  const cur = mins(now.toTimeString().slice(0, 5));
+  for (const [a, b] of SESSIONS) {
+    if (cur >= mins(a) && cur <= mins(b)) return `交易中·距收盘 ${mins(b) - cur} 分`;
+    if (cur < mins(a)) {
+      const d = mins(a) - cur;
+      return `距开盘 ${d >= 60 ? Math.floor(d / 60) + "时" : ""}${d % 60}分`;
+    }
+  }
+  return "今日已收盘";
+}
+
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
@@ -2121,6 +2230,9 @@ document.querySelectorAll(".view-tab").forEach((btn) => {
 
 // 快捷键：Alt+1..6 切换视图
 document.addEventListener("keydown", (e) => {
+  if (e.key === "?" && !["INPUT", "SELECT", "TEXTAREA"].includes((document.activeElement || {}).tagName)) {
+    toggleShortcuts();
+  }
   if (e.altKey && /^[1-6]$/.test(e.key)) {
     switchView(VIEW_ORDER[Number(e.key) - 1]);
     e.preventDefault();
@@ -2861,6 +2973,8 @@ function initSplitters() {
   await doRefresh();
   state.polling = setInterval(doRefresh, 5000);
   setInterval(tickPoll, 2000);
+  loadSparklines(true);
+  setInterval(() => loadSparklines(true), 5 * 60000);
 
   // 自检模式：打开 /?selftest=1 会自动发一条消息，用于验证对话链路
   if (new URLSearchParams(location.search).get("selftest") === "1") {

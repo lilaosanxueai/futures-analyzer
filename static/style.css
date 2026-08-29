@@ -314,6 +314,7 @@ body.splitter-dragging { user-select: none; }
 .quote-table tbody tr:hover { background: var(--panel-2); }
 .quote-table tbody tr.selected { background: #1e3a5f; }
 .quote-table .sym { font-weight: 600; }
+.quote-table td.spark-cell { width: 48px; padding: 4px 6px; }
 .quote-table .sym-sub { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
 
 .up { color: var(--up); }
