@@ -4,3 +4,4 @@ notes.json
 __pycache__/
 *.pyc
 server.log
+trader_profile.json

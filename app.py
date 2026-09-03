@@ -739,11 +739,15 @@ async def ai_chat(body: ChatIn):
     model = cfg["model"] or PROVIDERS[provider]["default_model"]
 
     context = await _build_market_context(body.symbol)
-    system = SYSTEM_PROMPT + ("\n\n" + context if context else "")
+    profile = _profile_context()
+    system = SYSTEM_PROMPT + ("\n\n" + profile if profile else "") + ("\n\n" + context if context else "")
 
-    messages = [{"role": "system", "content": system}] + [
-        {"role": m.role, "content": m.content} for m in body.messages
-    ]
+    # 长对话智能压缩：超 12 条时保留首 2 条（主题定调）+ 末 8 条（最新上下文），中间丢弃
+    msgs = [{"role": m.role, "content": m.content} for m in body.messages]
+    if len(msgs) > 12:
+        msgs = msgs[:2] + [{"role": "system", "content": "（中间对话已省略）"}] + msgs[-8:]
+
+    messages = [{"role": "system", "content": system}] + msgs
 
     import logging
     import time as _time
@@ -1293,7 +1297,8 @@ async def trade_eval(body: TradeEvalIn):
     name = directory.get(symbol, {}).get("name", "")
     context = await _build_market_context(symbol)
 
-    prompt = TRADE_EVAL_PROMPT.format(
+    profile = _profile_context()
+    prompt = (profile + "\n\n" if profile else "") + TRADE_EVAL_PROMPT.format(
         symbol=symbol, name=name, dir_cn="做多" if body.direction == "long" else "做空",
         entry=body.entry, last=last, dev_pct=dev_pct,
         stop_points=body.stop_points, stop_price=stop_price,
@@ -2448,6 +2453,92 @@ async def _check_trump_news():
         if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
             _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
         await _feishu_push(f"🇺🇸 特朗普表态监控\n{it['title']}\n[{it['time'][5:16]}] {it.get('source', '')}")
+
+
+# ---------------------------------------------------------------- AI 记忆画像
+
+PROFILE_FILE = BASE_DIR / "trader_profile.json"
+
+_profile_cache: dict = {"data": None}
+
+
+def _load_profile() -> dict:
+    if _profile_cache["data"] is not None:
+        return _profile_cache["data"]
+    if PROFILE_FILE.exists():
+        try:
+            _profile_cache["data"] = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+            return _profile_cache["data"]
+        except Exception:
+            pass
+    return {"style": "", "lessons": [], "symbols": [], "risk_preference": "", "updated": ""}
+
+
+def _save_profile(p: dict) -> None:
+    p["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    PROFILE_FILE.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
+    _profile_cache["data"] = p
+
+
+def _profile_context() -> str:
+    """交易者画像 → 注入 system prompt（空画像返回空）"""
+    p = _load_profile()
+    lines = []
+    if p.get("style"):
+        lines.append(f"交易风格：{p['style']}")
+    if p.get("risk_preference"):
+        lines.append(f"风险偏好：{p['risk_preference']}")
+    if p.get("symbols"):
+        lines.append(f"常交易品种：{','.join(p['symbols'][:8])}")
+    if p.get("lessons"):
+        lines.append("历史教训（注意避免重复）：")
+        for les in p["lessons"][-5:]:
+            lines.append(f"  - {les[:80]}")
+    if not lines:
+        return ""
+    return "\n【交易者画像（AI 记忆，分析时个性化适配）】\n" + "\n".join(lines)
+
+
+class ProfileUpdate(BaseModel):
+    style: str = ""
+    risk_preference: str = ""
+    add_lesson: str = ""
+    add_symbol: str = ""
+    remove_lesson: int = -1
+
+
+@app.get("/api/profile")
+async def get_profile():
+    return {"ok": True, "profile": _load_profile()}
+
+
+@app.post("/api/profile")
+async def update_profile(body: ProfileUpdate):
+    p = _load_profile()
+    changed = False
+    if body.style.strip():
+        p["style"] = body.style.strip()[:100]
+        changed = True
+    if body.risk_preference.strip():
+        p["risk_preference"] = body.risk_preference.strip()[:50]
+        changed = True
+    if body.add_lesson.strip():
+        p.setdefault("lessons", []).append(body.add_lesson.strip()[:150])
+        p["lessons"] = p["lessons"][-20:]
+        changed = True
+    if body.add_symbol.strip():
+        syms = p.setdefault("symbols", [])
+        s = body.add_symbol.strip().upper()
+        if s not in syms:
+            syms.append(s)
+            p["symbols"] = syms[:15]
+        changed = True
+    if body.remove_lesson >= 0 and body.remove_lesson < len(p.get("lessons", [])):
+        p["lessons"].pop(body.remove_lesson)
+        changed = True
+    if changed:
+        _save_profile(p)
+    return {"ok": True, "profile": p}
 
 
 # ---------------------------------------------------------------- 定期自检
