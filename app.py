@@ -740,7 +740,11 @@ async def ai_chat(body: ChatIn):
 
     context = await _build_market_context(body.symbol)
     profile = _profile_context()
-    system = SYSTEM_PROMPT + ("\n\n" + profile if profile else "") + ("\n\n" + context if context else "")
+    position = _position_context()
+    system = (SYSTEM_PROMPT
+              + ("\n\n" + profile if profile else "")
+              + ("\n\n" + position if position else "")
+              + ("\n\n" + context if context else ""))
 
     # 长对话智能压缩：超 12 条时保留首 2 条（主题定调）+ 末 8 条（最新上下文），中间丢弃
     msgs = [{"role": m.role, "content": m.content} for m in body.messages]
@@ -1298,7 +1302,10 @@ async def trade_eval(body: TradeEvalIn):
     context = await _build_market_context(symbol)
 
     profile = _profile_context()
-    prompt = (profile + "\n\n" if profile else "") + TRADE_EVAL_PROMPT.format(
+    position = _position_context()
+    prompt = ((profile + "\n\n" if profile else "")
+              + (position + "\n\n" if position else "")
+              + TRADE_EVAL_PROMPT.format(
         symbol=symbol, name=name, dir_cn="做多" if body.direction == "long" else "做空",
         entry=body.entry, last=last, dev_pct=dev_pct,
         stop_points=body.stop_points, stop_price=stop_price,
@@ -1308,7 +1315,7 @@ async def trade_eval(body: TradeEvalIn):
         stop_vs_avg=stop_vs_avg if stop_vs_avg is not None else "--",
         day_high=day_high, day_low=day_low, day_avg=day_avg, prev_settle=quote.get("prev_settle"),
         context=context,
-    )
+    ))
 
     logger.info(f"[trade-eval] {symbol} {body.direction} @{body.entry} sl{body.stop_points} tp{body.target_points}")
     try:
@@ -1565,6 +1572,22 @@ async def get_calendar(date: str = "") -> list[dict]:
     except Exception as e:
         logging.getLogger("uvicorn.error").info(f"[calendar] {date} 失败：{e}")
         return _calendar_cache["items"] if _calendar_cache["date"] == date else []
+
+
+@app.get("/api/signal-accuracy/{symbol}")
+async def signal_accuracy_api(symbol: str, lookforward: int = 5):
+    """各技术信号的历史胜率统计"""
+    from indicators import signal_accuracy as calc_acc
+    try:
+        daily = await get_daily(symbol)
+        import pandas as pd
+        df = pd.DataFrame(daily[-500:])  # 最近 500 根
+        results = {}
+        for name in ["MACD 金叉", "MACD 死叉", "站上 MA20", "跌破 MA20", "均线多头排列", "均线空头排列"]:
+            results[name] = calc_acc(df, name, lookforward)
+        return {"ok": True, "symbol": symbol, "lookforward": lookforward, "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"统计失败：{e}")
 
 
 @app.get("/api/calendar")
@@ -2498,6 +2521,31 @@ def _profile_context() -> str:
     if not lines:
         return ""
     return "\n【交易者画像（AI 记忆，分析时个性化适配）】\n" + "\n".join(lines)
+
+
+def _position_context() -> str:
+    """当前持仓 + 近期盈亏 → 注入 AI 上下文（让分析感知仓位状态）"""
+    trades = _load_trades()
+    open_trades = [t for t in trades if t["status"] == "open"]
+    recent_closed = [t for t in trades if t["status"] == "closed" and t.get("result_pts") is not None][-5:]
+
+    if not open_trades and not recent_closed:
+        return ""
+
+    lines = []
+    if open_trades:
+        lines.append("当前持仓（分析时请注意仓位风险提示）：")
+        for t in open_trades:
+            d = "多" if t["direction"] == "long" else "空"
+            lines.append(
+                f"  {t['symbol']} {d} @{t['entry']}，SL {t['stop_points']}点 TP {t['target_points']}点 "
+                f"{t['lots']}手（{t['date']}开仓，AI评级:{t.get('ai_grade','--')}）"
+            )
+    if recent_closed:
+        pts = [t["result_pts"] for t in recent_closed]
+        wins = sum(1 for x in pts if x > 0)
+        lines.append(f"近5笔盈亏：{'/'.join(f'{x:+.0f}' for x in pts)}（胜率{wins}/{len(pts)}）")
+    return "\n【仓位状态（AI 上下文）】\n" + "\n".join(lines)
 
 
 class ProfileUpdate(BaseModel):

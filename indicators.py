@@ -158,3 +158,30 @@ def detect_signals(df: pd.DataFrame) -> list[dict]:
     for s in signals:
         s["date"] = date
     return signals
+
+
+def signal_accuracy(df: pd.DataFrame, signal_name: str, lookforward: int = 5) -> dict:
+    """统计某信号历史上 lookforward 日后的胜率（收盘 vs 信号日收盘）"""
+    ind = compute_indicators(df)
+    count = win = 0
+    gains = []
+    for i in range(len(ind) - lookforward):
+        row = ind.iloc[i]
+        sigs = detect_signals(ind.iloc[[i, i - 1]] if i > 0 else ind.iloc[[i, i]])
+        if not any(s["name"] == signal_name for s in sigs):
+            continue
+        count += 1
+        future = ind.iloc[i + lookforward]["close"]
+        change = (future / row["close"] - 1) * 100
+        is_bull = any(s["name"] == signal_name and s["dir"] == "bull" for s in sigs)
+        if (is_bull and change > 0) or (not is_bull and change < 0):
+            win += 1
+        gains.append(change if is_bull else -change)
+    if not count:
+        return {"count": 0}
+    return {
+        "count": count,
+        "win_rate": round(win / count * 100, 1),
+        "avg_gain": round(sum(gains) / len(gains), 2) if gains else 0,
+        "lookforward": lookforward,
+    }
