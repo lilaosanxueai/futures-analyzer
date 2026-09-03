@@ -1756,6 +1756,7 @@ async def monitor_loop():
                 # 非交易时段（含周末+午休）跳过品种级巡检，分钟线不变无需打 API
                 if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
                     symbols = {s.upper() for s in (mon_cfg.get("focus") or [])} | set(_MONITOR["watch"])
+                    symbols |= set(_load_profile().get("symbols") or [])  # 画像常做品种自动监控
                     for sym in sorted(symbols):
                         await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
@@ -2767,8 +2768,13 @@ async def _generate_report() -> str:
         return "（暂无可用数据，请稍后重新生成）"
 
     kind = "晨报（日盘前瞻）" if _report_slot().endswith("-am") else "夜报（夜盘前瞻）"
+    profile = _profile_context()
+    p_syms = set(_load_profile().get("symbols") or [])
+    if p_syms:
+        lines.sort(key=lambda l: 0 if any(s in l for s in p_syms) else 1)
     prompt = (
-        f"你是期货{kind}助手。请基于以下数据生成一份简明交易简报，使用 Markdown：\n"
+        (f"交易者画像（优先覆盖其常做品种）：\n{profile}\n\n" if profile else "")
+        + f"你是期货{kind}助手。请基于以下数据生成一份简明交易简报，使用 Markdown：\n"
         f"## 一、市场概览（3-4 句，结合要闻讲清楚隔夜/近期主线）\n"
         f"## 二、分品种要点（每个品种 1-2 句：状态+关键点位+信号提示）\n"
         f"## 三、今日关注（3-5 条：要盯的事件/价位/信号）\n"

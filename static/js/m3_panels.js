@@ -127,12 +127,32 @@ $("tradesList").addEventListener("click", async (e) => {
       ? { result_pts: v }
       : { exit: v };
     try {
-      await api(`/api/trades/${close.dataset.close}`, {
+      const resp = await api(`/api/trades/${close.dataset.close}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       loadTrades();
       toast("已了结");
+      // 亏损单建议录入画像教训（AI 记忆）
+      const item = resp.item || {};
+      if (item.result_pts != null && item.result_pts < 0) {
+        setTimeout(() => {
+          const lesson = prompt(
+            `这笔亏损了 ${item.result_pts} 点。
+要录入一条教训让 AI 记住吗？
+（留空跳过）
+例如：${item.symbol} ${item.direction === "long" ? "追多" : "追空"}被扫，下次等回踩再进`,
+            ""
+          );
+          if (lesson && lesson.trim()) {
+            api("/api/profile", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ add_lesson: lesson.trim() }),
+            }).then(() => toast("✅ 教训已录入 AI 记忆，下次分析会参考"))
+              .catch(() => {});
+          }
+        }, 600);
+      }
     } catch (err) {
       toast(`失败：${err.message}`, true);
     }

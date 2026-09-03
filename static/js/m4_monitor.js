@@ -1,6 +1,80 @@
 /* m4_monitor —— 监控：预警/盯盘/心得/新闻/皮肤/命令面板/自检 */
 
 /* ---------- 价格预警 ---------- */
+/* ---------- 交易画像管理（设置弹窗内） ---------- */
+
+let profileCache = null;
+
+async function loadProfileUI() {
+  try {
+    const d = await api("/api/profile");
+    profileCache = d.profile || {};
+    $("cfgStyle").value = profileCache.style || "";
+    $("cfgRisk").value = profileCache.risk_preference || "";
+    renderLessons();
+  } catch (e) { /* 画像加载失败静默 */ }
+}
+
+function renderLessons() {
+  const box = $("profileLessons");
+  if (!box || !profileCache) return;
+  const lessons = profileCache.lessons || [];
+  box.innerHTML = lessons.length
+    ? lessons.map((l, i) => `<div style="display:flex;gap:6px;align-items:center;font-size:11.5px">
+        <span style="flex:1;color:var(--accent)">💡 ${l}</span>
+        <button class="btn ghost" style="padding:0 6px;font-size:10px" data-rmlesson="${i}">✕</button>
+      </div>`).join("")
+    : `<span class="muted" style="font-size:11px">暂无教训记录</span>`;
+}
+
+$("btnAddLesson").addEventListener("click", async () => {
+  const v = $("cfgNewLesson").value.trim();
+  if (!v) return;
+  try {
+    const d = await api("/api/profile", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ add_lesson: v }),
+    });
+    profileCache = d.profile;
+    $("cfgNewLesson").value = "";
+    renderLessons();
+    toast("教训已记录，AI 将在后续分析中参考");
+  } catch (e) { toast(`失败：${e.message}`, true); }
+});
+
+document.addEventListener("click", async (e) => {
+  const rm = e.target.closest("[data-rmlesson]");
+  if (!rm) return;
+  try {
+    const d = await api("/api/profile", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remove_lesson: Number(rm.dataset.rmlesson) }),
+    });
+    profileCache = d.profile;
+    renderLessons();
+  } catch (err) { /* 静默 */ }
+});
+
+// 保存设置时同时保存画像风格/风险
+const _origSave = $("btnSaveSettings");
+if (_origSave) {
+  _origSave.addEventListener("click", async () => {
+    // 在原保存逻辑后延迟提交画像（避免阻塞主流程）
+    setTimeout(async () => {
+      try {
+        await api("/api/profile", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            style: $("cfgStyle").value.trim(),
+            risk_preference: $("cfgRisk").value,
+          }),
+        });
+      } catch (e) { /* 静默 */ }
+    }, 500);
+  });
+}
+
+/* ---------- 价格预警 ---------- */
 /* ---------- 价格预警 ---------- */
 
 function persistAlarms() {
