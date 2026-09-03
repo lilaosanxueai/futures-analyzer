@@ -658,6 +658,24 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             ind_lines.append("最新信号：无明显技术信号")
         parts.append("\n".join(ind_lines))
 
+        # 信号历史胜率（量化含金量）
+        try:
+            import pandas as _pd
+            _df = _pd.DataFrame(daily[-500:]) if daily else None
+            if _df is not None and len(_df) > 50:
+                from indicators import signal_accuracy as _calc_acc
+                active = [s["name"] for s in ind.get("signals", [])]
+                if active:
+                    acc_lines = []
+                    for nm in active:
+                        r = _calc_acc(_df, nm, 5)
+                        if r.get("count", 0) >= 3:
+                            acc_lines.append(f"{nm}: {r['win_rate']}%胜率({r['count']}次,均{r['avg_gain']:+.1f}%)")
+                    if acc_lines:
+                        parts.append("【当前信号的历史胜率（近500根日线，5日后）】" + "；".join(acc_lines))
+        except Exception:
+            pass
+
     # 日内走势结构
     if intra:
         parts.append(f"【{symbol} 日内走势结构】{intra}")

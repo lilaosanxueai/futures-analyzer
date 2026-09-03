@@ -582,15 +582,24 @@ async function renderSignalArea() {
   if (!sym || isIntl(sym)) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标（日线）</div><span class="muted small">加载中…</span></div>`;
   try {
-    const d = await api(`/api/indicators/${sym}`);
+    const [d, acc] = await Promise.all([
+      api(`/api/indicators/${sym}`),
+      api(`/api/signal-accuracy/${sym}?lookforward=5`).catch(() => ({ results: {} })),
+    ]);
     const v = d.values || {};
+    const accData = acc.results || {};
     const chips = (d.signals || []).length
-      ? d.signals.map((s) => `<span class="sig ${s.dir}" title="${s.detail}">${s.name}<span class="d">${s.detail}</span></span>`).join("")
+      ? d.signals.map((s) => {
+          const a = accData[s.name];
+          const wr = a && a.count >= 3 ? ` <span class="sig-wr ${a.win_rate >= 55 ? "wr-hi" : a.win_rate <= 45 ? "wr-lo" : ""}">${a.win_rate}%(${a.count}次)</span>` : "";
+          return `<span class="sig ${s.dir}" title="${s.detail}${a ? `
+历史5日胜率: ${a.win_rate}% (${a.count}次)` : ""}">${s.name}${wr}<span class="d">${s.detail}</span></span>`;
+        }).join("")
       : `<span class="muted small">当前无明显技术信号</span>`;
     const fv = (x) => (x == null ? "--" : x);
     box.innerHTML = `
       <div class="sig-box">
-        <div class="sig-title">技术信号（${d.date} 日线）</div>
+        <div class="sig-title">技术信号（${d.date} 日线）<span class="muted" style="font-weight:400"> · 括号内为历史5日胜率(样本数)</span></div>
         <div class="sig-chips">${chips}</div>
         <div class="detail-grid" style="margin-top:10px">
           ${dg("MA5", fv(v.ma5))}${dg("MA10", fv(v.ma10))}${dg("MA20", fv(v.ma20))}${dg("MA60", fv(v.ma60))}
