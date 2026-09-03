@@ -582,7 +582,7 @@ async def set_ai_config(body: AiConfigIn):
 
 
 async def _build_market_context(symbol: Optional[str]) -> str:
-    """把已缓存的实时行情与选中合约近期日线拼成文字上下文"""
+    """构建 AI 分析的多维上下文（并行拉取各数据段，耗时≈最慢段而非总和）"""
     parts = []
     cached_quotes = [
         {"ts": ts, "q": q}
@@ -600,106 +600,101 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             )
         parts.append("【当前已加载的实时行情】\n" + "\n".join(lines))
 
-    if symbol:
-        try:
-            daily = await get_daily(symbol)
-            directory = await get_directory()
-            name = directory.get(symbol, {}).get("name", "")
-            lines = [
-                f"{d['date']} 开{_num(d.get('open'))} 高{_num(d.get('high'))} "
-                f"低{_num(d.get('low'))} 收{_num(d.get('close'))} "
-                f"量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
-                for d in daily[-10:]
-            ]
-            parts.append(f"【{symbol}（{name}）近 10 个交易日日线】\n" + "\n".join(lines))
-        except Exception:
-            pass
+    if not symbol:
+        return "\n\n".join(parts)
 
-        # 技术指标与信号
+    # 并行拉取（互不依赖的数据段）
+    async def safe(coro, fallback=None):
         try:
-            ind = await get_indicators(symbol)
-            v = ind["values"]
-            dir_cn = {"bull": "看多", "bear": "看空", "warn": "警示"}
-            ind_lines = [
-                f"【{symbol} 技术指标（日线，截至 {ind['date']}）】",
-                f"收盘 {v.get('close')} | MA5 {v.get('ma5')} MA10 {v.get('ma10')} "
-                f"MA20 {v.get('ma20')} MA60 {v.get('ma60')}",
-                f"MACD: DIF {v.get('dif')} DEA {v.get('dea')} 柱 {v.get('macd_hist')} | "
-                f"RSI6 {v.get('rsi6')} RSI12 {v.get('rsi12')} RSI24 {v.get('rsi24')}",
-                f"KDJ: K {v.get('k')} D {v.get('d')} J {v.get('j')} | "
-                f"BOLL: 上轨 {v.get('boll_up')} 中轨 {v.get('boll_mid')} 下轨 {v.get('boll_low')}",
-            ]
-            if ind["signals"]:
-                sig = "；".join(
-                    f"[{dir_cn.get(s['dir'], s['dir'])}]{s['name']}（{s['detail']}）"
-                    for s in ind["signals"]
-                )
-                ind_lines.append(f"最新信号：{sig}")
-            else:
-                ind_lines.append("最新信号：无明显技术信号")
-            parts.append("\n".join(ind_lines))
+            return await coro
         except Exception:
-            pass
+            return fallback
 
-        # 日内走势结构
-        try:
-            intra = await _intraday_summary(symbol)
-            if intra:
-                parts.append(f"【{symbol} 日内走势结构】{intra}")
-        except Exception:
-            pass
+    (
+        daily, directory, ind, intra, intl, deep, shm, cal_items,
+    ) = await asyncio.gather(
+        safe(get_daily(symbol), []),
+        safe(get_directory(), {}),
+        safe(get_indicators(symbol), None),
+        safe(_intraday_summary(symbol), ""),
+        safe(_intl_context_for(symbol), ""),
+        safe(_variety_news_deep(symbol), []),
+        safe(_shmet_news(symbol), []),
+        safe(get_calendar(), []),
+    )
 
-        # 日K统计（区间分位与量仓趋势）
-        try:
-            stats = _daily_stats(await get_daily(symbol))
-            if stats:
-                parts.append(f"【{symbol} 中期统计】{stats}")
-        except Exception:
-            pass
+    name = directory.get(symbol, {}).get("name", "")
 
-        # 关联外盘行情（定价锚：内盘品种自动携带 WTI/COMEX金/美元指数/美豆等）
-        try:
-            intl = await _intl_context_for(symbol)
-            if intl:
-                parts.append(intl)
-        except Exception:
-            pass
+    # 日线
+    if daily:
+        lines = [
+            f"{d['date']} 开{_num(d.get('open'))} 高{_num(d.get('high'))} "
+            f"低{_num(d.get('low'))} 收{_num(d.get('close'))} "
+            f"量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
+            for d in daily[-10:]
+        ]
+        parts.append(f"【{symbol}（{name}）近 10 个交易日日线】\n" + "\n".join(lines))
 
-        # 消息面（三层：品种产业/供需深研 + 金属行情快讯 + 全球要闻流）
-        try:
-            deep = await _variety_news_deep(symbol)
-            if deep:
-                lines = [f"- [{it['time'][5:16]}] {it['title']}（{it['source']}）" for it in deep]
-                parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻，近期待闻）】\n" + "\n".join(lines))
-        except Exception:
-            pass
-        try:
-            shm = await _shmet_news(symbol)
-            if shm:
-                lines = [f"- [{it['time']}] {it['title']}" for it in shm]
-                parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
-        except Exception:
-            pass
-        try:
-            vnews = _variety_news(symbol)
-            if vnews:
-                lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
-                parts.append(f"【{symbol} 全球宏观要闻（新浪/东财快讯流）】\n" + "\n".join(lines))
-        except Exception:
-            pass
+    # 技术指标与信号
+    if ind:
+        v = ind["values"]
+        dir_cn = {"bull": "看多", "bear": "看空", "warn": "警示"}
+        ind_lines = [
+            f"【{symbol} 技术指标（日线，截至 {ind['date']}）】",
+            f"收盘 {v.get('close')} | MA5 {v.get('ma5')} MA10 {v.get('ma10')} "
+            f"MA20 {v.get('ma20')} MA60 {v.get('ma60')}",
+            f"MACD: DIF {v.get('dif')} DEA {v.get('dea')} 柱 {v.get('macd_hist')} | "
+            f"RSI6 {v.get('rsi6')} RSI12 {v.get('rsi12')} RSI24 {v.get('rsi24')}",
+            f"KDJ: K {v.get('k')} D {v.get('d')} J {v.get('j')} | "
+            f"BOLL: 上轨 {v.get('boll_up')} 中轨 {v.get('boll_mid')} 下轨 {v.get('boll_low')}",
+        ]
+        if ind["signals"]:
+            sig = "；".join(
+                f"[{dir_cn.get(s['dir'], s['dir'])}]{s['name']}（{s['detail']}）"
+                for s in ind["signals"]
+            )
+            ind_lines.append(f"最新信号：{sig}")
+        else:
+            ind_lines.append("最新信号：无明显技术信号")
+        parts.append("\n".join(ind_lines))
 
-        # 基本面背景
-        profile = _variety_profile(symbol)
-        if profile:
-            parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
+    # 日内走势结构
+    if intra:
+        parts.append(f"【{symbol} 日内走势结构】{intra}")
 
-        # 今日宏观事件日历（时机风险）
-        try:
-            cal = _calendar_context()
-            if cal:
-                parts.append(cal)
-        except Exception:
-            pass
+    # 日K统计
+    stats = _daily_stats(daily) if daily else ""
+    if stats:
+        parts.append(f"【{symbol} 中期统计】{stats}")
+
+    # 关联外盘行情
+    if intl:
+        parts.append(intl)
+
+    # 消息面（三层）
+    if deep:
+        lines = [f"- [{it['time'][5:16]}] {it['title']}（{it['source']}）" for it in deep]
+        parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻，近期待闻）】\n" + "\n".join(lines))
+    if shm:
+        lines = [f"- [{it['time']}] {it['title']}" for it in shm]
+        parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
+    vnews = _variety_news(symbol)
+    if vnews:
+        lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
+        parts.append(f"【{symbol} 全球宏观要闻（新浪/东财快讯流）】\n" + "\n".join(lines))
+
+    # 基本面背景
+    profile = _variety_profile(symbol)
+    if profile:
+        parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
+
+    # 今日宏观事件日历（时机风险）
+    _calendar_cache["items"] = cal_items
+    _calendar_cache["date"] = datetime.now().strftime("%Y%m%d")
+    cal = _calendar_context()
+    if cal:
+        parts.append(cal)
+
     return "\n\n".join(parts)
 
 
@@ -713,14 +708,25 @@ class ChatIn(BaseModel):
     symbol: Optional[str] = None
 
 
-SYSTEM_PROMPT = """你是一位专业的国内期货市场分析助手。用户会给你多维数据：实时行情、近期日线与技术指标（MA/MACD/RSI/KDJ/BOLL）及信号、日内走势结构（开高低与出现时间、均价偏离、量能分布、尾盘动向）、中期统计（60日分位、持仓变化、量能趋势）、品种相关消息面、基本面框架。请综合分析：
-1) 日内结构：价格在当日区间的位置、量价配合、尾盘动向暗示的短期方向；
-2) 技术面：趋势与关键支撑压力（结合均线/布林/分位）、动能状态与信号共振或冲突；
-3) 消息面与基本面：相关要闻如何作用于该品种的供需与情绪逻辑；
-4) 结论：多空倾向、关键价位（触发条件明确）、量仓验证信号、主要风险。
-要求：观点客观中立、条理清晰、使用中文、引用具体数值；如某维数据缺失要明说；数据为连续主力合约口径，注意换月影响。
-你的输出仅供研究参考，不构成投资建议，必要时提醒用户注意风险。"""
+SYSTEM_PROMPT = """你是一位专业的国内期货日内交易分析助手，服务对象是成熟交易者。
 
+分析时遵循以下原则：
+- **结论前置**：每部分先给结论（偏多/偏空/中性、强/弱），再给依据
+- **量化表述**：所有判断给出具体数值和价位，不说"可能涨跌"这类模糊语
+- **矛盾标注**：当不同维度信号冲突时，明确指出冲突点并说明你更倾向哪边及原因
+- **可操作性**：给出具体入场区间、止损位、止盈目标、仓位建议百分比（基于 1% 风险规则）
+- **时效意识**：注意日内时段特征（早盘波动大/午盘缩量/尾盘情绪化），宏观事件前后提示数据风险
+
+输出结构：
+1. **一句话结论**（方向+强度+核心逻辑，≤30字）
+2. **日内结构**（价格位置、量价配合、尾盘动向→短线方向暗示）
+3. **技术面**（趋势/关键支撑压力位/动能状态/信号共振或冲突）
+4. **消息面与外盘**（对应该品种的定价锚变动和事件影响）
+5. **操作建议**（多空倾向、入场区、止损、止盈、仓位%）
+6. **风险提示**（最可能让判断失效的 1-2 个因素）
+
+数据为连续主力合约口径（注意换月跳空），有数秒延迟。
+你的输出仅供研究参考，不构成投资建议。"""
 
 @app.post("/api/ai/chat")
 async def ai_chat(body: ChatIn):
@@ -1741,9 +1747,12 @@ async def monitor_loop():
         try:
             mon_cfg = (load_config().get("monitor") or DEFAULT_CONFIG["monitor"])
             if mon_cfg.get("enabled", True):
-                symbols = {s.upper() for s in (mon_cfg.get("focus") or [])} | set(_MONITOR["watch"])
-                for sym in sorted(symbols):
-                    await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
+                now = datetime.now()
+                # 非交易时段（含周末+午休）跳过品种级巡检，分钟线不变无需打 API
+                if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
+                    symbols = {s.upper() for s in (mon_cfg.get("focus") or [])} | set(_MONITOR["watch"])
+                    for sym in sorted(symbols):
+                        await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
         except Exception:
             pass
