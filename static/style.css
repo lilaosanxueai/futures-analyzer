@@ -659,6 +659,16 @@ input:focus, select:focus { border-color: var(--primary); }
 .sig-wr.wr-hi { color: #22c55e; }
 .sig-wr.wr-lo { color: #f34e4e; }
 
+
+.news-syms { margin-left: 4px; }
+.news-sym {
+  display: inline-block; font-size: 10px; font-weight: 600; color: var(--primary);
+  border: 1px solid rgba(59, 130, 246, .4); border-radius: 3px; padding: 0 4px;
+  margin-right: 3px; cursor: pointer;
+}
+.news-sym:hover { background: rgba(59, 130, 246, .15); }
+.nsent { font-size: 10px; font-weight: 700; margin-right: 3px; }
+
 /* ---------- 其它 ---------- */
 .muted { color: var(--muted); }
 .small { font-size: 12px; }

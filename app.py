@@ -2318,9 +2318,10 @@ async def _ai_filter_news(items: list) -> dict:
     import logging
     logger = logging.getLogger("uvicorn.error")
     tags: dict = {}
+    sentiment_map: dict = {}
     cfg = load_config()
     if not cfg["api_keys"].get(cfg["provider"]):
-        return tags
+        return tags, sentiment_map
 
     async def ask_chunk(base: int, chunk: list) -> None:
         lines = [
@@ -2356,14 +2357,16 @@ async def _ai_filter_news(items: list) -> dict:
         chunk = items[start:start + chunk_size]
         await ask_with_retry(start, chunk)
     logger.info(f"[ai-news] 全部完成：相关 {len(tags)} 条")
-    return tags
+    return tags, sentiment_map
 
 
 async def _ai_filter_job():
     _news_ai["running"] = True
     try:
         items = _news_cache["items"][:NEWS_AI_LIMIT]
-        _news_ai["tags"] = await _ai_filter_news(items)
+        tags, sents = await _ai_filter_news(items)
+        _news_ai["tags"] = tags
+        _news_ai["sentiments"] = sents
         _news_ai["ts"] = asyncio.get_event_loop().time()
     except Exception:
         pass
@@ -2386,6 +2389,34 @@ _STOCK_NOISE_KW = [
 def _is_stock_noise(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in _STOCK_NOISE_KW)
+
+
+# 品种关联词（新闻 → 涉及的期货品种）
+NEWS_SYMBOL_KW = {
+    "RB0": ["螺纹钢", "螺纹", "建材钢"], "HC0": ["热卷", "热轧"], "I0": ["铁矿石", "铁矿", "PB粉"],
+    "J0": ["焦炭"], "JM0": ["焦煤"], "CU0": ["铜", "沪铜", "电解铜", "LME铜"],
+    "AL0": ["铝", "电解铝", "氧化铝"], "ZN0": ["锌", "沪锌"], "NI0": ["镍", "沪镍"],
+    "AU0": ["黄金", "金价", "COMEX金", "伦敦金", "现货金"], "AG0": ["白银", "银价", "COMEX银"],
+    "SC0": ["原油", "油价", "WTI", "布伦特", "SC", "燃料油"], "FU0": ["燃料油", "低硫"],
+    "M0": ["豆粕", "美豆", "大豆"], "Y0": ["豆油", "植物油"], "P0": ["棕榈油"],
+    "RM0": ["菜粕", "菜籽"], "OI0": ["菜油", "油菜籽"],
+    "TA0": ["PTA", "PX"], "MA0": ["甲醇"], "EG0": ["乙二醇", "MEG"],
+    "PP0": ["聚丙烯", "PP粒"], "L0": ["塑料", "聚乙烯", "LLDPE"], "V0": ["PVC"],
+    "FG0": ["玻璃", "浮法玻璃"], "SA0": ["纯碱", "重质纯碱"],
+    "C0": ["玉米", "谷物"], "CF0": ["棉花", "棉价", "郑棉"], "SR0": ["白糖", "原糖"],
+    "IF0": ["沪深300", "股指", "A股指数"], "EC0": ["集运", "欧线", "运价"],
+    "DINIW": ["美元指数", "美元汇率", "DXY"],
+}
+
+
+def _detect_news_symbols(title: str, summary: str = "") -> list[str]:
+    """从新闻标题/摘要自动检测涉及的期货品种"""
+    text = title + " " + summary[:100]
+    hits = []
+    for sym, kws in NEWS_SYMBOL_KW.items():
+        if any(k in text for k in kws):
+            hits.append(sym)
+    return hits[:4]  # 最多标 4 个
 
 
 def _news_topics(text: str) -> list[str]:
@@ -2421,6 +2452,7 @@ async def news(topic: str = ""):
                 "source": source,
                 "matched": "oilgold" in hit,   # 兼容字段：原油/黄金主题
                 "topics": hit,
+                "symbols": _detect_news_symbols(title or "", summary or ""),
             })
 
         try:
@@ -2460,6 +2492,7 @@ async def news(topic: str = ""):
         "ai": {
             "status": "ready" if ai_tags else ("filtering" if _news_ai["running"] else "off"),
             "tags": {str(k): v for k, v in ai_tags.items()},
+            "sentiments": {str(k): v for k, v in (_news_ai.get("sentiments") or {}).items()},
         },
     }
 

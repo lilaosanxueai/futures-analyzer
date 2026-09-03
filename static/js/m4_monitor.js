@@ -434,8 +434,12 @@ function renderNewsView() {
         ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</a>`
         : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</span>`;
       const tags = (it.topics || []).map((t) => t === "usiran" ? "⚔️" : t === "oilgold" ? "🛢" : "").join(" ");
+      const syms = (it.symbols || []).map((s) =>
+        `<span class="news-sym" data-nsym="${s}">${isIntl(s) ? "🌍" : ""}${s}</span>`).join("");
+      const sent = newsState.aiSentiments && newsState.aiSentiments[String(idx)];
+      const sentTag = sent === "多" ? `<span class="nsent up">▲</span>` : sent === "空" ? `<span class="nsent down">▼</span>` : "";
       return `<div class="news-item${(it.topics || []).length ? " matched" : ""}">
-        <span class="news-time">${day} ${hm}</span>${aiTag}${body}<span class="news-src">${tags} ${it.source}</span>
+        <span class="news-time">${day} ${hm}</span>${aiTag}${sentTag}${body}${syms ? `<span class="news-syms">${syms}</span>` : ""}<span class="news-src">${tags} ${it.source}</span>
       </div>`;
     })
     .join("");
@@ -464,6 +468,7 @@ async function pollNews() {
     newsState.all = d.items || [];
     newsState.aiStatus = (d.ai && d.ai.status) || "off";
     newsState.aiTags = (d.ai && d.ai.tags) || {};
+    newsState.aiSentiments = (d.ai && d.ai.sentiments) || {};
     updateAiBadge();
     if (!newsState.all.length) return;
 
@@ -486,6 +491,16 @@ async function pollNews() {
     renderNewsView();
   } catch (e) { /* 新闻轮询失败静默 */ }
 }
+
+// 新闻品种标签点击 → 直达详情
+$("newsList").addEventListener("click", (e) => {
+  const sym = e.target.closest("[data-nsym]");
+  if (!sym) return;
+  e.preventDefault();
+  e.stopPropagation();
+  selectSymbol(sym.dataset.nsym);
+  switchView("detail");
+});
 
 document.querySelectorAll(".filter-chip").forEach((chip) => {
   if (chip.dataset.filter === newsState.filter) chip.classList.add("active");
