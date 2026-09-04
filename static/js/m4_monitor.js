@@ -412,9 +412,13 @@ function renderNewsView() {
   const list = $("newsList");
   if (!list) return;
   const hlTopics = newsState.filter === "all" ? ["oilgold", "usiran"] : [newsState.filter];
-  let items = newsState.all.filter((it) =>
-    newsState.filter === "all" ? true : (it.topics || []).includes(newsState.filter)
-  );
+  let items = newsState.all.filter((it) => {
+    if (newsState.filter === "all") return true;
+    if (newsState.filter === "watchlist") {
+      return (it.symbols || []).some((s) => state.watchlist.includes(s));
+    }
+    return (it.topics || []).includes(newsState.filter);
+  });
   // AI 语义筛选：ready 后只显示 AI 判定相关的条目
   if (newsState.aiStatus === "ready" && newsState.filter === "all") {
     items = items.filter((_, idx) => newsState.aiTags[idx] !== undefined);
