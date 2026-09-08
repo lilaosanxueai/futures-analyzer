@@ -885,3 +885,21 @@ input:focus, select:focus { border-color: var(--primary); }
 .trade-trail .tk-done { color: #ffb02e; background: rgba(255,159,10,.16); }
 .trade-trail .tk-half { color: #4d9fff; background: rgba(10,132,255,.14); }
 .mon-event.trail-ev { border-left: 3px solid #2ec27e; }
+
+/* ⚡ 日内超短雷达 */
+.scalp-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+.scalp-score { float: right; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.scalp-score.hi { color: #2ec27e; background: rgba(46,194,126,.14); }
+.scalp-score.mid { color: #ffb02e; background: rgba(255,159,10,.14); }
+.scalp-score.lo { color: var(--muted); background: rgba(128,128,128,.14); }
+.scalp-range { margin: 10px 0 4px; }
+.scalp-track { position: relative; height: 8px; border-radius: 4px; background: linear-gradient(90deg, rgba(255,90,90,.35), rgba(128,128,128,.25), rgba(46,194,126,.35)); }
+.scalp-vwap { position: absolute; top: -3px; width: 2px; height: 14px; background: #7aa2f7; border-radius: 1px; }
+.scalp-cur { position: absolute; top: -5px; width: 0; height: 0; transform: translateX(-4px); border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 7px solid var(--text); }
+.scalp-labels { display: flex; justify-content: space-between; font-size: 10.5px; margin-top: 3px; color: var(--muted); }
+.scalp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.scalp-chip { font-size: 11.5px; padding: 3px 9px; border-radius: 6px; background: rgba(128,128,128,.10); border: 1px solid var(--border); }
+.scalp-chip.flow { border-color: rgba(46,194,126,.4); color: #2ec27e; }
+.scalp-chip.session { border-color: rgba(10,132,255,.35); }
+.scalp-points { font-size: 12px; line-height: 1.7; color: var(--text); opacity: .92; }
+.scalp-ai-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }

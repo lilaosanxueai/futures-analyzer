@@ -545,6 +545,7 @@ async function renderAnalysisArea() {
     </div>`;
   if (!intl) loadIntraday(sym);
   loadKline(sym);
+  renderScalpArea();
   if (!intl) {
     $("periodTabs").addEventListener("click", (e) => {
       const b = e.target.closest("button[data-p]");
@@ -610,5 +611,85 @@ async function renderSignalArea() {
       </div>`;
   } catch (e) {
     box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标</div><span class="muted small">加载失败：${e.message}</span></div>`;
+  }
+}
+
+
+/* ---------- ⚡ 日内超短雷达 ---------- */
+
+let scalpTimer = null;
+
+async function renderScalpArea() {
+  const sym = state.selected;
+  const box = $("scalpArea");
+  if (!sym || isIntl(sym)) {
+    box.innerHTML = "";
+    clearInterval(scalpTimer);
+    return;
+  }
+  doScalp(sym);
+  clearInterval(scalpTimer);
+  scalpTimer = setInterval(() => {
+    const hidden = document.querySelector('.view[data-view="detail"]').classList.contains("hidden");
+    if (hidden || state.selected !== sym) { clearInterval(scalpTimer); return; }
+    doScalp(sym, true);
+  }, 30000);
+}
+
+async function doScalp(sym, silent) {
+  const box = $("scalpArea");
+  if (!silent) box.innerHTML = `<div class="scalp-box"><div class="sig-title">⚡ 日内超短雷达</div><span class="muted small">计算中…</span></div>`;
+  try {
+    const s = await api(`/api/scalp/${sym}`);
+    if (state.selected !== sym) return;
+    const pct = Math.min(100, Math.max(0, s.pos_pct || 50));
+    const vwapPos = s.vwap && s.day_high > s.day_low ? Math.min(100, Math.max(0, (s.vwap - s.day_low) / (s.day_high - s.day_low) * 100)) : null;
+    const scoreCls = s.score >= 65 ? "hi" : s.score >= 40 ? "mid" : "lo";
+    const chgCls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "muted");
+    const fmtPct = (v) => (v == null ? "--" : `${v > 0 ? "+" : ""}${v}%`);
+    const rangeBar = `
+      <div class="scalp-range" title="日内区间 ${s.day_low} ~ ${s.day_high}，现价 ${pct.toFixed(0)}% 分位">
+        <div class="scalp-track">
+          ${vwapPos != null ? `<i class="scalp-vwap" style="left:${vwapPos}%" title="VWAP ${s.vwap}"></i>` : ""}
+          <i class="scalp-cur" style="left:${pct}%"></i>
+        </div>
+        <div class="scalp-labels"><span>${s.day_low}</span><span class="muted">日内区间 · ${pct.toFixed(0)}% 分位</span><span>${s.day_high}</span></div>
+      </div>`;
+    box.innerHTML = `
+      <div class="scalp-box">
+        <div class="sig-title">⚡ 日内超短雷达 · ${s.symbol}${s.name ? ` <span class="muted" style="font-weight:400">${s.name}</span>` : ""}
+          <span class="scalp-score ${scoreCls}" title="量能活跃度+短时波动+噪音水平综合评分">可交易性 ${s.score}/100 · ${s.grade}</span>
+        </div>
+        ${rangeBar}
+        <div class="scalp-chips">
+          <span class="scalp-chip" title="5/15/30分钟净变动">动能 5分<b class="${chgCls(s.chg5)}">${fmtPct(s.chg5)}</b> 15分<b class="${chgCls(s.chg15)}">${fmtPct(s.chg15)}</b> 30分<b class="${chgCls(s.chg30)}">${fmtPct(s.chg30)}</b></span>
+          ${s.vwap != null ? `<span class="scalp-chip" title="成交量加权均价">VWAP <b>${s.vwap}</b>（<b class="${chgCls(s.vwap_dev)}">${fmtPct(s.vwap_dev)}</b>）</span>` : ""}
+          ${s.vol_ratio != null ? `<span class="scalp-chip" title="近15分钟均量/当日均量">量能 <b>${s.vol_ratio}×</b></span>` : ""}
+          ${s.pos_chg15 != null ? `<span class="scalp-chip" title="近15分钟持仓变化">持仓 <b class="${s.pos_chg15 > 0 ? "up" : s.pos_chg15 < 0 ? "down" : ""}">${s.pos_chg15 > 0 ? "+" : ""}${s.pos_chg15}</b></span>` : ""}
+          ${s.flow ? `<span class="scalp-chip flow">${s.flow}</span>` : ""}
+          <span class="scalp-chip" title="开盘30分钟高低点区间">IR ${s.ir_low}~${s.ir_high} · ${s.ir_state}</span>
+          <span class="scalp-chip session" title="${s.session_tip}">🕐 ${s.session}</span>
+        </div>
+        <div class="scalp-points">${s.points.map((p) => `<div>· ${p}</div>`).join("")}</div>
+        <div class="scalp-ai-row">
+          <button class="btn accent small-btn" id="btnScalpAi">🤖 AI 超短作战建议</button>
+          <span class="muted small">结合雷达数据 + 画像规则 + 持仓状态，给出具体价位的入场/止损/目标计划</span>
+        </div>
+        <div id="scalpAiOut" class="te-result"></div>
+      </div>`;
+    $("btnScalpAi").addEventListener("click", async () => {
+      const out = $("scalpAiOut");
+      $("btnScalpAi").disabled = true;
+      out.innerHTML = `<span class="typing-dots"><span></span><span></span><span></span></span><span class="muted small" style="margin-left:6px">AI 正在生成超短作战计划…</span>`;
+      try {
+        const d = await api(`/api/scalp/${sym}/ai`, { method: "POST" });
+        out.innerHTML = `<div class="md">${renderMarkdown(d.advice)}</div>`;
+      } catch (e) {
+        out.innerHTML = `<div class="msg error">AI 解读失败：${e.message}</div>`;
+      }
+      $("btnScalpAi").disabled = false;
+    });
+  } catch (e) {
+    if (!silent) box.innerHTML = `<div class="scalp-box"><div class="sig-title">⚡ 日内超短雷达</div><span class="muted small">加载失败：${e.message}</span></div>`;
   }
 }

@@ -1330,6 +1330,9 @@ TRADE_EVAL_PROMPT = """你是严格的日内短线交易风险教练（国内期
 【体系规则预检（程序已判定，评估必须逐条回应是否满足）】
 {rule_checks}
 
+【日内超短雷达（程序实时计算）】
+{scalp_ctx}
+
 【参考数据（实时）】
 {context}
 
@@ -1407,6 +1410,11 @@ async def trade_eval(body: TradeEvalIn):
     position = _position_context()
     rule_checks = await _eval_rule_checks(symbol, body.direction, stop_price, last)
     rule_checks_text = "\n".join(f"- [{c['rule']}] {c['text']}" for c in rule_checks) or "- （未触发任何规则警示）"
+    try:
+        snap = await _scalp_snapshot(symbol)
+        scalp_ctx = "\n".join(f"- {p}" for p in snap["points"]) + f"\n- 可交易性：{snap['score']}/100（{snap['grade']}）"
+    except Exception:
+        scalp_ctx = "- （暂不可用）"
     prompt = ((profile + "\n\n" if profile else "")
               + (position + "\n\n" if position else "")
               + TRADE_EVAL_PROMPT.format(
@@ -1419,6 +1427,7 @@ async def trade_eval(body: TradeEvalIn):
         stop_vs_avg=stop_vs_avg if stop_vs_avg is not None else "--",
         day_high=day_high, day_low=day_low, day_avg=day_avg, prev_settle=quote.get("prev_settle"),
         rule_checks=rule_checks_text,
+        scalp_ctx=scalp_ctx,
         context=context,
     ))
 
@@ -1447,6 +1456,228 @@ async def trade_eval(body: TradeEvalIn):
         },
         "advice": advice,
     }
+
+
+# ---------------------------------------------------------------- 日内超短雷达
+
+# 时段判定（超短线不同时段打法不同）
+_SESSIONS = [
+    ("21:00", "23:00", "夜盘前段", "外盘联动最紧、波动集中；单量给足，严格按触发价进出场"),
+    ("23:00", "02:30", "夜盘后段", "流动性下降、点差变宽；超短降频，有利润先落袋"),
+    ("09:00", "10:15", "早盘", "日内方向定性窗口：开盘30分钟区间（IR）突破是经典超短打法"),
+    ("10:15", "10:30", "小节休息", "停盘间隙，挂单不成交，等待复牌"),
+    ("10:30", "11:30", "上午中段", "主趋势延续或震荡消化；只顺早盘定下的方向做"),
+    ("13:30", "14:30", "午盘", "二次启动高发时段：关注上午高低点的突破与假突破"),
+    ("14:30", "15:00", "尾盘", "减仓时段流动性衰减；超短只平不开，谨防收盘跷跷板"),
+]
+
+
+def _session_info(now: datetime) -> tuple[str, str]:
+    hm = now.strftime("%H:%M")
+    for start, end, name, tip in _SESSIONS:
+        if start <= hm < end:
+            return name, tip
+    if "02:30" <= hm < "09:00":
+        return "休市", "商品期货休市（金融期货 09:30 开盘）"
+    if "11:30" <= hm < "13:30":
+        return "午休", "午间休市，关注外盘变化与上午结构"
+    return "休市", "当前无交易时段"
+
+
+async def _scalp_snapshot(symbol: str) -> dict:
+    """日内超短雷达：结构定位 / 动能 / 量价持仓配合 / 可交易性（纯程序计算，不调 AI）"""
+    rows = await get_minute(symbol, "1")
+    if len(rows) < 20:
+        raise RuntimeError("分钟线数据不足")
+
+    quote = _quote_cache.get(symbol, (0, {}))[1] or {}
+    last = rows[-1]["close"] or quote.get("last")
+    if not last:
+        raise RuntimeError("无有效价格")
+
+    # 当日分钟线（夜盘品种取最后一段连续交易日的数据）
+    day = rows[-1]["datetime"][:10]
+    today = [r for r in rows if r["datetime"].startswith(day)]
+    if len(today) < 5:  # 刚开盘数据太少，改用上一段完整交易日
+        day = rows[-len(today) - 1]["datetime"][:10]
+        today = [r for r in rows if r["datetime"].startswith(day)]
+    if not today:
+        raise RuntimeError("当日无分钟数据")
+
+    day_high = max(r["high"] or r["close"] or 0 for r in today)
+    day_low = min(r["low"] or r["close"] or 9e12 for r in today)
+    vsum = sum(r["volume"] or 0 for r in today)
+    vwap = round(sum((r["close"] or 0) * (r["volume"] or 0) for r in today) / max(1e-9, vsum), 2) if vsum else None
+    pos_pct = round((last - day_low) / max(1e-9, day_high - day_low) * 100, 1) if day_high > day_low else 50.0
+    vwap_dev = round((last / vwap - 1) * 100, 2) if vwap else None
+
+    # 开盘初始区间（前 30 分钟高低点）
+    ir_rows = today[:30]
+    ir_high = max((r["high"] or r["close"] or 0) for r in ir_rows)
+    ir_low = min((r["low"] or r["close"] or 9e12) for r in ir_rows)
+    if ir_high > ir_low:
+        if last > ir_high:
+            ir_state = "已上破开盘区间"
+        elif last < ir_low:
+            ir_state = "已跌破开盘区间"
+        else:
+            ir_state = "开盘区间内震荡"
+    else:
+        ir_state = "区间未形成"
+
+    # 短周期动能
+    def _ref(n: int):
+        return rows[-n]["close"] if len(rows) >= n else None
+
+    r5, r15, r30 = _ref(6), _ref(16), _ref(31)
+    chg = lambda ref: round((last / ref - 1) * 100, 2) if ref else None
+    chg5, chg15, chg30 = chg(r5), chg(r15), chg(r30)
+
+    # 连续同向 1 分钟K线
+    streak = 0
+    if rows[-1]["close"] and rows[-1]["open"]:
+        direction = 1 if rows[-1]["close"] >= rows[-1]["open"] else -1
+        for r in reversed(rows):
+            if not (r["close"] and r["open"]):
+                break
+            if (1 if r["close"] >= r["open"] else -1) == direction:
+                streak += 1
+            else:
+                break
+        streak = streak if direction > 0 else -streak
+
+    # 量能：近15分钟均量 vs 当日均量
+    vols_day = [r["volume"] or 0 for r in today]
+    avg_day = sum(vols_day) / max(1, len(vols_day))
+    vols15 = [r["volume"] or 0 for r in rows[-15:]]
+    avg15 = sum(vols15) / max(1, len(vols15))
+    vol_ratio = round(avg15 / avg_day, 2) if avg_day > 0 else None
+
+    # 持仓变化（15/30分钟）
+    pos_now = rows[-1]["position"]
+    pos15 = (round(pos_now - rows[-16]["position"]) if pos_now is not None and len(rows) >= 16 and rows[-16]["position"] is not None else None)
+    pos30 = (round(pos_now - rows[-31]["position"]) if pos_now is not None and len(rows) >= 31 and rows[-31]["position"] is not None else None)
+
+    # 量价持仓配合定性
+    if chg15 is not None and pos15 is not None:
+        up = chg15 > 0.02
+        dn = chg15 < -0.02
+        if up and pos15 > 0:
+            flow = "增仓上行（新资金推动，顺势可跟）"
+        elif up and pos15 < 0:
+            flow = "减仓上行（空头回补主导，追多需谨慎）"
+        elif dn and pos15 > 0:
+            flow = "增仓下行（新空压制，勿急接飞刀）"
+        elif dn and pos15 < 0:
+            flow = "减仓下行（多头止损离场，跌势未完但近尾声区）"
+        else:
+            flow = "量价均衡（观望或区间思维）"
+    else:
+        flow = None
+
+    # 噪音：近15分钟平均每分钟振幅%
+    amps = [(r["high"] - r["low"]) / r["close"] * 100 for r in rows[-15:] if r["high"] and r["low"] and r["close"]]
+    noise = round(sum(amps) / len(amps), 3) if amps else None
+
+    # 可交易性评分（0-100）：量能活跃 + 短时波动足够 + 噪音适中
+    prefix = _variety_prefix(symbol)
+    threshold = _monitor_threshold(symbol, 1.0)
+    s_vol = min(1.0, (vol_ratio or 0.5) / 1.5) * 40
+    s_move = min(1.0, abs(chg15 or 0) / (threshold * 1.5)) * 35
+    s_noise = (1 - min(1.0, (noise or 0.08) / 0.25)) * 25
+    score = round(min(100, max(0, s_vol + s_move + s_noise)))
+    grade = "活跃" if score >= 65 else ("一般" if score >= 40 else "清淡")
+
+    session, session_tip = _session_info(datetime.now())
+
+    # 程序结论（3-5条要点，超短视角）
+    pts = []
+    pos_word = "偏强（区间上沿）" if pos_pct >= 70 else ("偏弱（区间下沿）" if pos_pct <= 30 else "中轴附近")
+    if vwap_dev is not None:
+        pts.append(f"现价处于日内区间 {pos_pct:.0f}% 分位（{pos_word}），VWAP {'上方' if vwap_dev > 0 else '下方'} {abs(vwap_dev):.2f}%")
+    if chg5 is not None:
+        arrow = "↑" if chg5 > 0 else "↓"
+        pts.append(f"短时动能：5分 {chg5:+.2f}% / 15分 {chg15:+.2f}% / 30分 {chg30:+.2f}%，连续{abs(streak)}根{'阳' if streak > 0 else '阴'}线" if streak else f"短时动能：5分 {chg5:+.2f}% / 15分 {chg15:+.2f}%")
+    if vol_ratio is not None:
+        pts.append(f"量能：近15分钟 {'放量' if vol_ratio >= 1.3 else ('缩量' if vol_ratio <= 0.7 else '持平')}（{vol_ratio}×日均）" + (f"，持仓15分{'+' if pos15 > 0 else ''}{pos15:.0f} → {flow}" if pos15 is not None and flow else ""))
+    elif flow:
+        pts.append(f"持仓：{flow}")
+    pts.append(f"开盘区间（IR）{ir_low:g}~{ir_high:g}：{ir_state}")
+    pts.append(f"时段：{session}——{session_tip}")
+
+    return {
+        "symbol": symbol, "name": (await get_directory()).get(symbol, {}).get("name", ""),
+        "last": last, "day_high": day_high, "day_low": day_low,
+        "vwap": vwap, "vwap_dev": vwap_dev, "pos_pct": pos_pct,
+        "ir_high": ir_high, "ir_low": ir_low, "ir_state": ir_state,
+        "chg5": chg5, "chg15": chg15, "chg30": chg30, "streak": streak,
+        "vol_ratio": vol_ratio, "pos_chg15": pos15, "pos_chg30": pos30, "flow": flow,
+        "noise_pct": noise, "score": score, "grade": grade,
+        "session": session, "session_tip": session_tip,
+        "points": pts, "ts": int(datetime.now().timestamp() * 1000),
+    }
+
+
+@app.get("/api/scalp/{symbol}")
+async def scalp_api(symbol: str):
+    try:
+        snap = await _scalp_snapshot(symbol.strip().upper())
+        return {"ok": True, **snap}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"雷达计算失败：{e}")
+
+
+SCALP_AI_PROMPT = """你是超短线（日内波段）交易教练。以下是程序实时计算的日内超短雷达数据，请给出可直接执行的超短作战建议。
+
+【品种】{symbol}（{name}） 现价 {last}
+【结构】日内 {day_low}~{day_high}，现价处 {pos_pct}% 分位；VWAP {vwap}（偏离 {vwap_dev}%）；开盘区间(IR) {ir_low}~{ir_high}，{ir_state}
+【动能】5分 {chg5}% / 15分 {chg15}% / 30分 {chg30}%；连续 {streak} 根同向分钟线
+【量持仓】近15分钟量能 {vol_ratio}× 日均；持仓15分变化 {pos_chg15}（{flow}）
+【环境】可交易性 {score}/100（{grade}）；时段：{session}（{session_tip}）
+【程序结论】
+{points}
+
+请输出（Markdown，500字内，全部给具体价格；注意 IR 状态描述的是现况——若已上破/跌破，触发价应基于回踩确认位或延伸目标，而非已经过去的突破位）：
+1. **当日结构判读**：趋势日 or 震荡日？主方向与关键分水岭（具体价位）
+2. **超短计划**：
+   - 若顺势：入场触发价、止损价（具体点位，说明逻辑依据）、第一目标、移动止盈启动条件
+   - 若逆势/等待：明确"不做"的条件与重新入场的触发价
+3. **量价确认要点**：下一根放量/缩量、增仓/减仓分别怎么应对
+4. **时段纪律**：结合当前时段（{session}）的执行纪律
+5. **风险一句话**：今天最可能打脸的场景
+结尾固定一句：以上为盘面推演，不构成投资建议。"""
+
+
+@app.post("/api/scalp/{symbol}/ai")
+async def scalp_ai_api(symbol: str):
+    try:
+        snap = await _scalp_snapshot(symbol.strip().upper())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"雷达计算失败：{e}")
+    prompt = SCALP_AI_PROMPT.format(
+        symbol=snap["symbol"], name=snap["name"], last=snap["last"],
+        day_low=snap["day_low"], day_high=snap["day_high"], pos_pct=snap["pos_pct"],
+        vwap=snap["vwap"], vwap_dev=snap["vwap_dev"],
+        ir_low=snap["ir_low"], ir_high=snap["ir_high"], ir_state=snap["ir_state"],
+        chg5=snap["chg5"], chg15=snap["chg15"], chg30=snap["chg30"], streak=abs(snap["streak"]),
+        vol_ratio=snap["vol_ratio"], pos_chg15=snap["pos_chg15"], flow=snap["flow"] or "--",
+        score=snap["score"], grade=snap["grade"], session=snap["session"], session_tip=snap["session_tip"],
+        points="\n".join(f"- {p}" for p in snap["points"]),
+    )
+    profile = _profile_context()
+    position = _position_context()
+    if profile:
+        prompt = profile + "\n\n" + prompt
+    if position:
+        prompt = position + "\n\n" + prompt
+    try:
+        advice = await _call_ai_with_fallback(
+            [{"role": "user", "content": prompt}],
+            max_tokens=min(3072, max_output_for(load_config()["model"] or "")),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 解读失败：{e}")
+    return {"ok": True, "snapshot": snap, "advice": advice}
 
 
 # ---------------------------------------------------------------- 交易日志与复盘统计
