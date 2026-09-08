@@ -226,6 +226,9 @@ async function pollMonitor() {
           if (e.kind === "trail") {
             toast(e.text, true);
             flashTitle(`${e.symbol} 移动止盈`);
+          } else if (e.kind === "flash") {
+            toast(`⚡ ${(e.text || "").slice(0, 50)}`, true);
+            flashTitle("突发资讯");
           } else if (e.dir === "trump") {
             toast(`🇺🇸 特朗普：${(e.text || "").slice(0, 44)}`, true);
             flashTitle("特朗普新表态");
@@ -250,6 +253,14 @@ async function pollMonitor() {
           return `<div class="mon-event trail-ev">
             <div class="mon-line"><span class="mon-time">${hhmm}</span>
             <b>${e.symbol}</b><span>${esc(e.text)}</span></div>
+          </div>`;
+        }
+        // 突发资讯事件（品种关联/地缘/宏观强事件）
+        if (e.kind === "flash") {
+          return `<div class="mon-event flash-ev">
+            <div class="mon-line"><span class="mon-time">${e.time_str || hhmm}</span>
+            <b>⚡ ${esc(e.symbol)}</b><span>${esc(e.text)}</span>
+            ${e.source ? `<span class="muted small">${e.source}</span>` : ""}</div>
           </div>`;
         }
         // 特朗普表态事件

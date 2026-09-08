@@ -479,7 +479,18 @@ function renderIntradayChart(el, items, prevSettle, date) {
   bindIntradayAnnot(el);
 }
 
+let intradayTimer = null;
+
 async function loadIntraday(sym) {
+  clearInterval(intradayTimer);  // 详情页可见时 30s 自动刷新日内走势
+  intradayTimer = setInterval(() => {
+    const hidden = document.querySelector('.view[data-view="detail"]').classList.contains("hidden");
+    if (hidden || state.selected !== sym || !state.quotes[sym]) {
+      clearInterval(intradayTimer);
+      return;
+    }
+    loadIntraday(sym);
+  }, 30000);
   try {
     const data = await api(`/api/intraday/${sym}`);
     const el = $("intradayChart");

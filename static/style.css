@@ -909,3 +909,7 @@ input:focus, select:focus { border-color: var(--primary); }
 .sig-tabs button { border: none; background: transparent; color: var(--muted); font-size: 11px; padding: 3px 9px; border-radius: 4px; cursor: pointer; }
 .sig-tabs button:hover { color: var(--text); }
 .sig-tabs button.active { background: var(--primary); color: #fff; }
+
+/* 突发资讯事件（作战流） */
+.mon-event.flash-ev { border-left: 3px solid #ff6b6b; }
+.flash-ev .mon-line b { color: #ff8787; }

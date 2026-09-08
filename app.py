@@ -134,11 +134,13 @@ async def lifespan(_app):
     await _warmup()
     monitor_task = asyncio.create_task(monitor_loop())
     trail_task = asyncio.create_task(trail_loop())
+    news_watch_task = asyncio.create_task(news_watch_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     monitor_task.cancel()
     trail_task.cancel()
+    news_watch_task.cancel()
     report_task.cancel()
     selfcheck_task.cancel()
 
@@ -2918,6 +2920,53 @@ def _news_topics(text: str) -> list[str]:
     return [topic for topic, kws in NEWS_TOPICS.items() if any(k in t for k in kws)]
 
 
+async def _refresh_news() -> None:
+    """拉取快讯流（新浪+东财），去重/去股市噪音/标主题与品种，写缓存"""
+    loop_now = asyncio.get_event_loop().time()
+    if loop_now - _news_cache["ts"] <= NEWS_TTL:
+        return
+    items, seen = [], set()
+
+    def _add(time_s: str, title: str, summary: str, link: str, source: str):
+        key = (title or summary)[:30]
+        if not key or key in seen:
+            return
+        text = title + " " + summary
+        if _is_stock_noise(text):
+            return  # 只保留与期货相关（大宗/能源/贵金属/宏观），剔除纯股市与公司新闻
+        seen.add(key)
+        hit = _news_topics(text)
+        items.append({
+            "time": str(time_s),
+            "title": title or (summary[:40] if summary else ""),
+            "summary": summary,
+            "link": link,
+            "source": source,
+            "matched": "oilgold" in hit,   # 兼容字段：原油/黄金主题
+            "topics": hit,
+            "symbols": _detect_news_symbols(title or "", summary or ""),
+        })
+
+    try:
+        df = await call_ak(ak.stock_info_global_sina)
+        for _, r in df.iterrows():
+            content = str(r.get("内容", ""))
+            _add(r.get("时间", ""), content, content, "", "新浪")
+    except Exception:
+        pass
+    try:
+        df = await call_ak(ak.stock_info_global_em)
+        for _, r in df.iterrows():
+            _add(r.get("发布时间", ""), str(r.get("标题", "")), str(r.get("摘要", "")),
+                 str(r.get("链接", "")), "东财")
+    except Exception:
+        pass
+
+    items.sort(key=lambda x: x["time"], reverse=True)
+    _news_cache["items"] = items[:80]
+    _news_cache["ts"] = loop_now
+
+
 @app.get("/api/news")
 async def news(topic: str = ""):
     """主题要闻：新浪全球快讯（市场异动流）+ 东方财富全球快讯，多主题命中标记。
@@ -2925,47 +2974,8 @@ async def news(topic: str = ""):
     topic 传入 NEWS_TOPICS 的键时仅返回该主题命中的条目。
     """
     loop_now = asyncio.get_event_loop().time()
-    if loop_now - _news_cache["ts"] > NEWS_TTL:
-        items, seen = [], set()
-
-        def _add(time_s: str, title: str, summary: str, link: str, source: str):
-            key = (title or summary)[:30]
-            if not key or key in seen:
-                return
-            text = title + " " + summary
-            if _is_stock_noise(text):
-                return  # 只保留与期货相关（大宗/能源/贵金属/宏观），剔除纯股市与公司新闻
-            seen.add(key)
-            hit = _news_topics(text)
-            items.append({
-                "time": str(time_s),
-                "title": title or (summary[:40] if summary else ""),
-                "summary": summary,
-                "link": link,
-                "source": source,
-                "matched": "oilgold" in hit,   # 兼容字段：原油/黄金主题
-                "topics": hit,
-                "symbols": _detect_news_symbols(title or "", summary or ""),
-            })
-
-        try:
-            df = await call_ak(ak.stock_info_global_sina)
-            for _, r in df.iterrows():
-                content = str(r.get("内容", ""))
-                _add(r.get("时间", ""), content, content, "", "新浪")
-        except Exception:
-            pass
-        try:
-            df = await call_ak(ak.stock_info_global_em)
-            for _, r in df.iterrows():
-                _add(r.get("发布时间", ""), str(r.get("标题", "")), str(r.get("摘要", "")),
-                     str(r.get("链接", "")), "东财")
-        except Exception:
-            pass
-
-        items.sort(key=lambda x: x["time"], reverse=True)
-        _news_cache["items"] = items[:80]
-        _news_cache["ts"] = loop_now
+    await _refresh_news()
+    if _news_cache["items"]:
         asyncio.create_task(_check_trump_news())
 
     result_items = _news_cache["items"]
@@ -3006,6 +3016,8 @@ async def _check_trump_news():
         return
     new_items = [it for it in items if it["title"] not in _trump_seen]
     for it in new_items:
+        if it["title"] in _trump_seen:  # 并发调用防重（循环内有 await 挂起点）
+            continue
         _trump_seen.add(it["title"])
         event = {
             "id": f"trump-{abs(hash(it['title'])) % 10 ** 10}",
@@ -3021,6 +3033,88 @@ async def _check_trump_news():
         if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
             _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
         await _feishu_push(f"🇺🇸 特朗普表态监控\n{it['title']}\n[{it['time'][5:16]}] {it.get('source', '')}")
+
+
+# ---------------------------------------------------------------- 突发资讯监控（日内作战流）
+
+# 直接影响日内盘面的强事件词（品种关联或宏观主题命中时才算突发）
+_FLASH_KW = [
+    "空袭", "袭击", "爆炸", "导弹", "无人机", "打击", "封锁", "霍尔木兹", "红海",
+    "制裁", "战争", "冲突", "停火", "opec", "欧佩克", "减产", "增产", "出口管制",
+    "罢工", "断供", "港口", "库存", "eia", "api", "非农", "降息", "加息",
+    "利率决议", "cpi", "关税", "紧急", "突发", "熔断", "减半", "招标",
+]
+
+_flash_seen: set = set()
+_flash_first = {"done": False}
+
+
+def _is_flash(it: dict) -> bool:
+    """突发判定：美伊冲突专题直推；否则需（品种关联或宏观主题）+ 强事件词"""
+    topics = it.get("topics") or []
+    if "trump" in topics:
+        return False  # 特朗普走专项推送，避免重复
+    text = (it.get("title", "") + " " + (it.get("summary") or "")).lower()
+    if "usiran" in topics:
+        return True
+    if not any(k in text for k in _FLASH_KW):
+        return False
+    return bool(it.get("symbols")) or "oilgold" in topics
+
+
+async def _check_flash_news() -> None:
+    """扫描快讯流中的突发条目 → 事件流 + 飞书推送（首轮建档不推，每轮最多 2 条防轰炸）"""
+    items = _news_cache["items"]
+    if not _flash_first["done"]:
+        for it in items:
+            _flash_seen.add(it["title"])
+        _flash_first["done"] = True
+        return
+    pushed = 0
+    for it in items:
+        if pushed >= 2:
+            break
+        if it["title"] in _flash_seen:
+            continue
+        _flash_seen.add(it["title"])
+        if not _is_flash(it):
+            continue
+        pushed += 1
+        syms = it.get("symbols") or []
+        sym_tag = " ".join(syms) if syms else "宏观/地缘"
+        event = {
+            "id": f"flash-{abs(hash(it['title'])) % 10 ** 10}",
+            "ts": int(datetime.now().timestamp() * 1000),
+            "kind": "flash", "etype": "news",
+            "symbol": sym_tag, "dir": "news",
+            "topics": it.get("topics") or [],
+            "text": it["title"], "summary": (it.get("summary") or "")[:150],
+            "source": it.get("source", ""), "link": it.get("link", ""),
+            "time_str": str(it.get("time", ""))[5:16],
+        }
+        _MONITOR["events"].append(event)
+        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+        asyncio.create_task(_feishu_push(f"⚡ 突发资讯 [{sym_tag}]\n{it['title']}\n[{event['time_str']}] {it.get('source', '')}"))
+    if len(_flash_seen) > 2000:  # 防内存膨胀
+        _flash_seen.clear()
+
+
+async def news_watch_loop():
+    """突发资讯后台监控：60 秒刷新快讯流并检测突发（用户不打开资讯页也有推送）"""
+    await asyncio.sleep(35)
+    while True:
+        try:
+            now = datetime.now()
+            # 交易时段+周末外盘时段监控（新闻源全天生效，夜间外盘事件对次日开盘重要）
+            if now.weekday() < 6 and (is_trading_time(now) or 7 <= now.hour):
+                await _refresh_news()
+                if _news_cache["items"]:
+                    await _check_flash_news()
+                    await _check_trump_news()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 
 # ---------------------------------------------------------------- AI 记忆画像
