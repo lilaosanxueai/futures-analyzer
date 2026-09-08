@@ -383,32 +383,44 @@ async def daily(symbol: str, limit: int = 30):
     return {"ok": True, "items": items}
 
 
-async def get_indicators(symbol: str) -> dict:
-    """日线技术指标 + 信号（供 API 与 AI 上下文共用）"""
-    records = await get_daily(symbol)
-    if len(records) < 30:
-        raise ValueError(f"日线数据不足（{len(records)} 根），无法计算指标")
-    df = pd.DataFrame(records)
+KLINE_PERIODS = {"day": None, "60m": "60", "30m": "30", "15m": "15", "5m": "5", "1m": "1"}
+
+IND_PERIODS = {"5m": "5", "15m": "15", "30m": "30", "60m": "60"}  # 指标可用分钟周期
+
+
+async def get_indicators(symbol: str, period: str = "day") -> dict:
+    """技术指标 + 信号（日线或分钟级，供 API 与 AI 上下文共用）"""
+    if period in IND_PERIODS:
+        rows = await get_minute(symbol, IND_PERIODS[period])
+        if len(rows) < 60:
+            raise ValueError(f"分钟线数据不足（{len(rows)} 根），无法计算指标")
+        df = pd.DataFrame([{**r, "date": r["datetime"]} for r in rows])
+        label = period
+    else:
+        records = await get_daily(symbol)
+        if len(records) < 30:
+            raise ValueError(f"日线数据不足（{len(records)} 根），无法计算指标")
+        df = pd.DataFrame(records)
+        label = "day"
     ind = compute_indicators(df)
     return {
         "values": latest_values(ind),
         "signals": detect_signals(ind),
         "date": str(ind.iloc[-1].get("date", "")),
+        "period": label,
     }
 
 
 @app.get("/api/indicators/{symbol}")
-async def indicators(symbol: str):
+async def indicators(symbol: str, period: str = "15m"):
+    period = period if (period in IND_PERIODS or period == "day") else "15m"
     try:
-        data = await get_indicators(symbol)
+        data = await get_indicators(symbol, period)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"指标计算失败：{e}")
     return {"ok": True, **data}
-
-
-KLINE_PERIODS = {"day": None, "60m": "60", "30m": "30", "15m": "15", "5m": "5", "1m": "1"}
 
 
 @app.get("/api/kline/{symbol}")
@@ -614,54 +626,59 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             return fallback
 
     (
-        daily, directory, ind, intra, intl, deep, shm, cal_items,
+        daily, directory, ind, ind15, intra, intl, deep, shm, cal_items, scalp,
     ) = await asyncio.gather(
         safe(get_daily(symbol), []),
         safe(get_directory(), {}),
         safe(get_indicators(symbol), None),
+        safe(get_indicators(symbol, "15m"), None),
         safe(_intraday_summary(symbol), ""),
         safe(_intl_context_for(symbol), ""),
         safe(_variety_news_deep(symbol), []),
         safe(_shmet_news(symbol), []),
         safe(get_calendar(), []),
+        safe(_scalp_snapshot(symbol), None),
     )
 
     name = directory.get(symbol, {}).get("name", "")
 
-    # 日线
-    if daily:
-        lines = [
-            f"{d['date']} 开{_num(d.get('open'))} 高{_num(d.get('high'))} "
-            f"低{_num(d.get('low'))} 收{_num(d.get('close'))} "
-            f"量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
-            for d in daily[-10:]
-        ]
-        parts.append(f"【{symbol}（{name}）近 10 个交易日日线】\n" + "\n".join(lines))
+    # 超短雷达置顶（日内结构/动能/量价持仓/时段，超短线第一优先级）
+    if scalp:
+        parts.append(
+            f"【{symbol}（{name}）日内超短雷达（实时计算）】\n"
+            + "\n".join(f"- {p}" for p in scalp["points"])
+            + f"\n- 可交易性：{scalp['score']}/100（{scalp['grade']}）"
+        )
 
-    # 技术指标与信号
-    if ind:
-        v = ind["values"]
+    # 15 分钟级技术指标（超短作战周期）
+    if ind15:
+        v = ind15["values"]
         dir_cn = {"bull": "看多", "bear": "看空", "warn": "警示"}
         ind_lines = [
-            f"【{symbol} 技术指标（日线，截至 {ind['date']}）】",
-            f"收盘 {v.get('close')} | MA5 {v.get('ma5')} MA10 {v.get('ma10')} "
-            f"MA20 {v.get('ma20')} MA60 {v.get('ma60')}",
+            f"【{symbol} 技术指标（15分钟线，截至 {ind15['date']}）】",
+            f"最新 {v.get('close')} | MA5 {v.get('ma5')} MA10 {v.get('ma10')} "
+            f"MA20 {v.get('ma20')}",
             f"MACD: DIF {v.get('dif')} DEA {v.get('dea')} 柱 {v.get('macd_hist')} | "
-            f"RSI6 {v.get('rsi6')} RSI12 {v.get('rsi12')} RSI24 {v.get('rsi24')}",
+            f"RSI6 {v.get('rsi6')} RSI12 {v.get('rsi12')}",
             f"KDJ: K {v.get('k')} D {v.get('d')} J {v.get('j')} | "
             f"BOLL: 上轨 {v.get('boll_up')} 中轨 {v.get('boll_mid')} 下轨 {v.get('boll_low')}",
         ]
-        if ind["signals"]:
+        if ind15["signals"]:
             sig = "；".join(
                 f"[{dir_cn.get(s['dir'], s['dir'])}]{s['name']}（{s['detail']}）"
-                for s in ind["signals"]
+                for s in ind15["signals"]
             )
             ind_lines.append(f"最新信号：{sig}")
-        else:
-            ind_lines.append("最新信号：无明显技术信号")
         parts.append("\n".join(ind_lines))
 
-        # 信号历史胜率（量化含金量）
+    # 日线：降为背景参考（定顺逆大势，不做主要依据）
+    if ind:
+        v = ind["values"]
+        trend = "价格在日线MA20上方（大势偏多背景）" if (v.get("close") or 0) > (v.get("ma20") or 0) else "价格在日线MA20下方（大势偏空背景）"
+        macd_dir = "多头" if (v.get("dif") or 0) > (v.get("dea") or 0) else "空头"
+        parts.append(f"【{symbol} 日线背景（仅定大势，超短不据此开仓）】{trend}；日线MACD{macd_dir}方向；MA20 {v.get('ma20')}")
+
+        # 日线信号历史胜率（量化含金量）
         try:
             import pandas as _pd
             _df = _pd.DataFrame(daily[-500:]) if daily else None
@@ -675,7 +692,7 @@ async def _build_market_context(symbol: Optional[str]) -> str:
                         if r.get("count", 0) >= 3:
                             acc_lines.append(f"{nm}: {r['win_rate']}%胜率({r['count']}次,均{r['avg_gain']:+.1f}%)")
                     if acc_lines:
-                        parts.append("【当前信号的历史胜率（近500根日线，5日后）】" + "；".join(acc_lines))
+                        parts.append("【日线信号历史胜率（近500根，5日后）】" + "；".join(acc_lines))
         except Exception:
             pass
 
@@ -729,22 +746,24 @@ class ChatIn(BaseModel):
     symbol: Optional[str] = None
 
 
-SYSTEM_PROMPT = """你是一位专业的国内期货日内交易分析助手，服务对象是成熟交易者。
+SYSTEM_PROMPT = """你是一位专业的国内期货超短线（日内 T+0）交易教练，服务对象是成熟交易者。你的全部分析以日内实时盘面为核心，不隔夜、不做中线推演。
 
 分析时遵循以下原则：
-- **结论前置**：每部分先给结论（偏多/偏空/中性、强/弱），再给依据
+- **超短视角优先**：先看日内结构（区间分位/VWAP/开盘区间IR）、量价持仓配合、短时动能（5/15/30分），日线只用来定顺逆大势背景，绝不作为主要开仓依据
+- **结论前置**：每部分先给结论（偏多/偏空/中性、可做/观望），再给依据
 - **量化表述**：所有判断给出具体数值和价位，不说"可能涨跌"这类模糊语
-- **矛盾标注**：当不同维度信号冲突时，明确指出冲突点并说明你更倾向哪边及原因
-- **可操作性**：给出具体入场区间、止损位、止盈目标、仓位建议百分比（基于 1% 风险规则）
-- **时效意识**：注意日内时段特征（早盘波动大/午盘缩量/尾盘情绪化），宏观事件前后提示数据风险
+- **矛盾标注**：当 15 分钟信号与日线背景冲突时，明确指出并按超短逻辑处理（顺势回调位优先）
+- **可操作性**：给出具体入场触发价、止损价（说明逻辑依据：VWAP/IR边界/前低）、第一目标与移动止盈启动条件；明确"不做"的条件
+- **时段纪律**：结合当前时段（早盘定性/午盘二次启动/尾盘只平不开/夜盘联动）给执行纪律
+- **量价确认**：任何入场建议必须说明需要放量/缩量、增仓/减仓的确认条件
 
 输出结构：
-1. **一句话结论**（方向+强度+核心逻辑，≤30字）
-2. **日内结构**（价格位置、量价配合、尾盘动向→短线方向暗示）
-3. **技术面**（趋势/关键支撑压力位/动能状态/信号共振或冲突）
-4. **消息面与外盘**（对应该品种的定价锚变动和事件影响）
-5. **操作建议**（多空倾向、入场区、止损、止盈、仓位%）
-6. **风险提示**（最可能让判断失效的 1-2 个因素）
+1. **一句话结论**（方向+强度+核心逻辑，≤30字；清淡行情直接说"今日观望"）
+2. **日内结构**（区间分位、VWAP 位置、IR 突破状态、量价持仓定性 → 超短方向暗示）
+3. **短时动能**（5/15/30分变化、15分钟指标状态、信号共振或冲突）
+4. **消息面与外盘**（仅影响今日盘面的：地缘脉冲、外盘联动、即将公布的事件）
+5. **超短作战计划**（入场触发价、止损价+逻辑、第一目标、移动止盈条件、"不做"条件）
+6. **风险一句话**（今天最可能打脸的场景）
 
 数据为连续主力合约口径（注意换月跳空），有数秒延迟。
 你的输出仅供研究参考，不构成投资建议。"""

@@ -83,7 +83,7 @@ const state = {
   prevLast: {},     // symbol -> 上次最新价（用于闪烁）
   ticks: { sym: null, points: [] },   // 实时走势：本次会话对选中合约的 5 秒采样
   refreshCount: 0,  // 轮询计数（分时图自动刷新节流）
-  klinePeriod: "day",                 // K线周期
+  klinePeriod: "15m",                // K线周期（超短默认 15 分钟）
   annotMode: null,                    // 分时图标注模式：bull/bear/risk/level/note
   candidates: [],    // 合约候选（含拼音）
   dropHits: [],      // 搜索下拉当前匹配项
@@ -577,38 +577,56 @@ async function renderAnalysisArea() {
   }
 }
 
+const SIG_PERIODS = [["15m", "15分"], ["5m", "5分"], ["30m", "30分"], ["60m", "60分"], ["day", "日线"]];
+
 async function renderSignalArea() {
   const sym = state.selected;
   const box = $("sigArea");
   if (!sym || isIntl(sym)) { box.innerHTML = ""; return; }
-  box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标（日线）</div><span class="muted small">加载中…</span></div>`;
+  if (!state.sigPeriod) state.sigPeriod = "15m";
+  const period = state.sigPeriod;
+  const plabel = (SIG_PERIODS.find((p) => p[0] === period) || ["", period])[1];
+  const tabsHtml = SIG_PERIODS.map(([p, label]) => `<button data-sigp="${p}" class="${period === p ? "active" : ""}">${label}</button>`).join("");
+  box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标<span class="sig-tabs">${tabsHtml}</span></div><span class="muted small">加载中…</span></div>`;
+  box.querySelector(".sig-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-sigp]");
+    if (!b || b.dataset.sigp === state.sigPeriod) return;
+    state.sigPeriod = b.dataset.sigp;
+    renderSignalArea();
+  });
   try {
-    const [d, acc] = await Promise.all([
-      api(`/api/indicators/${sym}`),
-      api(`/api/signal-accuracy/${sym}?lookforward=5`).catch(() => ({ results: {} })),
-    ]);
+    const isDay = period === "day";
+    const d = await api(`/api/indicators/${sym}?period=${period}`);
+    const accPromise = isDay ? api(`/api/signal-accuracy/${sym}?lookforward=5`).catch(() => ({ results: {} })) : null;
+    const acc = accPromise ? (await accPromise).results || {} : {};
     const v = d.values || {};
-    const accData = acc.results || {};
     const chips = (d.signals || []).length
       ? d.signals.map((s) => {
-          const a = accData[s.name];
+          const a = acc[s.name];
           const wr = a && a.count >= 3 ? ` <span class="sig-wr ${a.win_rate >= 55 ? "wr-hi" : a.win_rate <= 45 ? "wr-lo" : ""}">${a.win_rate}%(${a.count}次)</span>` : "";
           return `<span class="sig ${s.dir}" title="${s.detail}${a ? `
 历史5日胜率: ${a.win_rate}% (${a.count}次)` : ""}">${s.name}${wr}<span class="d">${s.detail}</span></span>`;
         }).join("")
-      : `<span class="muted small">当前无明显技术信号</span>`;
+      : `<span class="muted small">当前${plabel}无明显技术信号</span>`;
     const fv = (x) => (x == null ? "--" : x);
     box.innerHTML = `
       <div class="sig-box">
-        <div class="sig-title">技术信号（${d.date} 日线）<span class="muted" style="font-weight:400"> · 括号内为历史5日胜率(样本数)</span></div>
+        <div class="sig-title">技术信号（${plabel} · ${d.date}）<span class="sig-tabs">${tabsHtml}</span>
+          <span class="muted" style="font-weight:400">${isDay ? " · 括号内为历史5日胜率(样本数)" : " · 分钟级信号（超短参考，胜率统计仅日线）"}</span></div>
         <div class="sig-chips">${chips}</div>
         <div class="detail-grid" style="margin-top:10px">
-          ${dg("MA5", fv(v.ma5))}${dg("MA10", fv(v.ma10))}${dg("MA20", fv(v.ma20))}${dg("MA60", fv(v.ma60))}
+          ${dg("MA5", fv(v.ma5))}${dg("MA10", fv(v.ma10))}${dg("MA20", fv(v.ma20))}${dg(isDay ? "MA60" : "现价", fv(isDay ? v.ma60 : v.close))}
           ${dg("DIF", fv(v.dif))}${dg("DEA", fv(v.dea))}${dg("MACD柱", fv(v.macd_hist))}${dg("RSI6", fv(v.rsi6))}
           ${dg("RSI12", fv(v.rsi12))}${dg("K", fv(v.k))}${dg("D", fv(v.d))}${dg("J", fv(v.j))}
           ${dg("BOLL上轨", fv(v.boll_up))}${dg("BOLL中轨", fv(v.boll_mid))}${dg("BOLL下轨", fv(v.boll_low))}
         </div>
       </div>`;
+    box.querySelector(".sig-tabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-sigp]");
+      if (!b || b.dataset.sigp === state.sigPeriod) return;
+      state.sigPeriod = b.dataset.sigp;
+      renderSignalArea();
+    });
   } catch (e) {
     box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标</div><span class="muted small">加载失败：${e.message}</span></div>`;
   }

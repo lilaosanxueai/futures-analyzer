@@ -903,3 +903,9 @@ input:focus, select:focus { border-color: var(--primary); }
 .scalp-chip.session { border-color: rgba(10,132,255,.35); }
 .scalp-points { font-size: 12px; line-height: 1.7; color: var(--text); opacity: .92; }
 .scalp-ai-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+
+/* 信号面板周期切换（超短：分钟级为主） */
+.sig-tabs { display: inline-flex; gap: 2px; background: var(--panel-2); border-radius: 6px; padding: 2px; margin-left: 10px; vertical-align: middle; }
+.sig-tabs button { border: none; background: transparent; color: var(--muted); font-size: 11px; padding: 3px 9px; border-radius: 4px; cursor: pointer; }
+.sig-tabs button:hover { color: var(--text); }
+.sig-tabs button.active { background: var(--primary); color: #fff; }
