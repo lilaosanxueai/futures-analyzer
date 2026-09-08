@@ -876,3 +876,12 @@ input:focus, select:focus { border-color: var(--primary); }
 .te-check.warn .tc-id { color: #ffb02e; background: rgba(255, 159, 10, .18); }
 .te-check.info { background: rgba(10, 132, 255, .08); border-color: rgba(10, 132, 255, .35); }
 .te-check.info .tc-id { color: #4d9fff; background: rgba(10, 132, 255, .16); }
+
+/* 动态止盈：持仓卡状态行 + 异动流事件 */
+.trade-trail { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 4px; padding: 5px 8px; border-radius: 6px; font-size: 11.5px; background: var(--panel-2, rgba(128,128,128,.08)); }
+.trade-trail .tk { font-size: 11px; padding: 1px 7px; border-radius: 4px; }
+.trade-trail .tk-wait { color: var(--muted); background: rgba(128,128,128,.15); }
+.trade-trail .tk-on { color: #2ec27e; background: rgba(46,194,126,.14); }
+.trade-trail .tk-done { color: #ffb02e; background: rgba(255,159,10,.16); }
+.trade-trail .tk-half { color: #4d9fff; background: rgba(10,132,255,.14); }
+.mon-event.trail-ev { border-left: 3px solid #2ec27e; }

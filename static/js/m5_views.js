@@ -52,7 +52,17 @@ function switchView(name) {
     if (!newsState.loaded) pollNews();
     if (!calLoaded) { calLoaded = true; loadCalendar(); }
   }
-  if (name === "trades" && !tradesState.loaded) loadTrades();
+  if (name === "trades") {
+    if (!tradesState.loaded) loadTrades();
+    clearInterval(tradesState.timer);  // 持仓视图可见时 15s 刷新动态止盈状态
+    tradesState.timer = setInterval(() => {
+      if (document.querySelector('.view[data-view="trades"]').classList.contains("hidden")) {
+        clearInterval(tradesState.timer);
+        return;
+      }
+      loadTrades();
+    }, 15000);
+  }
   if (name === "heat") renderHeatView();
 }
 

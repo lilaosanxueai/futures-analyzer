@@ -223,7 +223,10 @@ async function pollMonitor() {
     if (monitorState.seen.size) {
       for (const e of d.events) {
         if (!monitorState.seen.has(e.id)) {
-          if (e.dir === "trump") {
+          if (e.kind === "trail") {
+            toast(e.text, true);
+            flashTitle(`${e.symbol} 移动止盈`);
+          } else if (e.dir === "trump") {
             toast(`🇺🇸 特朗普：${(e.text || "").slice(0, 44)}`, true);
             flashTitle("特朗普新表态");
           } else {
@@ -242,6 +245,13 @@ async function pollMonitor() {
       .map((e) => {
         const t = new Date(e.ts);
         const hhmm = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+        // 动态止盈事件（持仓追踪）
+        if (e.kind === "trail") {
+          return `<div class="mon-event trail-ev">
+            <div class="mon-line"><span class="mon-time">${hhmm}</span>
+            <b>${e.symbol}</b><span>${esc(e.text)}</span></div>
+          </div>`;
+        }
         // 特朗普表态事件
         if (e.dir === "trump") {
           return `<div class="mon-event trump-ev">

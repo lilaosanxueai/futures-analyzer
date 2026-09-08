@@ -84,6 +84,25 @@ function renderTrades() {
     const dirTxt = t.direction === "long" ? "多" : "空";
     const res = t.result_pts == null ? "" : (t.result_pts > 0 ? "up" : "down");
     const statusTxt = { open: "待验证", closed: "已了结", abandoned: "已放弃" }[t.status] || t.status;
+    // 动态止盈状态行（仅持仓单 + 有实时数据时）
+    let trailHtml = "";
+    const lv = t.live, tr = t.trail;
+    if (t.status === "open" && tr) {
+      if (lv && lv.price) {
+        const pnlCls = lv.pnl_pts >= 0 ? "up" : "down";
+        let stateTxt;
+        if (lv.triggered) stateTxt = `<span class="tk tk-done">✅ 移动止盈已触发 @${lv.peak}</span>`;
+        else if (lv.active) stateTxt = `<span class="tk tk-on">🎯 追踪中 @${lv.trail_line}（峰值${lv.peak} 回撤${tr.points}点）</span>`;
+        else stateTxt = `<span class="tk tk-wait">等待激活：浮盈≥${tr.arm}点启动追踪</span>`;
+        trailHtml = `<div class="trade-trail">
+          <span>现价 ${lv.price} · 浮盈 <b class="${pnlCls}">${lv.pnl_pts > 0 ? "+" : ""}${lv.pnl_pts}点</b></span>
+          ${stateTxt}
+          ${lv.partial_done ? '<span class="tk tk-half">📍 已达目标位，建议减半仓</span>' : ""}
+        </div>`;
+      } else {
+        trailHtml = `<div class="trade-trail"><span class="muted small">移动止盈：浮盈≥${tr.arm}点激活，峰值回撤${tr.points}点离场（等待行情…）</span></div>`;
+      }
+    }
     return `<div class="trade-item" data-id="${t.id}">
       <div class="trade-line">
         <span class="note-time">${t.date}</span>
@@ -97,6 +116,7 @@ function renderTrades() {
           <button data-del="${t.id}" title="删除">✕</button>
         </span>
       </div>
+      ${trailHtml}
     </div>`;
   }).join("");
 }
@@ -181,7 +201,7 @@ $("btnTradeLog").addEventListener("click", async () => {
         ai_grade: gradeM ? gradeM[1] : "",
       }),
     });
-    toast("已记入交易日志（待验证）");
+    toast(`已记入交易日志（移动止盈已启用：浮盈≥${sp}点激活，峰值回撤${(sp * 0.5).toFixed(0)}点离场）`);
   } catch (e) {
     toast(`保存失败：${e.message}`, true);
   }

@@ -133,10 +133,12 @@ async def _warmup():
 async def lifespan(_app):
     await _warmup()
     monitor_task = asyncio.create_task(monitor_loop())
+    trail_task = asyncio.create_task(trail_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     monitor_task.cancel()
+    trail_task.cancel()
     report_task.cancel()
     selfcheck_task.cancel()
 
@@ -1470,7 +1472,32 @@ def _save_trades(trades: list[dict]) -> None:
 
 @app.get("/api/trades")
 async def get_trades():
-    return {"ok": True, "items": list(reversed(_load_trades()))}  # 新的在前
+    items = list(reversed(_load_trades()))  # 新的在前
+    # 持仓单附加实时动态止盈状态（只算不落库）
+    for t in items:
+        if t.get("status") != "open":
+            continue
+        sym = t["symbol"]
+        price = (_quote_cache.get(sym, (0, {}))[1] or {}).get("last")
+        if not price:
+            try:
+                price = (await fetch_quote(sym)).get("last")
+            except Exception:
+                price = None
+        if not price:
+            continue
+        sign = 1 if t["direction"] == "long" else -1
+        tr = t.get("trail") or {}
+        t["live"] = {
+            "price": price,
+            "pnl_pts": round(sign * (price - t["entry"]), 1),
+            "peak": tr.get("peak"),
+            "active": tr.get("active", False),
+            "triggered": tr.get("triggered", False),
+            "partial_done": tr.get("partial_done", False),
+            "trail_line": round(tr["peak"] - sign * tr["points"], 2) if tr.get("active") and not tr.get("triggered") else None,
+        }
+    return {"ok": True, "items": items}
 
 
 class TradeIn(BaseModel):
@@ -1482,6 +1509,52 @@ class TradeIn(BaseModel):
     lots: float = 1
     date: str = ""
     ai_grade: str = ""   # AI 评估时的风险评级快照（低/中/高）
+    trail_points: float = 0  # 追踪止盈回撤点数（0=自动：止损距离×0.5）
+    trail_arm: float = 0     # 追踪激活所需浮盈点数（0=自动：=止损距离，即盈亏比1:1时启动）
+
+
+def _init_trail(entry: float, stop_points: float, target_points: float,
+                trail_points: float = 0, trail_arm: float = 0) -> dict:
+    """持仓动态止盈（追踪止盈）初始状态"""
+    return {
+        "points": round(trail_points or stop_points * 0.5, 1),   # 峰值回撤点数
+        "arm": round(trail_arm or stop_points, 1),               # 激活阈值（浮盈点数）
+        "target": target_points,
+        "peak": entry,          # 持仓期间极值（多=最高 / 空=最低）
+        "active": False,        # 是否已激活追踪
+        "triggered": False,     # 移动止盈是否已触发（触发后不再重复报）
+        "partial_done": False,  # 是否已提示分批止盈
+    }
+
+
+def _trail_state(t: dict, price: float) -> list[dict]:
+    """更新单笔持仓的追踪止盈状态；返回本轮产生的提示事件（不落库、不推送，由调用方处理）"""
+    tr = t.get("trail")
+    if not tr or t.get("status") != "open" or not price:
+        return []
+    events: list[dict] = []
+    sign = 1 if t["direction"] == "long" else -1
+    pnl = sign * (price - t["entry"])
+    # 更新极值（追踪线随行情上移/下移，只进不退）
+    if sign * (price - tr["peak"]) > 0:
+        tr["peak"] = price
+    # 激活：浮盈达到 arm 点
+    if not tr["active"] and pnl >= tr["arm"]:
+        tr["active"] = True
+        events.append({"etype": "arm", "price": price, "pnl": round(pnl, 1),
+                       "line": round(tr["peak"] - sign * tr["points"], 2)})
+    # 分批提示：浮盈达到原目标位（一次性）
+    if not tr["partial_done"] and pnl >= tr["target"]:
+        tr["partial_done"] = True
+        events.append({"etype": "partial", "price": price, "pnl": round(pnl, 1),
+                       "line": round(tr["peak"] - sign * tr["points"], 2)})
+    # 触发：激活后价格回撤到追踪线（一次性，触发后该笔不再监控）
+    if tr["active"] and not tr["triggered"]:
+        line = round(tr["peak"] - sign * tr["points"], 2)
+        if sign * (line - price) >= 0:
+            tr["triggered"] = True
+            events.append({"etype": "trigger", "price": price, "pnl": round(pnl, 1), "line": line})
+    return events
 
 
 @app.post("/api/trades")
@@ -1504,6 +1577,8 @@ async def add_trade(body: TradeIn):
         "exit": None,         # 平仓价
         "result_pts": None,   # 结果：盈亏点数（正/负）
         "note": "",
+        "trail": _init_trail(body.entry, body.stop_points, body.target_points,
+                             body.trail_points, body.trail_arm),
     }
     trades.append(trade)
     _save_trades(trades)
@@ -1515,6 +1590,7 @@ class TradePatch(BaseModel):
     result_pts: Optional[float] = None  # 直接填盈亏点数
     note: Optional[str] = None
     status: Optional[str] = None       # closed / open / 放弃可填 closed 且 result 0？约定：abandoned
+    trail_points: Optional[float] = None  # 调整追踪止盈回撤点数
 
 
 @app.patch("/api/trades/{trade_id}")
@@ -1531,6 +1607,10 @@ async def patch_trade(trade_id: str, body: TradePatch):
             t["result_pts"] = body.result_pts
         if body.note is not None:
             t["note"] = body.note
+        if body.trail_points is not None and body.trail_points > 0:
+            if not t.get("trail"):
+                t["trail"] = _init_trail(t["entry"], t["stop_points"], t["target_points"])
+            t["trail"]["points"] = round(body.trail_points, 1)
         if body.status:
             if body.status not in ("open", "closed", "abandoned"):
                 raise HTTPException(status_code=400, detail="status 仅支持 open/closed/abandoned")
@@ -1905,6 +1985,68 @@ async def monitor_loop():
         except Exception:
             pass
         await asyncio.sleep(MONITOR_INTERVAL)
+
+
+TRAIL_TEXT = {
+    "arm": "🎯 {sym} {d}浮盈 +{pnl:.0f} 点，移动止盈激活：峰值 {peak} 回撤 {points:.0f} 点即离场（当前追踪线 {line}）",
+    "partial": "📍 {sym} {d}浮盈 +{pnl:.0f} 点已达目标位：建议减仓 1/2，剩余改用移动止盈（追踪线 {line}）",
+    "trigger": "✅ {sym} {d}移动止盈触发：{verb}追踪线 {line}，建议离场锁盈（当前浮盈 {pnl:+.0f} 点）",
+}
+
+
+async def trail_loop():
+    """动态止盈巡检：对交易日志中的持仓单每 30 秒更新追踪止盈状态，触发提示进异动流 + 飞书"""
+    await asyncio.sleep(25)
+    while True:
+        try:
+            now = datetime.now()
+            if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
+                trades = _load_trades()
+                open_trades = [t for t in trades if t.get("status") == "open" and t.get("trail")]
+                if open_trades:
+                    loop_now = asyncio.get_event_loop().time()
+                    prices: dict[str, float] = {}
+                    for sym in {t["symbol"] for t in open_trades}:
+                        ts, q = _quote_cache.get(sym, (0, {}))
+                        price = (q or {}).get("last")
+                        if not price or loop_now - ts > 10:
+                            try:
+                                price = (await fetch_quote(sym)).get("last")
+                            except Exception:
+                                price = None
+                        if price:
+                            prices[sym] = price
+                    changed = False
+                    for t in open_trades:
+                        price = prices.get(t["symbol"])
+                        if not price:
+                            continue
+                        events = _trail_state(t, price)
+                        if events:
+                            changed = True
+                            d = "多" if t["direction"] == "long" else "空"
+                            for ev in events:
+                                text = TRAIL_TEXT[ev["etype"]].format(
+                                    sym=t["symbol"], d=d, pnl=ev["pnl"],
+                                    peak=round(t["trail"]["peak"], 1), points=t["trail"]["points"],
+                                    line=ev["line"], verb="跌破" if t["direction"] == "long" else "升破",
+                                )
+                                _MONITOR["events"].append({
+                                    "id": f"{t['symbol']}-trail-{ev['etype']}-{t['id']}",
+                                    "ts": int(datetime.now().timestamp() * 1000),
+                                    "kind": "trail", "etype": ev["etype"],
+                                    "symbol": t["symbol"], "dir": "up" if t["direction"] == "long" else "down",
+                                    "price": price, "line": ev["line"], "pnl": ev["pnl"],
+                                    "text": text,
+                                })
+                                asyncio.create_task(_feishu_push(text))
+                    if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+                        _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+                    if changed:
+                        _save_trades(trades)
+        except Exception:
+            pass
+        await asyncio.sleep(30)
 
 
 @app.get("/api/monitor/events")
