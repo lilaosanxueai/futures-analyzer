@@ -6,6 +6,7 @@ AI 对话：转发到 OpenAI 兼容接口（智谱 GLM / DeepSeek），API Key �
 
 import asyncio
 import json
+import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime
@@ -1571,19 +1572,34 @@ async def get_calendar(date: str = "") -> list[dict]:
         return _calendar_cache["items"]
     try:
         df = await call_ak(ak.news_economic_baidu, date=date)
-        items = [
-            {
-                "date": str(r.get("日期", "")),
-                "time": str(r.get("时间", "")),
-                "region": str(r.get("地区", "")),
-                "event": str(r.get("事件", "")),
-                "actual": str(r.get("公布", "") or ""),
-                "forecast": str(r.get("预期", "") or ""),
-                "previous": str(r.get("前值", "") or ""),
-                "importance": int(r.get("重要性") or 1),
-            }
-            for r in df.to_dict("records")
-        ]
+
+        def _cell(r: dict, key: str) -> str:
+            v = r.get(key)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return ""
+            return str(v)
+
+        items = []
+        for r in df.to_dict("records"):
+            event = _cell(r, "事件")
+            if not event:
+                continue
+            try:
+                imp = int(float(_cell(r, "重要性") or 1))
+            except (TypeError, ValueError):
+                imp = 1
+            items.append(
+                {
+                    "date": _cell(r, "日期"),
+                    "time": _cell(r, "时间"),
+                    "region": _cell(r, "地区"),
+                    "event": event,
+                    "actual": _cell(r, "公布"),
+                    "forecast": _cell(r, "预期"),
+                    "previous": _cell(r, "前值"),
+                    "importance": imp,
+                }
+            )
         items.sort(key=lambda x: x["time"])
         _calendar_cache.update({"date": date, "ts": loop_now, "items": items})
         return items
