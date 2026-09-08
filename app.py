@@ -2292,6 +2292,8 @@ async def trail_loop():
                                     "symbol": t["symbol"], "dir": "up" if t["direction"] == "long" else "down",
                                     "price": price, "line": ev["line"], "pnl": ev["pnl"],
                                     "text": text,
+                                    # 兼容字段：旧版前端按普通异动事件渲染时不显示 undefined
+                                    "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": True, "ai": "",
                                 })
                                 asyncio.create_task(_feishu_push(text))
                     if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
@@ -3093,6 +3095,9 @@ async def _check_flash_news() -> None:
             "text": it["title"], "summary": (it.get("summary") or "")[:150],
             "source": it.get("source", ""), "link": it.get("link", ""),
             "time_str": str(it.get("time", ""))[5:16],
+            # 兼容字段：旧版前端按普通异动事件渲染时不显示 undefined
+            "chg5": 0.0, "chg15": 0.0, "threshold": 0.0,
+            "price": "", "intl": True, "ai": "",
         }
         _MONITOR["events"].append(event)
         if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
@@ -3157,6 +3162,8 @@ async def _radar_check(sym: str) -> None:
             "kind": "radar", "etype": ctype, "level": level,
             "symbol": sym, "name": name, "dir": "up",
             "price": snap["last"], "text": text,
+            # 兼容字段：旧版前端按普通异动事件渲染时不显示 undefined
+            "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": True, "ai": "",
         })
         if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
             _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]

@@ -286,15 +286,15 @@ async function pollMonitor() {
         const sign = e.chg5 > 0 ? "+" : "";
         const tag = e.intl ? "🌍 " : "";
         const symHtml = e.intl ? `<b>${e.name || e.symbol}</b>` : `<b>${e.symbol}</b>`;
-        const range = e.intl && e.time_str ? `<span class="muted small">${e.time_str}</span>` : `<span class="muted small">5分 / 阈值${e.threshold}%</span>`;
+        const range = e.intl && e.time_str ? `<span class="muted small">${e.time_str}</span>` : (e.threshold != null ? `<span class="muted small">5分 / 阈值${e.threshold}%</span>` : "");
         return `<div class="mon-event" data-sym="${e.symbol}">
           <div class="mon-line">
             <span class="mon-time">${hhmm}</span>${tag}${symHtml}
-            <span class="${cls}">${word} ${sign}${e.chg5}%</span>
-            <span>→ ${e.price}</span>
+            ${e.chg5 != null ? `<span class="${cls}">${word} ${sign}${e.chg5}%</span>` : ""}
+            <span>→ ${e.price != null ? e.price : ""}</span>
             ${range}
           </div>
-          ${e.ai ? `<div class="mon-ai">💡 ${e.ai}</div>` : (e.intl ? "" : `<div class="mon-ai muted">AI 解读生成中…</div>`)}
+          ${e.ai ? `<div class="mon-ai">💡 ${e.ai}</div>` : (e.intl || e.kind ? "" : `<div class="mon-ai muted">AI 解读生成中…</div>`)}
         </div>`;
       })
       .join("");
