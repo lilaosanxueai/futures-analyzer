@@ -7,8 +7,10 @@ AI 对话：转发到 OpenAI 兼容接口（智谱 GLM / DeepSeek），API Key �
 import asyncio
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +84,34 @@ DEFAULT_CONFIG = {
         "sensitivity": 1.0,          # 阈值倍率：0.5 灵敏 / 1 标准 / 2 迟钝
         "focus": ["SC0", "AU0"],     # 重点常驻监控（原油、黄金）
     },
+    # 交易纪律参数（用户按自身账户规模与承受力设定，AI 不代定）
+    "discipline": {
+        "account_size": 0.0,       # 账户权益（用于 ATR 头寸建议，0=未设置不计算）
+        "risk_per_trade": 1.0,     # 单笔风险上限（总资金%）
+        "daily_stop": 3.0,         # 日内止损线（总资金%，达到即当日停手）
+        "weekly_max_trades": 5,    # 周交易次数上限
+        "daily_max_trades": 3,     # 日内交易次数上限
+        "min_grid_spacing": 1.5,   # 梯度建仓最小间距（%）
+        "max_adds": 2,             # 同方向最大加仓次数
+        "min_rr": 2.0,             # 风险收益比最低要求（盈亏比）
+        "cooling_min": 30,         # 冲动后的冷静等待期（分钟）
+        "universe": [],            # 自选品种池（空 = 不限制）
+    },
+}
+
+# 常见主力合约乘数（每手对应吨/千克/桶等数量，用于 ATR 头寸建议）。
+# 以交易所最新公布为准；未收录品种不显示建议手数。
+CONTRACT_MULTIPLIER: dict[str, float] = {
+    "RB": 10, "HC": 10, "I": 100, "J": 100, "JM": 60,
+    "CU": 5, "AL": 5, "ZN": 5, "NI": 1, "SN": 1, "SS": 5,
+    "AU": 1000, "AG": 15,
+    "M": 10, "Y": 10, "P": 10, "A": 10, "B": 10, "C": 10,
+    "CF": 5, "SR": 10, "AP": 10, "CJ": 5, "PK": 5,
+    "TA": 5, "MA": 10, "FG": 20, "SA": 20, "UR": 20,
+    "L": 5, "V": 5, "PP": 5, "EG": 10, "EB": 5,
+    "FU": 10, "LU": 20, "SC": 1000, "NR": 20, "RU": 10, "SP": 10,
+    "SF": 5, "SM": 5, "SI": 5,
+    "IF": 300, "IH": 300, "IC": 200, "IM": 200,
 }
 
 
@@ -103,20 +133,34 @@ def load_config() -> dict:
     return cfg
 
 # AkShare 依赖 py_mini_racer（V8 引擎），其内存分区只允许初始化一次：
-# 多线程同时首次调用会直接 abort 整个进程。因此启动时先单线程预热一遍，
-# 预热失败（如断网）时则通过锁降级为串行调用。
-_warmed = False
-_ak_lock = asyncio.Lock()
+# 多线程同时首次调用会直接 abort 整个进程；且 V8 实例绑定创建它的线程，
+# 后续在其他线程复用会挂起。因此所有调用固定走同一个专属线程。
+# 新浪接口偶发断连/无限挂起：超时或连接错误时丢弃旧线程换新线程并重试，
+# 避免一个挂起的请求把串行队列整个堵死。
+_AK_CALL_TIMEOUT = 60.0
+_AK_MAX_TRIES = 3
+_AK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="akshare")
 
 
 async def call_ak(func, *args, **kwargs):
-    global _warmed
-    if _warmed:
-        return await asyncio.to_thread(func, *args, **kwargs)
-    async with _ak_lock:
-        result = await asyncio.to_thread(func, *args, **kwargs)
-        _warmed = True
-        return result
+    global _AK_EXECUTOR
+    loop = asyncio.get_running_loop()
+    last_err = None
+    for attempt in range(_AK_MAX_TRIES):
+        try:
+            fut = loop.run_in_executor(_AK_EXECUTOR, partial(func, *args, **kwargs))
+            result = await asyncio.wait_for(fut, timeout=_AK_CALL_TIMEOUT)
+            return result
+        except (asyncio.TimeoutError, OSError) as e:
+            # requests 的连接类异常均继承 OSError；超时说明旧线程可能仍
+            # 阻塞在网络上，弃用旧 executor 防止后续请求排死队。
+            last_err = e
+            _AK_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="akshare"
+            )
+            if attempt + 1 < _AK_MAX_TRIES:
+                await asyncio.sleep(1.0 + attempt)
+    raise last_err
 
 
 async def _warmup():
@@ -125,15 +169,20 @@ async def _warmup():
         await call_ak(ak.futures_zh_daily_sina, symbol="RB0")
         await call_ak(ak.futures_display_main_sina)
     except Exception:
-        _warmed = False  # 预热失败：保持串行模式
+        pass  # 预热失败不影响服务：后续请求会自行重试并完成初始化
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    await _warmup()
+    # 预热放后台：不阻塞端口绑定，页面可立即打开（数据请求在专属
+    # 线程串行排队，预热只是提前热身，V8 初始化的串行性由 executor 保证）
+    warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
+    report_task = asyncio.create_task(report_push_loop())  # 晨/夜报定时后台生成并推送（上游整合）
     yield
+    warmup_task.cancel()
     monitor_task.cancel()
+    report_task.cancel()
 
 
 app = FastAPI(title="期货实时分析助手", lifespan=lifespan)
@@ -149,11 +198,13 @@ def save_config(cfg: dict) -> None:
 
 QUOTE_TTL = 5.0        # 单合约行情缓存（秒），与前端轮询周期一致
 DIR_TTL = 3600.0       # 合约目录缓存（秒）
-DAILY_TTL = 60.0       # 日线缓存（秒），收盘后数据不变，避免指标反复请求打爆数据源
+DIR_FAIL_BACKOFF = 300.0  # 目录拉取失败后的重试退避（秒）
+DAILY_TTL = 60.0            # 日线缓存（秒），交易时段内的新数据
+DAILY_TTL_CLOSED = 1800.0   # 已收盘的日线缓存（秒）：最后交易日早于今天则数据不再变化
 INTRADAY_TTL = 30.0    # 分钟线缓存（秒）
 
 _quote_cache: dict[str, tuple[float, dict]] = {}
-_dir_cache: dict = {"ts": 0.0, "data": {}}
+_dir_cache: dict = {"ts": 0.0, "data": {}, "fail_ts": 0.0}
 _daily_cache: dict[str, tuple[float, list]] = {}
 _minute_cache: dict[tuple, tuple[float, list]] = {}
 _intraday_cache: dict[str, tuple[float, dict]] = {}
@@ -192,6 +243,10 @@ async def get_directory() -> dict[str, dict]:
     """主力合约目录：symbol(如 RB0) -> {name, exchange}"""
     loop_now = asyncio.get_event_loop().time()
     if loop_now - _dir_cache["ts"] > DIR_TTL:
+        # 失败退避：目录拉取失败后一段时间内不再重试，避免行情轮询
+        # 每 5 秒触发一次全量拉取（内部为逐品种匹配请求）轰垮数据源。
+        if loop_now - _dir_cache.get("fail_ts", 0.0) < DIR_FAIL_BACKOFF:
+            return _dir_cache["data"]
         try:
             df = await call_ak(ak.futures_display_main_sina)
             _dir_cache["data"] = {
@@ -202,8 +257,12 @@ async def get_directory() -> dict[str, dict]:
                 for _, row in df.iterrows()
             }
             _dir_cache["ts"] = loop_now
-        except Exception:
-            pass  # 目录刷新失败时沿用旧缓存
+        except Exception as e:
+            _dir_cache["fail_ts"] = loop_now
+            print(
+                f"[get_directory] 目录刷新失败: {type(e).__name__}: {e}",
+                flush=True,
+            )  # 目录刷新失败时沿用旧缓存
     return _dir_cache["data"]
 
 
@@ -212,11 +271,14 @@ async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
     symbol = symbol.upper()
     loop_now = asyncio.get_event_loop().time()
     cached = _daily_cache.get(symbol)
-    if cached and loop_now - cached[0] < max_age:
+    if cached and loop_now - cached[0] < cached[2]:
         return cached[1]
     df = await call_ak(ak.futures_zh_daily_sina, symbol=symbol)
     records = df.to_dict("records")
-    _daily_cache[symbol] = (loop_now, records)
+    # 最后交易日早于今天 → 已收盘，数据不再变化，用长缓存减少对数据源的反复请求
+    today = datetime.now().strftime("%Y-%m-%d")
+    ttl = DAILY_TTL_CLOSED if records and str(records[-1].get("date")) < today else max_age
+    _daily_cache[symbol] = (loop_now, records, ttl)
     return records
 
 
@@ -436,12 +498,20 @@ async def kline(symbol: str, period: str = "day", limit: int = 120):
     df = pd.DataFrame(rows)
     for n in (5, 10, 20):
         df[f"ma{n}"] = df["close"].rolling(n).mean()
+    _mid = df["close"].rolling(20).mean()
+    _std = df["close"].rolling(20).std(ddof=0)
+    df["boll_up"] = _mid + 2 * _std
+    df["boll_mid"] = _mid
+    df["boll_low"] = _mid - 2 * _std
     items = [
         {
             **r,
             "ma5": _round_ma(v) if (v := r.get("ma5")) is not None else None,
             "ma10": _round_ma(v) if (v := r.get("ma10")) is not None else None,
             "ma20": _round_ma(v) if (v := r.get("ma20")) is not None else None,
+            "boll_up": _round_ma(v) if (v := r.get("boll_up")) is not None else None,
+            "boll_mid": _round_ma(v) if (v := r.get("boll_mid")) is not None else None,
+            "boll_low": _round_ma(v) if (v := r.get("boll_low")) is not None else None,
         }
         for r in df.to_dict("records")
     ]
@@ -612,12 +682,26 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         except Exception:
             pass
 
-        # 消息面（品种相关要闻）
+        # 消息面（三层：品种产业/供需深研 + 金属行情快讯 + 全球要闻流）
+        try:
+            deep = await _variety_news_deep(symbol)
+            if deep:
+                lines = [f"- [{it['time'][5:16]}] {it['title']}（{it['source']}）" for it in deep]
+                parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻）】\n" + "\n".join(lines))
+        except Exception:
+            pass
+        try:
+            shm = await _shmet_news(symbol)
+            if shm:
+                lines = [f"- [{it['time']}] {it['title']}" for it in shm]
+                parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
+        except Exception:
+            pass
         try:
             vnews = _variety_news(symbol)
             if vnews:
                 lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
-                parts.append(f"【{symbol} 相关消息面（近期待闻）】\n" + "\n".join(lines))
+                parts.append(f"【{symbol} 全球宏观要闻（快讯流）】\n" + "\n".join(lines))
         except Exception:
             pass
 
@@ -625,12 +709,32 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         profile = _variety_profile(symbol)
         if profile:
             parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
+
+        # 用户当前持仓（分析时请考虑持仓风险与原计划）
+        try:
+            holds = [
+                e for e in _load_discipline_log()
+                if e.get("allowed") and e.get("status") == "open" and e.get("symbol") == symbol
+            ]
+            if holds:
+                h_lines = [
+                    f"- {'做多' if h['side'] == 'long' else '做空'}{'（加仓）' if h.get('is_add') else ''}："
+                    f"入场 {h['entry']}，止损 {h['sl']}，目标 {h.get('tp') or '未设'}，"
+                    f"计划盈亏比 {h.get('rr') or '--'}，理由：{h.get('note') or '无'}（{str(h['ts'])[:16]} 申请）"
+                    for h in holds
+                ]
+                parts.append(
+                    f"【用户当前持有 {symbol} 仓位——分析请兼顾该持仓的风险与计划执行，而非仅给方向观点】\n" + "\n".join(h_lines)
+                )
+        except Exception:
+            pass
     return "\n\n".join(parts)
 
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str = ""
+    images: Optional[list[str]] = None  # data URL 形式的图片（视觉模型用）
 
 
 class ChatIn(BaseModel):
@@ -647,8 +751,40 @@ SYSTEM_PROMPT = """你是一位专业的国内期货市场分析助手。用户�
 你的输出仅供研究参考，不构成投资建议，必要时提醒用户注意风险。"""
 
 
+def _build_api_messages(chat_messages: list[ChatMessage], system: str) -> list[dict]:
+    """构造 API 消息：带图消息转 OpenAI 多模态 content 数组（视觉模型）。
+    仅保留最后一条带图消息的图片，历史消息图片剥除为纯文本，
+    避免图片 token 反复计入上下文撑爆窗口。"""
+    last_img_idx = -1
+    for i, m in enumerate(chat_messages):
+        if m.role == "user" and m.images:
+            last_img_idx = i
+    out = [{"role": "system", "content": system}]
+    for i, m in enumerate(chat_messages):
+        if i == last_img_idx:
+            content: list[dict] = [
+                {"type": "text", "text": m.content or "（请结合图片分析）"}
+            ]
+            for url in m.images[:4]:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            out.append({"role": m.role, "content": content})
+        else:
+            out.append({"role": m.role, "content": m.content})
+    return out
+
+
 @app.post("/api/ai/chat")
 async def ai_chat(body: ChatIn):
+    # 图片防御：单张 base64 过大或总量过多时直接拒绝，避免撑爆请求与上下文
+    n_imgs = 0
+    for m in body.messages:
+        for url in m.images or []:
+            if len(url) > 12 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="单张图片过大（超过约 9MB 原图），请换小图或重新截图")
+            n_imgs += 1
+    if n_imgs > 8:
+        raise HTTPException(status_code=400, detail="图片总数过多（最多 8 张）")
+
     cfg = load_config()
     provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
     api_key = cfg["api_keys"].get(provider)
@@ -660,9 +796,7 @@ async def ai_chat(body: ChatIn):
     context = await _build_market_context(body.symbol)
     system = SYSTEM_PROMPT + ("\n\n" + context if context else "")
 
-    messages = [{"role": "system", "content": system}] + [
-        {"role": m.role, "content": m.content} for m in body.messages
-    ]
+    messages = _build_api_messages(body.messages, system)
 
     import logging
     import time as _time
@@ -670,8 +804,7 @@ async def ai_chat(body: ChatIn):
     logger = logging.getLogger("uvicorn.error")
     t0 = _time.time()
     max_tokens = max_output_for(model)
-    logger.info(f"[ai-chat] 开始调用 {provider}/{model}（消息 {len(body.messages)} 条，上下文 {len(system)} 字，max_tokens={max_tokens}）")
-
+    logger.info(f"[ai-chat] 开始调用 {provider}/{model}（消息 {len(body.messages)} 条，图片 {n_imgs} 张，上下文 {len(system)} 字，max_tokens={max_tokens}）")
     full_reply = ""
     truncated_rounds = 0
 
@@ -744,6 +877,161 @@ async def ai_chat(body: ChatIn):
     return {"ok": True, "reply": full_reply}
 
 
+# ---------------------------------------------------------------- 实时解读：最新数据 → AI 盘中快评
+
+_realtime_cache: dict[str, tuple[float, dict]] = {}  # symbol -> (loop_ts, result)
+
+
+async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
+    """调用已配置的 LLM 输出普通文本（实时解读用，非 JSON）"""
+    cfg = load_config()
+    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
+    api_key = cfg["api_keys"].get(provider)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在「⚙ AI 设置」中配置")
+    base_url = PROVIDERS[provider]["base_url"]
+    model = cfg["model"] or PROVIDERS[provider]["default_model"]
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.5,
+                "max_tokens": max(1600, max_tokens),
+            },
+        )
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="API Key 无效")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
+    try:
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
+    if not content:
+        raise HTTPException(status_code=502, detail="AI 返回空内容（推理模型思维链耗尽 token，请重试）")
+    return content
+
+
+async def _llm_text_retry(prompt: str, max_tokens: int = 0) -> str:
+    """_llm_text 带一次自动重试：推理模型偶发空输出/瞬时失败时不劳用户手动重试"""
+    try:
+        return await _llm_text(prompt, max_tokens)
+    except HTTPException as e:
+        if e.status_code not in (502, 429) or "API Key" in str(e.detail):
+            raise
+        await asyncio.sleep(2)
+        return await _llm_text(prompt, max_tokens)
+
+
+async def _realtime_snapshot(symbol: str) -> dict:
+    """此刻实时盘面快照（实时解读与纪律 AI 审查共用）：
+    最新行情/盘口/日内分时结构/30 分钟节奏/60 分钟方向/日线指标/要闻/持仓。"""
+    # 强制拉最新行情（绕过 5 秒缓存直连数据源，失败则退回缓存）
+    try:
+        quote = await fetch_quote(symbol)
+    except Exception:
+        cached_q = _quote_cache.get(symbol)
+        quote = cached_q[1] if cached_q else {}
+    if not quote or quote.get("last") is None:
+        raise HTTPException(status_code=502, detail="实时行情获取失败，稍后重试")
+
+    book = (f"买一 {quote.get('bid')}（{quote.get('bid_vol')} 手）/ "
+            f"卖一 {quote.get('ask')}（{quote.get('ask_vol')} 手）") if quote.get("bid") else "盘口缺失"
+    try:
+        intra = await _intraday_summary(symbol)
+    except Exception:
+        intra = ""
+    m30_txt = ""
+    try:
+        m30 = (await get_minute(symbol, "30"))[-12:]
+        m30_txt = "；".join(
+            f"{r['datetime'][5:16]} O{r['open']} H{r['high']} L{r['low']} C{r['close']}" for r in m30
+        )
+    except Exception:
+        pass
+    try:
+        m60 = (await get_minute(symbol, "60"))[-21:]
+        c60 = [float(r["close"]) for r in m60 if r.get("close")][-21:]
+        m60_dir = ("上行" if sum(c60[-20:]) / 20 > sum(c60[-21:-1]) / 20 else "下行") if len(c60) >= 21 else "未知"
+    except Exception:
+        m60_dir = "未知"
+    try:
+        ind = await get_indicators(symbol)
+        v = ind["values"]
+        sigs = "；".join(f"{s['name']}（{s['detail']}）" for s in ind["signals"]) or "无"
+        ind_txt = (f"MA5 {v.get('ma5')} MA10 {v.get('ma10')} MA20 {v.get('ma20')} MA60 {v.get('ma60')}；"
+                   f"RSI6 {v.get('rsi6')} KDJ-J {v.get('j')}；MACD 柱 {v.get('macd_hist')}；"
+                   f"BOLL {v.get('boll_low')}~{v.get('boll_up')}（中轨 {v.get('boll_mid')}）；信号：{sigs}")
+    except Exception:
+        ind_txt = "指标不可用"
+    try:
+        vnews = _variety_news(symbol, limit=5)
+        news_txt = "；".join(it["title"][:40] for it in vnews) or "无相关要闻"
+    except Exception:
+        news_txt = "无"
+    holds = [
+        e for e in _load_discipline_log()
+        if e.get("allowed") and e.get("status") == "open" and e.get("symbol") == symbol
+    ]
+    hold_txt = "；".join(
+        f"{'多' if h['side'] == 'long' else '空'}单 入{h['entry']} 损{h['sl']} 目标{h.get('tp') or '未设'}" for h in holds
+    ) if holds else "无持仓"
+    return {
+        "quote": quote,
+        "book": book,
+        "intra": intra,
+        "m30": m30_txt,
+        "m60_dir": m60_dir,
+        "ind_txt": ind_txt,
+        "news": news_txt,
+        "holds": hold_txt,
+        "now": datetime.now().strftime("%m-%d %H:%M:%S"),
+    }
+
+
+@app.get("/api/ai/realtime")
+async def ai_realtime(symbol: str, force: int = 0):
+    """实时解读：把此刻的最新行情（盘口/分时结构/分钟线/指标/要闻/持仓）
+    打包给 AI 生成盘中快评。同品种 5 分钟内复用缓存（force=1 强刷）。"""
+    symbol = symbol.strip().upper()
+    loop_now = asyncio.get_event_loop().time()
+    cached = _realtime_cache.get(symbol)
+    if cached and not force and loop_now - cached[0] < 300:
+        return cached[1]
+
+    snap = await _realtime_snapshot(symbol)
+    quote = snap["quote"]
+    now_str = snap["now"]
+    prompt = f"""你是盘口解读员。基于以下此刻（{now_str}）的实时数据，写一份 300 字以内的盘中快评（Markdown），要求直接给观点、引用具体数字，不要套话。
+
+【{symbol} 实时快照】
+最新 {quote['last']}，涨跌 {quote.get('change')}（{quote.get('change_pct')}%），昨结 {quote.get('prev_settle')}，成交量 {quote.get('volume')}，持仓量 {quote.get('position')}
+盘口：{snap['book']}
+日内结构：{snap['intra'] or '数据不足'}
+30分钟节奏（近12根）：{snap['m30'] or '数据不足'}
+日线指标：{snap['ind_txt']}
+60分钟趋势：{snap['m60_dir']}
+相关要闻：{snap['news']}
+用户持仓：{snap['holds']}
+
+格式：**日内节奏**（1-2 句）→ **多空倾向**（明确偏多/偏空/震荡，给依据）→ **关键价位**（上方压力/下方支撑具体数字）→ **风险提示**（1 句）。若用户有持仓，快评需兼顾其持仓的应对。"""
+
+    reply = await _llm_text_retry(prompt)
+    result = {
+        "ok": True,
+        "symbol": symbol,
+        "name": quote.get("name", ""),
+        "last": quote.get("last"),
+        "generated_at": now_str,
+        "analysis": reply,
+    }
+    _realtime_cache[symbol] = (loop_now, result)
+    return result
+
+
 # ---------------------------------------------------------------- AI 合约分析：四维上下文
 
 # 品种基本面知识库（按合约前缀匹配，供 AI 参考的背景框架）
@@ -807,6 +1095,93 @@ VARIETY_NEWS_KW = {
 def _variety_prefix(symbol: str) -> str:
     m = re.match(r"^([A-Za-z]{1,2})", symbol or "")
     return m.group(1).upper() if m else ""
+
+
+# ---------------------------------------------------------------- 三层品种消息面引擎（上游 dfd545d 整合）
+
+# 品种搜索词（东财品种新闻 / SHMET 快讯过滤用）
+VARIETY_SEARCH = {
+    "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "JM": "焦煤", "J": "焦炭",
+    "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "NI": "沪镍", "SN": "沪锡", "SS": "不锈钢",
+    "AU": "黄金", "AG": "白银", "SC": "原油", "FU": "燃料油", "LU": "低硫燃料油", "NR": "20号胶", "RU": "橡胶",
+    "M": "豆粕", "RM": "菜粕", "Y": "豆油", "P": "棕榈油", "OI": "菜油", "A": "豆一", "B": "豆二",
+    "TA": "PTA", "MA": "甲醇", "EG": "乙二醇", "EB": "苯乙烯", "PP": "聚丙烯", "L": "塑料", "V": "PVC", "PG": "液化气",
+    "FG": "玻璃", "SA": "纯碱", "UR": "尿素", "C": "玉米", "CS": "玉米淀粉", "CF": "棉花", "SR": "白糖",
+    "JD": "鸡蛋", "LH": "生猪", "SP": "纸浆", "LC": "碳酸锂", "SI": "工业硅", "EC": "集运",
+    "IF": "沪深300", "IH": "上证50", "IC": "中证500", "IM": "中证1000", "T": "国债",
+}
+
+# SHMET 金属快讯对非金属品种的通用宏观过滤词
+_MACRO_KW = ["黄金", "金价", "原油", "油价", "美元", "美联储", "央行", "降息", "加息", "通胀",
+             "地缘", "伊朗", "中东", "霍尔木兹", "智利", "秘鲁", "新能源", "光伏", "环保", "关税", "贸易"]
+
+# 缓存：品种深研（东财，10 分钟）+ SHMET 快讯（90 秒）
+_deep_news_cache: dict[str, tuple[float, list]] = {}
+_shmet_cache: dict = {"ts": 0.0, "items": []}
+DEEP_TTL = 600.0
+SHMET_TTL = 90.0
+
+# 金属/能源品种集合（SHMET 快讯直接全量注入）
+_SHMET_FULL = {"CU", "AL", "ZN", "PB", "NI", "SN", "SS", "AU", "AG", "SC", "FU", "LU", "BR", "AO", "LC", "SI"}
+
+
+def _variety_search_word(symbol: str) -> str:
+    p = _variety_prefix(symbol)
+    return VARIETY_SEARCH.get(p, p)
+
+
+async def _variety_news_deep(symbol: str, limit: int = 6) -> list[dict]:
+    """东财品种聚焦新闻：产业/供需/库存深度报道（期货日报等），10 分钟缓存"""
+    word = _variety_search_word(symbol)
+    loop_now = asyncio.get_event_loop().time()
+    cached = _deep_news_cache.get(word)
+    if cached and loop_now - cached[0] < DEEP_TTL:
+        return cached[1][:limit]
+    try:
+        df = await call_ak(ak.stock_news_em, symbol=word)
+        items = [
+            {
+                "time": str(r.get("发布时间", ""))[:16],
+                "title": str(r.get("新闻标题", ""))[:70],
+                "summary": str(r.get("新闻内容", ""))[:150],
+                "source": str(r.get("文章来源", "")),
+                "link": str(r.get("新闻链接", "")),
+            }
+            for r in df.to_dict("records")
+            if not _is_stock_noise(str(r.get("新闻标题", "")) + " " + str(r.get("新闻内容", ""))[:80])
+        ]
+        _deep_news_cache[word] = (loop_now, items)
+        return items[:limit]
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").info(f"[deep-news] {word} 失败：{e}")
+        return []
+
+
+async def _shmet_news(symbol: str = "", limit: int = 6) -> list[dict]:
+    """SHMET 上海有色网金属快讯（秒级，覆盖金属+宏观地缘），90 秒缓存"""
+    loop_now = asyncio.get_event_loop().time()
+    if loop_now - _shmet_cache["ts"] > SHMET_TTL:
+        try:
+            df = await call_ak(ak.futures_news_shmet)
+            _shmet_cache["items"] = [
+                {"time": str(r.get("发布时间", ""))[5:16], "title": str(r.get("内容", ""))[:90]}
+                for r in df.to_dict("records")
+            ]
+            _shmet_cache["ts"] = loop_now
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn.error").info(f"[shmet] 失败：{e}")
+            return []
+    items = _shmet_cache["items"]
+    if symbol:
+        p = _variety_prefix(symbol)
+        if p in _SHMET_FULL:
+            return items[:limit]  # 金属/能源品种：快讯直接全给
+        # 其他品种：过滤出宏观/共性因子相关条目
+        hit = [it for it in items if any(k in it["title"] for k in _MACRO_KW)]
+        return hit[:limit]
+    return items[:limit]
 
 
 def _variety_profile(symbol: str) -> str:
@@ -956,6 +1331,14 @@ async def _ai_comment_for_event(event: dict):
         event["ai"] = reply or "（AI 未返回有效解读，可稍后重试）"
     except Exception:
         event["ai"] = "（AI 解读不可用：未配置 Key 或调用失败）"
+    # 推送飞书群（配置了 webhook 时；上游整合）
+    await _feishu_push(
+        f"🤖 盯盘异动\n"
+        f"{event['symbol']}（{name}）5分钟{'急涨' if event['dir'] == 'up' else '跳水'} {event['chg5']:+.2f}%，"
+        f"现价 {event['price']}\n"
+        f"15分钟 {event['chg15']:+.2f}% | 日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%{pos_line}\n\n"
+        f"💡 {str(event['ai'])[:600]}"
+    )
 
 
 async def _check_symbol(sym: str, mult: float):
@@ -1015,6 +1398,15 @@ async def monitor_loop():
             mon_cfg = (load_config().get("monitor") or DEFAULT_CONFIG["monitor"])
             if mon_cfg.get("enabled", True):
                 symbols = {s.upper() for s in (mon_cfg.get("focus") or [])} | set(_MONITOR["watch"])
+                # 持仓品种并入监控（即使移出自选也盯住风险）
+                try:
+                    symbols |= {
+                        str(e["symbol"]).upper()
+                        for e in _load_discipline_log()
+                        if e.get("allowed") and e.get("status") == "open"
+                    }
+                except Exception:
+                    pass
                 for sym in sorted(symbols):
                     await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
@@ -1086,88 +1478,755 @@ async def monitor_test():
     return {"ok": True, "id": event["id"]}
 
 
-# ---------------------------------------------------------------- 对比与相关性
+# ---------------------------------------------------------------- 交易纪律（开仓前检查与许可）
+
+DISCIPLINE_FILE = BASE_DIR / "discipline_log.json"
 
 
-async def _aligned_closes(syms: list[str], limit: int) -> tuple[list[str], dict]:
-    """多品种日线收盘价按日期对齐，返回（公共日期列表, {sym: {date: close}}）"""
-    closes = {}
-    for s in syms:
-        daily = await get_daily(s)
-        closes[s] = {str(r["date"]): r["close"] for r in daily if r.get("close")}
-    common = sorted(set.intersection(*[set(c) for c in closes.values()]))[-limit:]
-    return common, closes
+def _load_discipline_log() -> list[dict]:
+    if DISCIPLINE_FILE.exists():
+        try:
+            return json.loads(DISCIPLINE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
 
 
-@app.get("/api/compare")
-async def compare(symbols: str, mode: str = "ratio", limit: int = 120):
-    """两品种对比：ratio 比价 / spread 价差 / normalized 归一化走势，附统计与分位"""
-    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:4]
-    if len(syms) < 2:
-        raise HTTPException(status_code=400, detail="至少需要两个合约")
-    if mode not in ("ratio", "spread", "normalized"):
-        mode = "ratio"
-    limit = min(max(limit, 30), 500)
+def _save_discipline_log(log: list[dict]) -> None:
     try:
-        common, closes = await _aligned_closes(syms, limit)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"日线数据获取失败：{e}")
-    if len(common) < 10:
-        raise HTTPException(status_code=400, detail="公共交易日不足 10 天，无法对比")
+        DISCIPLINE_FILE.write_text(
+            json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
-    series = []
-    if mode == "normalized":
-        base = {s: closes[s][common[0]] for s in syms}
-        for d in common:
-            series.append({"date": d, "values": [round(closes[s][d] / base[s] * 100, 2) for s in syms]})
-        return {"ok": True, "mode": mode, "symbols": syms, "items": series, "stats": None}
 
-    a, b = syms[0], syms[1]
-    for d in common:
-        v = closes[a][d] / closes[b][d] if mode == "ratio" else closes[a][d] - closes[b][d]
-        series.append({"date": d, "values": [round(v, 3)]})
+def _iso_week(dt: datetime) -> str:
+    """ISO 周标识（用于周交易次数统计）"""
+    y, w, _ = dt.isocalendar()
+    return f"{y}-W{w:02d}"
 
-    vals = [x["values"][0] for x in series]
-    cur = vals[-1]
-    mean = sum(vals) / len(vals)
-    std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
-    pct = sum(1 for v in vals if v <= cur) / len(vals) * 100
-    stats = {
-        "current": round(cur, 3),
-        "mean": round(mean, 3),
-        "std": round(std, 3),
-        "min": round(min(vals), 3),
-        "max": round(max(vals), 3),
-        "percentile": round(pct, 1),
-        "upper1": round(mean + std, 3),
-        "lower1": round(mean - std, 3),
-        "upper2": round(mean + 2 * std, 3),
-        "lower2": round(mean - 2 * std, 3),
+
+def discipline_stats(log: list[dict]) -> dict:
+    """从交易日志统计今日/本周次数、日内盈亏、各品种未平仓加仓数、
+    连续纪律天数与情绪归因（哪种情绪下最容易被拒绝）"""
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    week = _iso_week(now)
+    today_trades = week_trades = 0
+    today_pnl = 0.0
+    open_adds: dict[str, int] = {}
+    mood_total: dict[str, int] = {}
+    mood_rejected: dict[str, int] = {}
+    for e in log:
+        ts = str(e.get("ts", ""))
+        d = ts[:10]
+        try:
+            w = _iso_week(datetime.fromisoformat(ts))
+        except Exception:
+            w = ""
+        if e.get("allowed") and d == today:
+            today_trades += 1
+        if e.get("allowed") and w == week:
+            week_trades += 1
+        if d == today:
+            pnl = e.get("pnl_pct")
+            if isinstance(pnl, (int, float)):
+                today_pnl += float(pnl)
+        if e.get("allowed") and e.get("status") == "open":
+            key = f'{e.get("symbol")}:{e.get("side")}'
+            open_adds[key] = open_adds.get(key, 0) + (1 if e.get("is_add") else 0)
+        mood = e.get("mood") or "calm"
+        mood_total[mood] = mood_total.get(mood, 0) + 1
+        if not e.get("allowed"):
+            mood_rejected[mood] = mood_rejected.get(mood, 0) + 1
+
+    # 连续纪律天数：从今天往回数；被拒绝=系统拦截成功不断链，
+    # 只有"通过但带违反（无视警告硬开）"才断链。
+    by_day: dict[str, list[dict]] = {}
+    for e in log:
+        by_day.setdefault(str(e.get("ts", ""))[:10], []).append(e)
+    streak = 0
+    day = now.date()
+    from datetime import timedelta as _td
+    for _ in range(365):
+        ds = day.strftime("%Y-%m-%d")
+        entries = by_day.get(ds, [])
+        if entries:
+            forced = [e for e in entries if e.get("allowed") and e.get("violations")]
+            if forced:
+                break  # 带违反强行开仓，纪律链断裂
+            streak += 1
+        day = day - _td(days=1)
+    # 已平仓深度统计：胜率 / 累计已实现 / 平均盈亏 / 最大单笔亏 / 实际 R 倍数
+    closed = [e for e in log if e.get("status") == "closed" and isinstance(e.get("pnl_pct"), (int, float))]
+    pnls = [float(e["pnl_pct"]) for e in closed]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    rs = [float(e["r_multiple"]) for e in closed if isinstance(e.get("r_multiple"), (int, float))]
+    perf = {
+        "closed_count": len(closed),
+        "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
+        "realized_total": round(sum(pnls), 2) if pnls else None,
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
+        "max_loss": round(min(pnls), 2) if pnls else None,
+        "avg_r": round(sum(rs) / len(rs), 2) if rs else None,
     }
-    return {"ok": True, "mode": mode, "symbols": syms, "items": series, "stats": stats}
+    # AI 评审价值统计：当初 AI 判"值得执行"且已平仓的实际表现；
+    # 反事实验证：AI 判"不值得"被拦的申请，若执行按当前价的假想盈亏（负=拦得值）
+    ai_ok = [e for e in closed if (e.get("ai_review") or {}).get("decision_correct")]
+    ai_pnls = [float(x["pnl_pct"]) for x in ai_ok]
+    perf["ai_approved"] = {
+        "count": len(ai_ok),
+        "win_rate": round(sum(1 for p in ai_pnls if p > 0) / len(ai_ok) * 100, 1) if ai_ok else None,
+        "avg_pnl": round(sum(ai_pnls) / len(ai_pnls), 2) if ai_pnls else None,
+    }
+    hypo_pts = []
+    for e in log:
+        if e.get("allowed"):
+            continue  # 只看被拒的
+        ai_r = e.get("ai_review") or {}
+        if ai_r.get("decision_correct") is not False:
+            continue  # 且是 AI 否决的（R014）
+        cached = _quote_cache.get(str(e.get("symbol")))
+        last = cached[1].get("last") if cached else None
+        if last is None or not e.get("entry"):
+            continue
+        hypo_pts.append((float(last) - float(e["entry"])) * (1 if e.get("side") == "long" else -1))
+    if hypo_pts:
+        perf["ai_rejected_hypothetical"] = {
+            "count": len(hypo_pts),
+            "avg_points": round(sum(hypo_pts) / len(hypo_pts), 1),
+            "would_lose": sum(1 for p in hypo_pts if p < 0),
+        }
+    return {
+        "today_trades": today_trades,
+        "week_trades": week_trades,
+        "today_pnl": round(today_pnl, 2),
+        "open_adds": open_adds,
+        "open_count": sum(
+            1 for e in log if e.get("allowed") and e.get("status") == "open"
+        ),
+        "discipline_streak": streak,
+        "perf": perf,
+        "mood_stat": {
+            m: {"total": t, "rejected": mood_rejected.get(m, 0)}
+            for m, t in sorted(mood_total.items(), key=lambda kv: -kv[1])
+        },
+    }
 
 
-@app.get("/api/correlation")
-async def correlation(symbols: str, days: int = 60):
-    """多品种日收益率相关系数矩阵"""
-    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:8]
-    if len(syms) < 2:
-        raise HTTPException(status_code=400, detail="至少需要两个合约")
-    days = min(max(days, 20), 500)
+class DisciplineCheckIn(BaseModel):
+    symbol: str
+    side: str                    # long / short
+    entry: float                 # 计划入场价
+    sl: float                    # 止损价
+    tp: Optional[float] = None   # 目标价
+    # 全客观化：加仓由日志自动推导、理由由 AI 生成、情绪由 AI 检测、风险由 ATR 口径自动评估
+
+
+async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
+    """调用已配置的 LLM 输出结构化 JSON（纪律 AI 审查用）。
+    temperature 低以稳定格式；容错提取 JSON 块（模型可能加 ```json 包裹）。
+    推理型模型思维链会消耗大量 token，max_tokens 按模型上限给足。"""
+    cfg = load_config()
+    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
+    api_key = cfg["api_keys"].get(provider)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="尚未配置 API Key——主观项已全部改为 AI 判定，请先在「⚙ AI 设置」中配置")
+    base_url = PROVIDERS[provider]["base_url"]
+    model = cfg["model"] or PROVIDERS[provider]["default_model"]
+    max_tokens = max_tokens or max_output_for(model)
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    import time as _time
+    t0 = _time.time()
+    async with httpx.AsyncClient(timeout=180) as client:
+        def build(mt: int):
+            return client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": mt,
+                },
+            )
+        resp = await build(max_tokens)
+        if resp.status_code == 400 and "max_tokens" in resp.text.lower() and max_tokens > 4096:
+            max_tokens = 4096
+            resp = await build(max_tokens)
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="API Key 无效，请检查 AI 设置")
+    if resp.status_code == 429:
+        raise HTTPException(status_code=429, detail="AI 服务限流，请稍后重试")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
     try:
-        common, closes = await _aligned_closes(syms, days)
+        choice = resp.json()["choices"][0]
+        content = (choice["message"].get("content") or "").strip()
+    except Exception:
+        raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
+    if not content:
+        finish = choice.get("finish_reason", "?")
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI 返回空内容（finish_reason={finish}，max_tokens={max_tokens} 可能被思维链耗尽，请重试或换轻量模型）",
+        )
+    m = re.search(r"\{[\s\S]*\}", content)
+    if not m:
+        raise HTTPException(status_code=502, detail=f"AI 未按 JSON 输出：{content[:120]}")
+    try:
+        out = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail=f"AI 的 JSON 无法解析：{content[:120]}")
+    logger.info(f"[discipline-ai] {provider}/{model} 判定完成，耗时 {_time.time() - t0:.0f}s")
+    return out
+
+
+def _rule(rid, name, severity, ok, detail):
+    return {
+        "id": rid,
+        "name": name,
+        "severity": severity,
+        "status": "pass" if ok else "violation",
+        "detail": detail,
+    }
+
+
+@app.post("/api/discipline/check")
+async def discipline_check(body: DisciplineCheckIn):
+    """开仓前纪律检查 v2：客观数据规则 + AI 主观审查。
+    趋势基础/信号计数/次数/间距/盈亏比由数据判定；
+    反转确认、品种认知、冲动检测、决策评估全部由 AI 判定（无自评勾选）。
+    AI 具有否决权（R014），任何致命违反即禁止开仓。"""
+    cfg = load_config()["discipline"]
+    symbol = body.symbol.strip().upper()
+    side = "long" if body.side.lower().startswith("l") else "short"
+    log = _load_discipline_log()
+    stats = discipline_stats(log)
+    rule_map: dict[str, dict] = {}
+
+    # R001 大周期趋势（客观基础：位置与斜率；反转豁免由 AI 判定）
+    try:
+        records = (await get_daily(symbol))[-25:]
+        closes = [float(r["close"]) for r in records if r.get("close")]
+        ma20_now = sum(closes[-20:]) / 20
+        ma20_prev = sum(closes[-23:-3]) / 20
+        slope_up = ma20_now > ma20_prev
+        above = closes[-1] > ma20_now
+        if side == "long":
+            right_side = above
+            trendy = above and slope_up
+        else:
+            right_side = not above
+            trendy = (not above) and (not slope_up)
+        trend_detail = (
+            f"收盘 {closes[-1]:.1f} {'>' if above else '<'} MA20 {ma20_now:.1f}，"
+            f"MA20 三日{'上行' if slope_up else '走平/下行'}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"日线数据获取失败：{e}")
-    if len(common) < 15:
-        raise HTTPException(status_code=400, detail="公共交易日不足，无法计算相关性")
-    df = pd.DataFrame({s: [closes[s][d] for d in common] for s in syms})
-    corr = df.pct_change().dropna().corr()
+        right_side = trendy = None
+        trend_detail = f"日线数据获取失败：{e}"
+
+    # ATR(14) 与参考收盘价（R002 力度参考 + 头寸建议共用）
+    atr14: Optional[float] = None
+    ref_close: Optional[float] = None
+    try:
+        recs_atr = (await get_daily(symbol))[-15:]
+        trs = []
+        for i in range(1, len(recs_atr)):
+            h, l, pc = float(recs_atr[i]["high"]), float(recs_atr[i]["low"]), float(recs_atr[i - 1]["close"])
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        atr14 = sum(trs[-14:]) / min(14, len(trs))
+        ref_close = float(recs_atr[-1]["close"])
+    except Exception:
+        pass
+
+    # R002 入场信号（客观基础：同向技术信号计数；反转豁免由 AI 判定）
+    confirms: list[str] = []
+    ind_signals: list[dict] = []
+    try:
+        ind = await get_indicators(symbol)
+        ind_signals = ind["signals"]
+        dirkey = "bull" if side == "long" else "bear"
+        confirms = [s["name"] for s in ind_signals if s.get("dir") == dirkey]
+    except Exception:
+        pass
+
+    # R003 品种在自选池内
+    universe = [u.strip().upper() for u in cfg.get("universe", []) if str(u).strip()]
+    rule_map["R003"] = _rule(
+        "R003", "品种在自选池内", "严重",
+        not universe or symbol in universe,
+        f"自选池：{('、'.join(universe) if universe else '未限制')}",
+    )
+
+    # 加仓自动判定：存在同品种同方向未平仓记录 → 本次为加仓（客观推导，无需勾选）
+    open_same = [
+        e for e in log
+        if e.get("allowed") and e.get("status") == "open"
+        and e.get("symbol") == symbol and e.get("side") == side
+    ]
+    is_add = bool(open_same)
+
+    # R005 梯度建仓间距：加仓时与最近一笔同方向未平仓入场价间距 ≥ 最小间距
+    if is_add:
+        last_entry = float(open_same[-1].get("entry") or 0)
+        spacing = abs(body.entry - last_entry) / last_entry * 100 if last_entry else 0.0
+        ok = spacing >= float(cfg.get("min_grid_spacing", 1.5))
+        detail = f"检测到同方向未平仓位（自动判定为加仓），与上一档入场价 {last_entry:.1f} 间距 {spacing:.2f}%（要求 ≥ {cfg.get('min_grid_spacing')}%）"
+    else:
+        ok, detail = True, "无同方向未平仓位（首仓，间距规则不适用）"
+    rule_map["R005"] = _rule("R005", "梯度建仓最小间距", "致命", ok, detail)
+
+    # R006 加仓次数上限
+    open_adds = stats["open_adds"].get(f"{symbol}:{side}", 0)
+    max_adds = int(cfg.get("max_adds", 2))
+    rule_map["R006"] = _rule(
+        "R006", "同方向加仓次数上限", "致命",
+        (not is_add) or open_adds < max_adds,
+        f"当前未平仓加仓 {open_adds}/{max_adds} 次" + ("（本次为首仓）" if not is_add else ""),
+    )
+
+    # R007 日内止损线：今日已实现盈亏达到 -daily_stop% 即停手
+    daily_stop = float(cfg.get("daily_stop", 3.0))
+    rule_map["R007"] = _rule(
+        "R007", "日内止损线（当日停手线）", "致命",
+        stats["today_pnl"] > -daily_stop,
+        f"今日已实现盈亏 {stats['today_pnl']:+.2f}%，止损线 -{daily_stop}%",
+    )
+
+    # R008 日内交易次数上限
+    daily_max = int(cfg.get("daily_max_trades", 3))
+    rule_map["R008"] = _rule(
+        "R008", "日内交易次数上限", "致命",
+        stats["today_trades"] < daily_max,
+        f"今日已交易 {stats['today_trades']}/{daily_max} 次",
+    )
+
+    # R009 周交易次数上限
+    weekly_max = int(cfg.get("weekly_max_trades", 5))
+    rule_map["R009"] = _rule(
+        "R009", "周交易次数上限", "致命",
+        stats["week_trades"] < weekly_max,
+        f"本周已交易 {stats['week_trades']}/{weekly_max} 次",
+    )
+
+    # R011 冷静期（客观部分：距上一笔申请间隔；冲动检测由 AI 判定）
+    cooling = int(cfg.get("cooling_min", 30))
+    last_ts = str(log[-1].get("ts", "")) if log else ""
+    gap_ok = True
+    gap_min = None
+    if last_ts:
+        try:
+            gap_min = (datetime.now() - datetime.fromisoformat(last_ts)).total_seconds() / 60
+            gap_ok = gap_min >= cooling
+        except Exception:
+            pass
+
+    # R012 风险收益比 + 单笔风险自动评估（ATR 1N 口径：建议手数对应风险 ≤ 上限）
+    risk_pct = None
+    acct = float(cfg.get("account_size") or 0)
+    mult = CONTRACT_MULTIPLIER.get(symbol[:2]) or CONTRACT_MULTIPLIER.get(symbol[:1])
+    if acct > 0 and atr14 and mult:
+        risk_amt = acct * float(cfg.get("risk_per_trade", 1.0)) / 100
+        per_lot = atr14 * mult
+        lots = int(risk_amt // per_lot) if per_lot > 0 else 0
+        risk_pct = round(lots * per_lot / acct * 100, 2)  # 建议仓位的实际风险占比
+    if body.tp and body.sl and body.entry:
+        risk = abs(body.entry - body.sl)
+        reward = abs(body.tp - body.entry)
+        rr = reward / risk if risk else 0.0
+        ok = rr >= float(cfg.get("min_rr", 2.0))
+        detail = f"盈亏比 {rr:.2f}:1（要求 ≥ {cfg.get('min_rr')}:1）"
+        if risk_pct is not None:
+            cap = float(cfg.get("risk_per_trade", 1.0))
+            detail += f"；按 ATR 建议仓位（≤{lots} 手）风险约 {risk_pct}%（上限 {cap}%）"
+            if risk_pct > cap:
+                ok = False
+                detail = detail.replace("；按 ATR", "；⛔ 按 ATR")
+        elif acct > 0:
+            detail += "；未配置合约乘数，单笔上限未校验"
+        else:
+            detail += "；未设账户权益，单笔上限未校验（到风控参数填写后可自动评估）"
+    else:
+        rr, ok, detail = None, False, "未填写目标价，无法计算盈亏比"
+    rule_map["R012"] = _rule("R012", "风险收益比与单笔风险上限", "致命", ok, detail)
+
+    # R013 多时间框架共振：60 分钟 MA20 方向应与日线方向一致（铁律：ATR + 多时间框架验证）。
+    # 60m 数据不可用时仅警告不拦单（数据源偶发失败不应真金白银买单）。
+    try:
+        minute = await get_minute(symbol, "60")
+        closes60 = [float(r["close"]) for r in minute if r.get("close") is not None][-21:]
+        if len(closes60) >= 21:
+            ma60_now = sum(closes60[-20:]) / 20
+            ma60_prev = sum(closes60[-21:-1]) / 20  # 滑动窗口：前 20 根
+            m_up = ma60_now > ma60_prev
+            side_ok = m_up if side == "long" else not m_up
+            detail = f"60分钟 MA20 {ma60_now:.1f}（{'上行' if m_up else '下行'}）；共振{'一致' if side_ok else '背离'}"
+            rule_map["R013"] = _rule("R013", "多时间框架共振（60分钟方向验证）", "严重", side_ok, detail)
+        else:
+            rule_map["R013"] = _rule("R013", "多时间框架共振（60分钟方向验证）", "严重", True,
+                                     f"60分钟K线不足（{len(closes60)} 根），本次跳过共振验证")
+    except Exception as e:
+        rule_map["R013"] = _rule("R013", "多时间框架共振（60分钟方向验证）", "严重", True,
+                                 f"60分钟数据不可用：{type(e).__name__}，本次跳过共振验证")
+
+    # ---- 第二阶段：AI 主观审查（反转确认 / 品种认知 / 冲动检测 / 决策评估）----
+    try:
+        context = await _build_market_context(symbol)
+    except Exception:
+        context = ""
+    # 实时盘面快照（盘口/日内分时结构/30 分钟节奏/现价），纪律审查同享实时数据
+    try:
+        rt = await _realtime_snapshot(symbol)
+        rt_lines = [
+            f"【实时盘面（{rt['now']}）】",
+            f"现价 {rt['quote']['last']}（涨跌 {rt['quote'].get('change_pct')}%），计划入场 {body.entry} "
+            f"距现价 {(body.entry - rt['quote']['last']) / rt['quote']['last'] * 100:+.2f}%",
+            f"盘口：{rt['book']}",
+            f"日内结构：{rt['intra'] or '数据不足'}",
+            f"30分钟节奏（近12根）：{rt['m30'] or '数据不足'}",
+        ]
+        rt_block = "\n".join(rt_lines)
+    except Exception:
+        rt_block = ""
+    sig_txt = "；".join(f"{s['name']}（{s.get('detail', '')}）" for s in ind_signals) or "无"
+    today_pnl_txt = f"{stats['today_pnl']:+.2f}%"
+    ai_prompt = f"""你是严格客观的期货交易纪律审查官。禁止迎合用户，只依据数据判定，证据不足即为 false。
+交易者只提交了纯客观计划参数（品种/方向/入场/止损/目标），无任何自评或理由陈述——
+你既要审查计划，也要**代为生成交易计划说明**（核心矛盾与关键价位）并**推断其情绪状态**。
+
+【市场上下文】
+{context}
+
+{rt_block}
+
+【该品种最新日线技术信号】
+{sig_txt}
+
+【规则引擎客观判定】
+- 趋势：{trend_detail}（价格在正确一侧：{right_side}，均线顺势：{trendy}）
+- 同向技术信号 {len(confirms)} 条：{'、'.join(confirms) or '无'}
+- ATR14：{round(atr14, 1) if atr14 else '未知'}{f'（约 {atr14 / ref_close * 100:.2f}%）' if atr14 and ref_close else ''}
+- 次数状态：今日 {stats['today_trades']}/{daily_max}、本周 {stats['week_trades']}/{weekly_max}，今日已实现 {today_pnl_txt}
+- 距上笔申请间隔：{f'{gap_min:.0f} 分钟' if gap_min is not None else '无记录'}（冷静期要求 ≥ {cooling} 分钟）
+
+【交易者提交的计划（纯客观参数）】
+品种 {symbol} {'做多' if side == 'long' else '做空'}{'（自动判定为加仓）' if is_add else ''}，入场 {body.entry}，止损 {body.sl}，目标 {body.tp if body.tp else '未设'}，计划盈亏比 {round(rr, 2) if rr else '--'}
+
+【判定任务】只输出一个 JSON 对象，不要输出任何其他文字：
+{{
+  "reversal_confirmed": <bool，从指标与行情数据判断趋势反转是否有≥2条客观依据（MACD金叉/KDJ低位金叉/站回MA20/均线拐头等），证据不足为 false>,
+  "reversal_evidence": "<依据，分号分隔；无则写'证据不足'>",
+  "knows_variety": <bool，该品种当前是否存在清晰可交易的核心矛盾与关键价位、且本计划与之一致（有明确的供需/技术逻辑，入场止损位与结构位匹配）；逻辑混乱或位置明显错配为 false>,
+  "variety_comment": "<一句话：本计划对应的品种核心矛盾与关键位是否成立>",
+  "plan_summary": "<100 字内：代为生成的交易计划说明——核心矛盾、关键价位（具体数字）、本笔入场的逻辑定位。将存入交易许可单作为第 5 项>",
+  "detected_mood": "calm|hesitant|fomo|revenge，从计划特征客观推断：入场价远追现价/间隔极短/今日已亏损后申请→fomo 或 revenge；止损目标与结构匹配、间隔正常→calm；信号不足仍提交→hesitant",
+  "impulse_detected": <bool，综合推断的情绪与计划特征判断是否存在冲动交易（追涨杀跌/报复/怕错过/无逻辑支撑）>,
+  "impulse_comment": "<一句话>",
+  "decision_correct": <bool，综合以上全部与行情结构：这笔交易计划是否值得执行——趋势/位置/逻辑/风险报酬任一方面有硬伤即为 false>,
+  "decision_assessment": "<80 字内直接说明为什么值得/不值得执行>",
+  "confidence": "high|medium|low"
+}}"""
+    ai = await _llm_json(ai_prompt)
+    reversal = bool(ai.get("reversal_confirmed"))
+    knows = bool(ai.get("knows_variety"))
+    impulse = bool(ai.get("impulse_detected"))
+    decision_ok = bool(ai.get("decision_correct"))
+    mood = str(ai.get("detected_mood", "calm"))
+    if mood not in ("calm", "hesitant", "fomo", "revenge"):
+        mood = "calm"
+    mood_cn = {"calm": "😌冷静", "hesitant": "🤔犹豫", "fomo": "🔥FOMO", "revenge": "😡报复"}[mood]
+
+    # R001（组装）：顺势，或价格在正确侧 + AI 反转确认豁免
+    if right_side is None:
+        r1_ok, r1_detail = False, trend_detail
+    else:
+        r1_ok = trendy or (right_side and reversal)
+        r1_detail = trend_detail
+        if not trendy and right_side and reversal:
+            r1_detail += f"；均线未顺势，AI 判定反转成立豁免（依据：{ai.get('reversal_evidence', '')}）"
+        elif not trendy and right_side and not reversal:
+            r1_detail += "；均线未顺势且 AI 未确认反转（" + str(ai.get("reversal_evidence", "")) + "）"
+    rule_map["R001"] = _rule("R001", "大周期趋势方向确认，不与趋势对抗", "致命", r1_ok, r1_detail)
+
+    # R002（组装）：同向信号 ≥2，或 AI 反转确认 + ≥1 信号
+    r2_ok = len(confirms) >= 2 or (reversal and len(confirms) >= 1)
+    r2_detail = f"同方向信号 {len(confirms)} 条：{('、'.join(confirms) or '无')}"
+    if reversal and len(confirms) < 2:
+        r2_detail += f"；AI 判定反转成立（{ai.get('reversal_evidence', '')}）"
+    if atr14 and ref_close:
+        r2_detail += f"；ATR14 {atr14:.1f}（约 {atr14 / ref_close * 100:.2f}%，止损距离宜 ≥1 倍 ATR）"
+    rule_map["R002"] = _rule("R002", "入场信号 ≥ 2 条客观确认", "致命", r2_ok, r2_detail)
+
+    # R004 品种逻辑（AI 判定：市场当前是否存在与计划一致的可交易逻辑）
+    rule_map["R004"] = _rule(
+        "R004", "品种存在清晰核心矛盾与关键价位（AI 判定，与计划一致性）", "致命", knows,
+        f"AI：{ai.get('variety_comment', '')}",
+    )
+
+    # R010 交易许可单（客观四项表单 + AI 生成第 5 项计划说明）
+    form_ok = bool(body.entry and body.sl and body.tp)
+    plan_summary = str(ai.get("plan_summary", "")).strip() or "（AI 未生成）"
+    rule_map["R010"] = _rule(
+        "R010", "交易许可单完整（四项客观参数 + AI 生成计划说明）", "致命", form_ok,
+        "四项参数（品种/方向/入场/止损）" + ("完整" if form_ok else "缺失（目标价也建议填写）")
+        + f"；第 5 项由 AI 生成：{plan_summary[:80]}",
+    )
+
+    # R011 冷静期（客观间隔 + AI 冲动检测，情绪亦由 AI 推断）
+    r11_ok = gap_ok and not impulse
+    r11_detail = f"要求 ≥ {cooling} 分钟"
+    if gap_min is not None:
+        r11_detail += f"，距上笔申请 {gap_min:.0f} 分钟"
+    r11_detail += f"；AI 推断情绪 {mood_cn}，冲动检测：{'⚠ ' + str(ai.get('impulse_comment', '')) if impulse else '未检出冲动'}"
+    rule_map["R011"] = _rule("R011", "冲动冷静期（AI 情绪推断与冲动检测）", "严重", r11_ok, r11_detail)
+
+    # R014 AI 决策评估（否决权：AI 判决策错误即禁止）
+    rule_map["R014"] = _rule(
+        "R014", "AI 决策评估（计划是否值得执行）", "致命", decision_ok,
+        f"{ai.get('decision_assessment', '')}（置信度 {ai.get('confidence', 'unknown')}）",
+    )
+
+    rules = [rule_map[k] for k in sorted(rule_map)]
+    fatal = [r for r in rules if r["status"] == "violation" and r["severity"] == "致命"]
+    warns = [r for r in rules if r["status"] == "violation" and r["severity"] == "严重"]
+    allowed = not fatal
+
+    # ATR 头寸建议（海龟 1N 法则）：按"止损 1 倍 ATR"口径，
+    # 每手风险 = ATR14 × 合约乘数，建议手数 = 账户 × 单笔风险% ÷ 每手风险。
+    position_hint = None
+    acct = float(cfg.get("account_size") or 0)
+    mult = CONTRACT_MULTIPLIER.get(symbol[:2]) or CONTRACT_MULTIPLIER.get(symbol[:1])
+    if acct > 0 and atr14 and mult:
+        risk_amt = acct * float(cfg.get("risk_per_trade", 1.0)) / 100
+        per_lot = atr14 * mult
+        lots = int(risk_amt // per_lot) if per_lot > 0 else 0
+        position_hint = {
+            "lots": lots,
+            "atr": round(atr14, 1),
+            "multiplier": mult,
+            "per_lot_risk": round(per_lot, 0),
+            "risk_budget": round(risk_amt, 0),
+            "basis": f"按止损=1×ATR14（{atr14:.1f}）口径：每手风险 {per_lot:,.0f} 元，单笔预算 {risk_amt:,.0f} 元 → 建议 ≤ {lots} 手",
+        }
+        if lots == 0:
+            position_hint["basis"] += "（预算不足 1 手：风险上限过小或波动过大，建议放弃或放宽上限）"
+
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "symbol": symbol,
+        "side": side,
+        "entry": body.entry,
+        "sl": body.sl,
+        "tp": body.tp,
+        "is_add": is_add,
+        "allowed": allowed,
+        "violations": [r["id"] for r in rules if r["status"] == "violation"],
+        "status": "open" if allowed else "rejected",
+        "pnl_pct": None,
+        "mood": mood,                      # AI 推断情绪
+        "note": plan_summary[:200],        # AI 生成的交易计划说明（许可单第 5 项）
+        "rr": round(rr, 2) if rr else None,
+        "ai_review": {
+            "reversal_confirmed": reversal,
+            "reversal_evidence": str(ai.get("reversal_evidence", ""))[:120],
+            "knows_variety": knows,
+            "impulse_detected": impulse,
+            "decision_correct": decision_ok,
+            "assessment": str(ai.get("decision_assessment", ""))[:160],
+            "confidence": str(ai.get("confidence", "")),
+        },
+    }
+    log.append(entry)
+    _save_discipline_log(log)
     return {
         "ok": True,
-        "labels": syms,
-        "matrix": [[None if v != v else round(float(v), 2) for v in row] for row in corr.values],
-        "days": days,
+        "allowed": allowed,
+        "verdict": "允许开仓" if allowed else "禁止开仓",
+        "fatal_count": len(fatal),
+        "warn_count": len(warns),
+        "rules": rules,
+        "stats": discipline_stats(log),
+        "position_hint": position_hint,
+        "ai_review": entry["ai_review"],
+        "log_entry": entry,
     }
+
+
+@app.get("/api/discipline/log")
+async def discipline_log_get():
+    log = _load_discipline_log()
+    return {"ok": True, "items": log[-100:], "stats": discipline_stats(log)}
+
+
+class DisciplineSettleIn(BaseModel):
+    ts: str                    # 日志条目的时间戳（定位）
+    pnl_pct: float             # 平仓盈亏（占账户权益百分比，亏为负）
+    exit: Optional[float] = None  # 实际出场价（选填；填了计算实际 R 倍数）
+
+
+@app.post("/api/discipline/settle")
+async def discipline_settle(body: DisciplineSettleIn):
+    log = _load_discipline_log()
+    for e in log:
+        if str(e.get("ts")) == body.ts:
+            e["status"] = "closed"
+            e["pnl_pct"] = round(float(body.pnl_pct), 2)
+            if body.exit and e.get("entry") and e.get("sl"):
+                risk = abs(float(e["entry"]) - float(e["sl"]))
+                if risk > 0:
+                    move = (float(body.exit) - float(e["entry"])) * (1 if e.get("side") == "long" else -1)
+                    e["exit"] = float(body.exit)
+                    e["r_multiple"] = round(move / risk, 2)
+            _save_discipline_log(log)
+            return {"ok": True, "stats": discipline_stats(log)}
+    raise HTTPException(status_code=404, detail="未找到该笔记录")
+
+
+class DisciplineDeleteIn(BaseModel):
+    ts: str
+
+
+@app.post("/api/discipline/delete")
+async def discipline_delete(body: DisciplineDeleteIn):
+    """删除一条记录（误录兜底）"""
+    log = _load_discipline_log()
+    before = len(log)
+    log = [e for e in log if str(e.get("ts")) != body.ts]
+    if len(log) == before:
+        raise HTTPException(status_code=404, detail="未找到该笔记录")
+    _save_discipline_log(log)
+    return {"ok": True, "stats": discipline_stats(log)}
+
+
+@app.post("/api/discipline/holding-review")
+async def discipline_holding_review(body: DisciplineDeleteIn):
+    """持仓 AI 体检：这笔仓还该拿着吗——原计划 vs 当前行情 vs 执行偏差"""
+    log = _load_discipline_log()
+    e = next(
+        (x for x in log if str(x.get("ts")) == body.ts and x.get("status") == "open"),
+        None,
+    )
+    if not e:
+        raise HTTPException(status_code=404, detail="未找到该持仓（可能已平仓）")
+    symbol = e["symbol"]
+    try:
+        quote = await fetch_quote(symbol)
+        last = quote.get("last")
+    except Exception:
+        last = None
+    try:
+        context = await _build_market_context(symbol)
+    except Exception:
+        context = ""
+    ai0 = e.get("ai_review") or {}
+    floating = None
+    if last:
+        floating = round((last - e["entry"]) * (1 if e["side"] == "long" else -1), 1)
+    prompt = f"""你是交易持仓审查官。用户持有一笔期货仓位，请基于当前行情判断该继续持有、减仓还是离场，并指出执行偏差。禁止迎合，数据说话。
+
+【原交易计划（{str(e['ts'])[:16]} 申请，已通过全部 14 项纪律检查）】
+{symbol} {'做多' if e['side'] == 'long' else '做空'}{'（加仓）' if e.get('is_add') else ''}：入场 {e['entry']}，止损 {e['sl']}，目标 {e.get('tp') or '未设'}，计划盈亏比 {e.get('rr') or '--'}
+当时交易理由：{e.get('note') or '无'}
+当时 AI 评审：{'值得执行' if ai0.get('decision_correct') else '不值得（但客观规则通过）'} —— {ai0.get('assessment', '')}
+
+【当前状态】
+最新价 {last if last else '未知'}，浮动 {floating if floating is not None else '未知'} 点（正为盈利方向）
+
+【市场上下文】
+{context}
+
+【判定任务】只输出一个 JSON 对象，不要输出其他文字：
+{{
+  "action": "continue|reduce|exit",
+  "assessment": "<100 字内：当前应继续持有/减仓/离场的直接理由，引用具体价位与指标>",
+  "deviation": "<80 字内：当前执行与原计划的偏差（是否提前恐高/是否移损/浮盈是否达计划进度），无偏差则写'按计划执行中'",
+  "suggested_sl": <数字或 null：基于当前结构建议的止损价（原止损明显不合理时才改，否则保持原值）>,
+  "key_levels": "<该仓位的生死价位：上方压力与下方支撑，具体数字>"
+}}"""
+    ai = await _llm_json(prompt)
+    e["holding_review"] = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "action": ai.get("action"),
+        "assessment": str(ai.get("assessment", ""))[:200],
+        "deviation": str(ai.get("deviation", ""))[:160],
+        "suggested_sl": ai.get("suggested_sl"),
+        "key_levels": str(ai.get("key_levels", ""))[:120],
+        "last": last,
+        "floating": floating,
+    }
+    _save_discipline_log(log)
+    return {"ok": True, "review": e["holding_review"]}
+
+
+@app.post("/api/discipline/trade-review")
+async def discipline_trade_review(body: DisciplineDeleteIn):
+    """平仓后单笔 AI 复盘：计划 vs 实际对照，校验 AI 当初判定，提炼教训"""
+    log = _load_discipline_log()
+    e = next(
+        (x for x in log if str(x.get("ts")) == body.ts and x.get("status") == "closed"),
+        None,
+    )
+    if not e:
+        raise HTTPException(status_code=404, detail="未找到已平仓记录")
+    if e.get("pnl_pct") is None:
+        raise HTTPException(status_code=400, detail="该记录未回填盈亏，请先平仓")
+    ai0 = e.get("ai_review") or {}
+    plan_rr = e.get("rr")
+    real_r = e.get("r_multiple")
+    exit_price = e.get("exit")
+    prompt = f"""你是交易复盘教练。对这笔已平仓交易做单笔复盘，重点：计划执行质量与当初 AI 判定的准确性。直接了当，不奉承。
+
+【原计划】{e['symbol']} {'做多' if e['side'] == 'long' else '做空'}：入场 {e['entry']}，止损 {e['sl']}，目标 {e.get('tp') or '未设'}，计划盈亏比 {plan_rr or '--'}
+理由：{e.get('note') or '无'}；当时 AI 评审：{'值得执行' if ai0.get('decision_correct') else '不值得执行'} —— {ai0.get('assessment', '')}
+
+【实际结果】已实现盈亏 {e['pnl_pct']:+.2f}%（账户权益口径）{f'，出场价 {exit_price}，实际 {real_r}R（计划 {plan_rr}:1）' if exit_price and real_r is not None else '（未填出场价，无法计算实际R）'}
+
+【复盘任务】只输出一个 JSON 对象，不要输出其他文字：
+{{
+  "plan_followed": <bool，是否按计划执行（出场位/盈亏与计划止损目标是否一致，无出场价按盈亏推断）>,
+  "execution_grade": "<A|B|C|D：执行质量评级，A=严格按计划，D=严重偏离>",
+  "ai_verdict_check": "<正确|偏差|无法判断：当初 AI 评审与实际结果是否相符>",
+  "lesson": "<60 字内：这笔交易最值得记住的一条教训或经验>",
+  "summary": "<80 字内：一句话总评>"
+}}"""
+    ai = await _llm_json(prompt)
+    e["review"] = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "plan_followed": bool(ai.get("plan_followed")),
+        "execution_grade": str(ai.get("execution_grade", ""))[:2],
+        "ai_verdict_check": str(ai.get("ai_verdict_check", ""))[:10],
+        "lesson": str(ai.get("lesson", ""))[:120],
+        "summary": str(ai.get("summary", ""))[:160],
+    }
+    _save_discipline_log(log)
+    return {"ok": True, "review": e["review"]}
+
+
+@app.get("/api/discipline/config")
+async def discipline_config_get():
+    return {"ok": True, "discipline": load_config()["discipline"]}
+
+
+@app.post("/api/discipline/config")
+async def discipline_config_post(body: dict):
+    cfg = load_config()
+    d = cfg["discipline"]
+    for k in (
+        "account_size", "risk_per_trade", "daily_stop", "weekly_max_trades",
+        "daily_max_trades", "min_grid_spacing", "max_adds", "min_rr", "cooling_min",
+    ):
+        if k in body and isinstance(body[k], (int, float)):
+            d[k] = float(body[k])
+    if isinstance(body.get("universe"), list):
+        d["universe"] = [str(u).strip().upper() for u in body["universe"] if str(u).strip()]
+    save_config(cfg)
+    return {"ok": True, "discipline": d}
 
 
 # ---------------------------------------------------------------- 交易心得
@@ -1239,6 +2298,26 @@ async def del_note(note_id: str):
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _feishu_token = {"token": "", "expire_at": 0.0}
+
+
+async def _feishu_push(text: str) -> bool:
+    """飞书群机器人 webhook 推送（未配置时静默跳过；上游 18f7652 整合）"""
+    cfg = load_config()
+    url = (cfg.get("feishu") or {}).get("webhook_url")
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, json={"msg_type": "text", "content": {"text": text[:3900]}})
+        ok = r.status_code == 200 and r.json().get("code", 0) == 0
+        if not ok:
+            import logging
+            logging.getLogger("uvicorn.error").info(f"[feishu-push] 失败：{r.text[:120]}")
+        return ok
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").info(f"[feishu-push] 异常：{e}")
+        return False
 
 
 def _feishu_cfg(cfg: dict) -> dict:
@@ -1338,6 +2417,55 @@ def _note_to_md(note: dict) -> str:
     return f"### {title}\n- {' · '.join(meta_parts)}\n{note['content']}\n"
 
 
+class ChatExportIn(BaseModel):
+    content: str
+    title: str = "AI 对话记录"
+
+
+@app.post("/api/chat-export")
+async def chat_export(body: ChatExportIn):
+    """将 AI 对话历史导出追加到飞书云文档《AI 对话记录》（上游 38d03d2 整合）"""
+    cfg = load_config()
+    fs = cfg.get("feishu") or {}
+    if not fs.get("app_id") or not fs.get("app_secret"):
+        raise HTTPException(status_code=400, detail="未配置飞书应用凭证（App ID / App Secret）")
+    text = body.content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="对话内容为空")
+
+    doc_id = fs.get("chat_doc_id") or ""
+    if not doc_id:
+        import logging
+        token = await _feishu_get_token()
+        try:
+            async with httpx.AsyncClient(timeout=20) as _client:
+                r = await _client.post(
+                    f"{FEISHU_BASE}/docx/v1/documents",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"title": body.title},
+                )
+            data = r.json()
+            logging.getLogger("uvicorn.error").info(
+                f"[chat-export] 创建文档：code={data.get('code')} msg={data.get('msg')}")
+            if data.get("code") == 0 and data.get("data", {}).get("document"):
+                doc_id = data["data"]["document"]["document_id"]
+                cfg.setdefault("feishu", {})["chat_doc_id"] = doc_id
+                save_config(cfg)
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn.error").info(f"[chat-export] 创建文档异常：{type(e).__name__} {e}")
+    if not doc_id:
+        # 创建失败兜底：追加到心得文档
+        doc_id = await _feishu_ensure_doc()
+
+    blocks = [
+        {"block_type": 2, "text": {"elements": [{"text_run": {"content": text[i:i + 900], "text_element_style": {}}}], "style": {}}}
+        for i in range(0, len(text), 900)
+    ]
+    await _feishu_append(doc_id, blocks)
+    return {"ok": True, "doc_id": doc_id}
+
+
 @app.post("/api/notes/feishu-sync")
 async def notes_feishu_sync(note_id: str = "", all_unsynced: bool = True):
     """同步心得到飞书云文档：单条（note_id）或全部未同步（all_unsynced）"""
@@ -1376,6 +2504,7 @@ class FeishuCfgIn(BaseModel):
     app_id: str = ""
     app_secret: str = ""
     doc_title: str = "期货交易心得"
+    webhook_url: str = ""   # 群机器人 webhook（盯盘异动/晨报主动推送）
     clear: bool = False
 
 
@@ -1393,10 +2522,24 @@ async def set_feishu_config(body: FeishuCfgIn):
         fs["app_secret"] = body.app_secret.strip()
     if body.doc_title.strip():
         fs["doc_title"] = body.doc_title.strip()
+    if body.webhook_url.strip():
+        fs["webhook_url"] = body.webhook_url.strip()
     # 凭证变更后重建文档关联
     if body.app_id.strip() or body.app_secret.strip():
         fs.pop("doc_id", None)
     save_config(cfg)
+    return {"ok": True}
+
+
+@app.post("/api/feishu/push-test")
+async def feishu_push_test():
+    """发送测试消息验证 webhook 配置（上游整合）"""
+    ok = await _feishu_push("✅ 期货助手推送测试：配置成功，盯盘异动与晨报将推送到本群。")
+    if not ok:
+        cfg = load_config()
+        if not (cfg.get("feishu") or {}).get("webhook_url"):
+            raise HTTPException(status_code=400, detail="未配置 webhook URL")
+        raise HTTPException(status_code=502, detail="推送失败，请检查 webhook 地址与群机器人设置")
     return {"ok": True}
 
 
@@ -1427,13 +2570,87 @@ NEWS_TOPICS = {
 _news_cache: dict = {"ts": 0.0, "items": []}
 NEWS_TTL = 120.0
 
+# AI 语义筛选（上游 bdd7573 整合）：规则过滤后再由 AI 批量判定相关性并标注类别
+_news_ai: dict = {"ts": 0.0, "running": False, "tags": {}}
+NEWS_AI_TTL = 300.0   # AI 筛选结果缓存 5 分钟
+NEWS_AI_LIMIT = 60    # 只筛最新 60 条
 
-# 股市噪音词：命中即剔除（只保留与期货相关的大宗/能源/贵金属/宏观资讯）
+_AI_FILTER_PROMPT = """你是国内期货资讯筛选器，判定标准严格。下面是财经快讯（已去除股市行情与公司财报类噪音）。请判断每条是否与【国内期货交易】直接相关：
+【判定为相关】：直接涉及期货品种的供需/价格/库存/产量（如 OPEC、EIA、USDA、港口库存、开工率）、宏观货币政策直接影响资产定价（央行/利率决议/通胀/非农/美元指数）、地缘冲突直接冲击商品供给或避险（战争/制裁/袭击产油设施/霍尔木兹）。
+【判定为不相关】：政府机构一般动态、公司融资/人事/股权变动、科技产品、社会民生、文体、医疗、教育、旅游、他国国内政治、间接沾边的泛产业新闻。拿不准的一律判不相关。
+输出严格 JSON 数组，只列出【相关】的条目，每个元素形如 {"i": 序号, "tag": "类别"}，tag 从以下选一个：原油/能源、贵金属、黑色金属、农产品、化工、油脂、宏观利率、美元、地缘、产业数据、天气。不要输出任何其它文字。
+
+条目列表：
+"""
+
+
+async def _ai_filter_news(items: list) -> dict:
+    """批量调用 AI 判定相关性，返回 {索引: 类别}；失败自动对半重试，最终失败降级"""
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    tags: dict = {}
+    cfg = load_config()
+    if not cfg["api_keys"].get(cfg["provider"]):
+        return tags
+
+    async def ask_chunk(base: int, chunk: list) -> None:
+        lines = [
+            f"{i}. {(it.get('title') or '')[:70]} {(it.get('summary') or '')[:80]}".replace("\n", " ")
+            for i, it in enumerate(chunk)
+        ]
+        raw = await _llm_text_retry(
+            _AI_FILTER_PROMPT + "\n".join(lines),
+            max_tokens=min(8192, max_output_for(cfg["model"] or "")),
+        )
+        arr = json.loads(raw[raw.find("["): raw.rfind("]") + 1])
+        for item in arr:
+            if isinstance(item, dict) and "i" in item:
+                idx = base + int(item["i"])
+                if 0 <= idx < len(items):
+                    tags[idx] = str(item.get("tag", ""))[:8]
+
+    async def ask_with_retry(base: int, chunk: list, depth: int = 0) -> None:
+        try:
+            await ask_chunk(base, chunk)
+        except Exception as e:
+            # 推理模型偶发输出超限：对半拆分重试（最小 3 条）
+            if depth < 2 and len(chunk) > 3:
+                logger.info(f"[ai-news] 块 {base} 失败（{type(e).__name__}），对半重试")
+                mid = len(chunk) // 2
+                await ask_with_retry(base, chunk[:mid], depth + 1)
+                await ask_with_retry(base + mid, chunk[mid:], depth + 1)
+            else:
+                logger.info(f"[ai-news] 块 {base} 放弃：{type(e).__name__} {str(e)[:60]}")
+
+    chunk_size = 10
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start:start + chunk_size]
+        await ask_with_retry(start, chunk)
+    logger.info(f"[ai-news] 全部完成：相关 {len(tags)} 条")
+    return tags
+
+
+async def _ai_filter_job():
+    _news_ai["running"] = True
+    try:
+        items = _news_cache["items"][:NEWS_AI_LIMIT]
+        _news_ai["tags"] = await _ai_filter_news(items)
+        _news_ai["ts"] = asyncio.get_event_loop().time()
+    except Exception:
+        pass
+    finally:
+        _news_ai["running"] = False
+
+
+# 股市噪音词：命中即剔除（只保留与期货相关的大宗/能源/贵金属/宏观资讯；上游 bdd7573 扩充）
 _STOCK_NOISE_KW = [
     "股价", "股票", "股市", "a股", "港股", "美股", "纳指", "纳斯达克", "道指", "标普",
     "韩股", "日经", "欧股", "沪指", "深指", "创业板", "科创板", "北交所", "恒生",
     "涨停", "跌停", "财报", "营收", "净利润", "ipo", "股份回购", "市值", "科技股",
     "芯片股", "ai芯片", "两市", "成交额", "目标价", "重申", "公告称", "评级",
+    "基金", "券商", "业绩", "季报", "年报", "增持", "减持", "上市公司", "游资",
+    "家电", "游戏", "流水", "服务器", "晶圆", "pcbs", "存储芯片", "半导体设备",
+    "银行股", "保险股", "券商股", "龙头股", "概念股", "题材股", "翻倍", "套牢",
 ]
 
 
@@ -1499,7 +2716,22 @@ async def news(topic: str = ""):
     result_items = _news_cache["items"]
     if topic in NEWS_TOPICS:
         result_items = [it for it in result_items if topic in it["topics"]]
-    return {"ok": True, "items": result_items, "topics": NEWS_TOPICS}
+
+    # AI 语义筛选状态：首次请求异步触发，前端轮询拿到 ready
+    ai_stale = loop_now - _news_ai["ts"] > NEWS_AI_TTL
+    if ai_stale and not _news_ai["running"] and result_items:
+        _news_ai["tags"] = {}
+        asyncio.create_task(_ai_filter_job())
+    ai_tags = {} if ai_stale else _news_ai["tags"]
+    return {
+        "ok": True,
+        "items": result_items,
+        "topics": NEWS_TOPICS,
+        "ai": {
+            "status": "ready" if ai_tags else ("filtering" if _news_ai["running"] else "off"),
+            "tags": {str(k): v for k, v in ai_tags.items()},
+        },
+    }
 
 
 # ---------------------------------------------------------------- AI 晨报
@@ -1572,6 +2804,42 @@ async def _generate_report() -> str:
     if lines:
         parts.append("【自选品种快照】\n" + "\n".join(lines))
 
+    # 持仓与纪律状态（决策后闭环，供晨报提醒风险与执行情况）
+    try:
+        dlog = [e for e in _load_discipline_log() if e.get("allowed")]
+        holds = [e for e in dlog if e.get("status") == "open"]
+        if holds:
+            h_lines = []
+            for h in holds:
+                q = _quote_cache.get(str(h.get("symbol")), (0, {}))[1]
+                last = q.get("last") if q else None
+                flt = f"，浮动 {((last - h['entry']) * (1 if h['side'] == 'long' else -1)):+.1f} 点" if last and h.get("entry") else ""
+                h_lines.append(
+                    f"- {h['symbol']} {'多' if h['side'] == 'long' else '空'}{'(加)' if h.get('is_add') else ''}："
+                    f"入 {h['entry']} 损 {h['sl']} 目标 {h.get('tp') or '未设'}{flt}"
+                    f"（{str(h['ts'])[:10]} 入场，理由：{(h.get('note') or '')[:40]}）"
+                )
+            parts.append("【当前持仓（今日关注其止损位与关键价位）】\n" + "\n".join(h_lines))
+        dstats = discipline_stats(_load_discipline_log())
+        d_lines = [
+            f"- 连续纪律 {dstats.get('discipline_streak', 0)} 天；今日 {dstats['today_trades']} 笔 / 本周 {dstats['week_trades']} 笔；"
+            f"今日已实现 {dstats['today_pnl']:+.2f}%"
+        ]
+        rejected_today = [
+            e for e in _load_discipline_log()
+            if not e.get("allowed") and str(e.get("ts", ""))[:10] == datetime.now().strftime("%Y-%m-%d")
+        ]
+        if rejected_today:
+            vio = {}
+            for e in rejected_today:
+                for r in e.get("violations", []):
+                    vio[r] = vio.get(r, 0) + 1
+            top = "、".join(f"{k}×{v}" for k, v in sorted(vio.items(), key=lambda x: -x[1])[:4])
+            d_lines.append(f"- 昨日至今被拒 {len(rejected_today)} 笔（{top}）——简报中请针对性提醒规避")
+        parts.append("【交易纪律状态】\n" + "\n".join(d_lines))
+    except Exception:
+        pass
+
     if not parts:
         return "（暂无可用数据，请稍后重新生成）"
 
@@ -1589,6 +2857,33 @@ async def _generate_report() -> str:
         [{"role": "user", "content": prompt}],
         max_tokens=min(4096, max_output_for(cfg["model"] or "")),
     )
+
+
+async def report_push_loop():
+    """晨/夜报定时生成并推送飞书：8:50 后生成当日晨报、20:50 后生成夜报（不依赖打开页面；上游整合）"""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            now = datetime.now()
+            slot = _report_slot(now)
+            is_am = slot.endswith("-am")
+            due = (is_am and now.hour >= 9) or \
+                  (not is_am and now.hour >= 21)
+            reports = _load_reports()
+            if due and slot not in reports:
+                import logging
+                logging.getLogger("uvicorn.error").info(f"[report-push] 定时生成 {slot}")
+                text = await _generate_report()
+                reports = _load_reports()
+                reports[slot] = {"ts": int(datetime.now().timestamp() * 1000), "report": text}
+                keep = sorted(reports.keys())[-6:]
+                _save_reports({k: reports[k] for k in keep})
+                kind = "晨报（日盘前瞻）" if is_am else "夜报（夜盘前瞻）"
+                await _feishu_push(f"📋 AI 交易{kind}\n\n{text[:1800]}")
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn.error").info(f"[report-push] 异常：{e}")
+        await asyncio.sleep(120)
 
 
 @app.get("/api/report")

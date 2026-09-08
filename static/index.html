@@ -1,10 +1,17 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0825c">
+<script>
+  // 主题防闪烁：渲染前恢复上次选择的皮肤
+  (function () {
+    var t = localStorage.getItem("fa_theme");
+    if (t && t !== "dark") document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
+<link rel="stylesheet" href="/static/style.css?v=0825s">
 </head>
 <body>
 
@@ -16,7 +23,11 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825c</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825s</span>
+    <div style="position:relative">
+      <button id="btnTheme" class="btn ghost" title="切换皮肤">🎨</button>
+      <div id="themePop" class="theme-pop hidden"></div>
+    </div>
     <button id="btnReport" class="btn ghost">📋 晨报</button>
     <button id="btnSettings" class="btn ghost">⚙ 设置</button>
   </div>
@@ -25,8 +36,8 @@
 <nav class="view-nav">
   <button class="view-tab active" data-view="work">📊 工作台</button>
   <button class="view-tab" data-view="detail">📈 合约详情</button>
-  <button class="view-tab" data-view="compare">⚖ 对比分析</button>
   <button class="view-tab" data-view="news">📰 资讯要闻</button>
+  <button class="view-tab" data-view="discipline">🛡 交易纪律</button>
   <button class="view-tab" data-view="notes">📝 交易心得</button>
 </nav>
 
@@ -82,6 +93,12 @@
           <h2>AI 分析对话</h2>
           <span id="aiBadge" class="ai-badge">未配置</span>
         </div>
+        <div class="rt-head">
+          <button id="btnRealtime" class="btn accent small-btn" title="把此刻最新行情（盘口/分时/分钟线/指标/要闻/持仓）打包给 AI 生成盘中快评">⚡ 实时解读</button>
+          <label class="chk muted small" title="每 15 分钟自动按选中合约刷新解读"><input id="rtAuto" type="checkbox"> 自动·15m</label>
+          <span id="rtSym" class="muted small"></span>
+        </div>
+        <div id="rtBox" class="rt-box hidden"></div>
         <div id="chatBox" class="chat-box">
           <div class="chat-welcome">
             <p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p>
@@ -89,10 +106,13 @@
             <p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p>
           </div>
         </div>
-        <div class="chat-input-row">
+        <div id="imgPreviews" class="img-previews hidden"></div>
+        <div class="chat-input-row" id="chatInputRow">
           <button id="btnAnalyze" class="btn accent" title="让 AI 结合实时行情分析当前选中合约">📊 分析当前合约</button>
-          <input id="chatInput" placeholder="向 AI 提问…" autocomplete="off">
+          <button id="btnAddImg" class="btn" title="添加图片（也可直接粘贴截图或拖拽到输入框）">📎 图片</button>
+          <input id="chatInput" placeholder="向 AI 提问…（可贴图：Ctrl+V 粘贴截图 / 📎 选择 / 拖拽）" autocomplete="off">
           <button id="btnSend" class="btn primary">发送</button>
+          <input id="imgFileInput" type="file" accept="image/*" multiple class="hidden-file">
         </div>
       </section>
 
@@ -128,55 +148,99 @@
     </div>
   </section>
 
-  <!-- 视图 3：对比分析（全宽） -->
-  <section class="view hidden" data-view="compare">
-    <div class="panel view-panel">
-      <div class="panel-head"><h2>⚖ 对比分析 · 套利视角</h2><span class="muted small">比价 / 价差 / 归一化 + 相关性矩阵</span></div>
-      <div class="cmp-pane">
-        <div class="cmp-bar">
-          <select id="cmpA"></select>
-          <span class="muted">vs</span>
-          <select id="cmpB"></select>
-          <select id="cmpMode">
-            <option value="ratio">比价</option>
-            <option value="spread">价差</option>
-            <option value="normalized">归一化对比</option>
-          </select>
-          <select id="cmpDays">
-            <option value="60">60日</option>
-            <option value="120" selected>120日</option>
-            <option value="250">250日</option>
-          </select>
-          <button id="btnCmpAi" class="btn accent small-btn" title="把当前对比数据交给 AI 分析，并在工作台对话中查看">🤖 AI 分析</button>
-        </div>
-        <div id="cmpStats" class="cmp-stats"></div>
-        <div class="kline-chart-box"><div id="cmpChart"><span class="muted small">选择两个合约开始对比</span></div></div>
-        <div class="corr-head">
-          <span class="kline-title">品种相关性矩阵（自选 · 日收益率）</span>
-          <select id="corrDays">
-            <option value="60" selected>60日</option>
-            <option value="120">120日</option>
-            <option value="250">250日</option>
-          </select>
-        </div>
-        <div id="corrMatrix" class="corr-matrix"></div>
-      </div>
-    </div>
-  </section>
-
   <!-- 视图 3：资讯要闻（全宽列表 + 主题过滤） -->
   <section class="view hidden" data-view="news">
     <div class="panel view-panel">
       <div class="panel-head">
         <h2>📰 资讯要闻</h2>
-        <div class="news-filter">
-          <button class="filter-chip active" data-filter="all">全部</button>
-          <button class="filter-chip" data-filter="oilgold">🛢 原油/黄金</button>
-          <button class="filter-chip" data-filter="usiran">⚔️ 美伊冲突</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span id="newsAiBadge" class="muted small" title="AI 语义筛选：规则过滤后由 AI 判定与期货直接相关的条目并标注类别"></span>
+          <label class="chk muted small" title="仅显示 AI 判定与期货直接相关的条目"><input id="newsAiOnly" type="checkbox"> 只看相关</label>
+          <div class="news-filter">
+            <button class="filter-chip active" data-filter="all">全部</button>
+            <button class="filter-chip" data-filter="oilgold">🛢 原油/黄金</button>
+            <button class="filter-chip" data-filter="usiran">⚔️ 美伊冲突</button>
+          </div>
         </div>
       </div>
       <div id="newsList" class="news-view-list">
         <div class="muted small monitor-hint">加载要闻中…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 视图 4：交易纪律（开仓前检查 + 规则引擎 + 交易日志） -->
+  <section class="view hidden" data-view="discipline">
+    <div class="panel view-panel">
+      <div class="panel-head"><h2>🛡 交易纪律 · 开仓检查</h2><span class="muted small">趋势/信号/间距/次数/盈亏自动判定 · 许可单与冷静期自评 · 任何致命违反即禁止开仓</span></div>
+      <div class="disc-pane">
+        <div class="disc-grid">
+          <div class="disc-form">
+            <h3>开仓申请</h3>
+            <div class="form-row"><label>品种</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <select id="dcSymbol" style="flex:1"></select>
+                <span id="dcLast" class="muted small" style="white-space:nowrap">现价 --</span>
+                <button id="btnDcLast" class="btn small-btn" type="button" title="把当前最新价填入入场价">填入</button>
+              </div>
+            </div>
+            <div class="form-row"><label>方向</label>
+              <select id="dcSide"><option value="long">做多</option><option value="short">做空</option></select>
+            </div>
+            <div class="form-row"><label>入场价</label><input id="dcEntry" type="number" step="any" placeholder="计划入场价"></div>
+            <div class="form-row"><label>止损价</label><input id="dcSl" type="number" step="any" placeholder="止损价"></div>
+            <div class="form-row"><label>目标价</label><input id="dcTp" type="number" step="any" placeholder="目标价（算盈亏比）"></div>
+            <p class="muted small" style="margin:8px 0 0">只需提交以上纯客观参数——加仓自动判定（同品种同方向持仓即加仓）、交易计划说明由 AI 生成（许可单第 5 项）、情绪由 AI 推断、单笔风险按 ATR 建议仓位自动评估。检查约需 0.5~2 分钟。</p>
+            <button id="btnDcCheck" class="btn primary" style="width:100%">🛡 运行开仓检查（规则引擎 + AI 审查）</button>
+          </div>
+          <div class="disc-result">
+            <div id="dcVerdict" class="dc-verdict muted">填写左侧纯客观参数后运行检查：规则引擎判数据，AI 生成计划并全面审查</div>
+            <div id="dcRules" class="dc-rules"></div>
+          </div>
+        </div>
+
+        <details class="disc-params">
+          <summary>⚙ 风控参数（按自身账户规模与承受力设定，AI 不代定）</summary>
+          <div class="form-grid">
+            <div class="form-row"><label>账户权益 元<span class="muted small">（头寸建议用）</span></label><input id="dcAccount" type="number" step="1000" placeholder="如 200000"></div>
+            <div class="form-row"><label>单笔风险上限 %</label><input id="dcRisk" type="number" step="0.1"></div>
+            <div class="form-row"><label>日内止损线 %</label><input id="dcStop" type="number" step="0.1"></div>
+            <div class="form-row"><label>周交易上限 次</label><input id="dcWeekMax" type="number" step="1"></div>
+            <div class="form-row"><label>日交易上限 次</label><input id="dcDayMax" type="number" step="1"></div>
+            <div class="form-row"><label>梯度最小间距 %</label><input id="dcSpacing" type="number" step="0.1"></div>
+            <div class="form-row"><label>最大加仓次数</label><input id="dcMaxAdds" type="number" step="1"></div>
+            <div class="form-row"><label>最低盈亏比 :1</label><input id="dcRr" type="number" step="0.1"></div>
+            <div class="form-row"><label>冷静期 分钟</label><input id="dcCool" type="number" step="1"></div>
+          </div>
+          <div class="form-row"><label>自选品种池<br><span class="muted small">逗号分隔，留空不限</span></label>
+            <input id="dcUniverse" type="text" placeholder="如 RB0,HC0,I0,SC0">
+          </div>
+          <button id="btnDcSave" class="btn small-btn">保存参数</button>
+        </details>
+
+        <div class="disc-log">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:6px">
+            <div id="dcStats" class="disc-stats muted small" style="margin:0">加载中…</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <div id="dcFilters" class="dc-filters">
+                <button class="btn small-btn dc-filter active" data-f="all">全部</button>
+                <button class="btn small-btn dc-filter" data-f="open">持仓</button>
+                <button class="btn small-btn dc-filter" data-f="closed">已平仓</button>
+                <button class="btn small-btn dc-filter" data-f="rejected">被拒</button>
+              </div>
+              <button id="btnDcWeekly" class="btn small-btn" title="将近 7 天纪律日志交给 AI 生成复盘周报">📋 纪律周报</button>
+              <button id="btnDcCsv" class="btn small-btn" title="导出全部记录为 CSV">📤 CSV</button>
+            </div>
+          </div>
+          <div id="dcWeeklyBox" class="dc-weekly hidden"></div>
+          <div class="table-wrap"><table class="quote-table" id="dcLogTable">
+            <thead><tr>
+              <th>时间</th><th>品种</th><th>方向</th><th>入场</th><th>止损</th><th>计划比</th><th>实际R</th>
+              <th>裁决</th><th>情绪</th><th>浮动</th><th>状态</th><th>盈亏%</th><th>备注</th><th>操作</th>
+            </tr></thead>
+            <tbody id="dcLogBody"></tbody>
+          </table></div>
+        </div>
       </div>
     </div>
   </section>
@@ -188,9 +252,11 @@
         <h2>📝 交易心得</h2>
         <div style="display:flex;gap:8px;align-items:center">
           <span id="feishuHint" class="muted small">☁ 飞书云文档同步</span>
+          <button id="btnChatHist" class="btn small-btn" title="查看/导出 AI 对话历史（本地自动存档）">💬 对话历史</button>
           <button id="btnNoteSync" class="btn accent small-btn">☁ 同步到飞书</button>
         </div>
       </div>
+      <div id="chatHistoryBox" class="chat-hist hidden"></div>
       <div class="notes-full">
         <div id="notesList" class="news-view-list">
           <div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>
@@ -246,13 +312,27 @@
     </div>
     <div class="form-row">
       <label>模型</label>
-      <input id="cfgModel" type="text" placeholder="如 glm-4-flash / deepseek-chat">
+      <input id="cfgModel" type="text" list="modelList" placeholder="如 glm-4-flash / deepseek-chat">
+      <datalist id="modelList">
+        <option value="deepseek-v4-flash-vision-exp">DeepSeek 视觉（支持图片）</option>
+        <option value="deepseek-chat">DeepSeek 文本</option>
+        <option value="deepseek-reasoner">DeepSeek 推理</option>
+        <option value="glm-4-flash">智谱 免费文本</option>
+        <option value="glm-4v-flash">智谱 视觉（支持图片）</option>
+      </datalist>
     </div>
     <div class="form-row">
       <label>飞书同步</label>
       <input id="cfgFeishuId" type="text" placeholder="App ID（留空保留已存）">
       <input id="cfgFeishuSecret" type="password" placeholder="App Secret（留空保留）">
       <input id="cfgFeishuTitle" type="text" placeholder="文档标题：期货交易心得">
+    </div>
+    <div class="form-row">
+      <label>飞书群推送<span class="muted small">（webhook 机器人）</span></label>
+      <div style="display:flex;gap:6px">
+        <input id="cfgWebhook" type="text" style="flex:1" placeholder="群机器人 webhook 地址（盯盘异动/晨报主动推送到群，留空保留）">
+        <button id="btnPushTest" class="btn small-btn" type="button">测试</button>
+      </div>
     </div>
     <p class="form-tip">
       <span id="keyStatus"></span><br>
@@ -283,8 +363,17 @@
   </div>
 </div>
 
+<!-- 命令面板 Ctrl+K -->
+<div id="cmdk" class="cmdk hidden">
+  <div class="cmdk-card">
+    <input id="cmdkInput" placeholder="合约代码/拼音，或命令（如：晨报、皮肤、纪律）…" autocomplete="off">
+    <div id="cmdkList" class="cmdk-list"></div>
+    <div class="cmdk-hint muted small">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825c"></script>
+<script src="/static/app.js?v=0825s"></script>
 </body>
 </html>

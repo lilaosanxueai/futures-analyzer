@@ -1,5 +1,8 @@
 config.json
 morning_report.json
 notes.json
+discipline_log.json
 __pycache__/
 *.pyc
+.venv/
+server.log
