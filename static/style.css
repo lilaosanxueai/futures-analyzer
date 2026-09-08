@@ -913,3 +913,7 @@ input:focus, select:focus { border-color: var(--primary); }
 /* 突发资讯事件（作战流） */
 .mon-event.flash-ev { border-left: 3px solid #ff6b6b; }
 .flash-ev .mon-line b { color: #ff8787; }
+
+/* 雷达异变事件（作战流） */
+.mon-event.radar-ev { border-left: 3px solid #9775fa; }
+.mon-event.radar-ev.warn-ev { border-left-color: #f5a623; }

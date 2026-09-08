@@ -135,12 +135,14 @@ async def lifespan(_app):
     monitor_task = asyncio.create_task(monitor_loop())
     trail_task = asyncio.create_task(trail_loop())
     news_watch_task = asyncio.create_task(news_watch_loop())
+    radar_task = asyncio.create_task(radar_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     monitor_task.cancel()
     trail_task.cancel()
     news_watch_task.cancel()
+    radar_task.cancel()
     report_task.cancel()
     selfcheck_task.cancel()
 
@@ -3117,6 +3119,85 @@ async def news_watch_loop():
         await asyncio.sleep(60)
 
 
+# ---------------------------------------------------------------- 超短雷达异变监控
+
+_radar_prev: dict[str, dict] = {}   # 上轮快照关键字段（sym -> {score, grade, ir_state, flow}）
+_radar_cool: dict[tuple, float] = {}  # (sym, 变化类型) -> loop time，10 分钟冷却
+
+
+def _grade_of(score: int) -> str:
+    return "活跃" if score >= 65 else ("一般" if score >= 40 else "清淡")
+
+
+async def _radar_check(sym: str) -> None:
+    """单品种雷达异变检测：评分跨档 / IR 突破 / 量价定性翻转 → 作战流（IR 突破加推飞书）"""
+    try:
+        snap = await _scalp_snapshot(sym)
+    except Exception:
+        return
+    cur = {
+        "score": snap["score"], "grade": snap["grade"],
+        "ir_state": snap["ir_state"], "flow": snap["flow"] or "",
+    }
+    prev = _radar_prev.get(sym)
+    _radar_prev[sym] = cur
+    if not prev:
+        return  # 首轮建档
+    loop_now = asyncio.get_event_loop().time()
+    name = snap.get("name") or sym
+
+    def _emit(ctype: str, text: str, feishu: bool = False, level: str = "info"):
+        key = (sym, ctype)
+        if loop_now - _radar_cool.get(key, -1e9) < 600:
+            return
+        _radar_cool[key] = loop_now
+        _MONITOR["events"].append({
+            "id": f"radar-{sym}-{ctype}-{int(loop_now)}",
+            "ts": int(datetime.now().timestamp() * 1000),
+            "kind": "radar", "etype": ctype, "level": level,
+            "symbol": sym, "name": name, "dir": "up",
+            "price": snap["last"], "text": text,
+        })
+        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+        if feishu:
+            asyncio.create_task(_feishu_push(f"📡 超短雷达 · {sym}（{name}）\n{text}\n现价 {snap['last']}"))
+
+    # IR 突破/跌回（超短关键结构事件）
+    if prev["ir_state"] != cur["ir_state"]:
+        if "上破" in cur["ir_state"]:
+            _emit("ir", f"{sym} 上破开盘区间（IR {snap['ir_low']:g}~{snap['ir_high']:g}），现价 {snap['last']}——真突破跟进或防假突破回抽", feishu=True, level="warn")
+        elif "跌破" in cur["ir_state"]:
+            _emit("ir", f"{sym} 跌破开盘区间（IR {snap['ir_low']:g}~{snap['ir_high']:g}），现价 {snap['last']}——日内转弱信号", feishu=True, level="warn")
+
+    # 可交易性跨档（清淡↔一般↔活跃）
+    if prev["grade"] != cur["grade"]:
+        arrow = "↑" if cur["score"] > prev["score"] else "↓"
+        _emit("grade", f"{sym} 可交易性 {prev['grade']}→{cur['grade']}（{prev['score']}→{cur['score']}{arrow}）"
+              + ("，波动启动可关注" if cur["score"] > prev["score"] else "，波动衰减建议观望"))
+
+    # 量价定性翻转
+    if prev["flow"] and cur["flow"] and prev["flow"] != cur["flow"]:
+        _emit("flow", f"{sym} 量价定性翻转：{prev['flow'].split('（')[0]} → {cur['flow'].split('（')[0]}")
+
+
+async def radar_loop():
+    """超短雷达异变监控：盯盘品种（自选+持仓+画像）每 60 秒对比快照，关键变化进作战流"""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            now = datetime.now()
+            if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
+                syms = ({s.upper() for s in _MONITOR["watch"]}
+                        | {t["symbol"] for t in _load_trades() if t.get("status") == "open"}
+                        | set(_load_profile().get("symbols") or []))
+                for sym in sorted(syms)[:8]:
+                    await _radar_check(sym)
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 # ---------------------------------------------------------------- AI 记忆画像
 
 PROFILE_FILE = BASE_DIR / "trader_profile.json"
@@ -3320,12 +3401,33 @@ async def _selfcheck_run(ping_ai: bool = False) -> list:
                 json.loads(fp.read_text(encoding="utf-8"))
         return "数据文件完整"
 
+    async def probe_scalp():
+        snap = await _scalp_snapshot("RB0")
+        return f"可交易性 {snap['score']}/100（{snap['grade']}）"
+
+    async def probe_radar_loop():
+        if not _radar_prev:
+            uptime = (datetime.now() - _APP_STARTED).total_seconds()
+            if uptime < 120:
+                return f"启动初始化中（{int(uptime)}s，首轮快照未完成）"
+            raise RuntimeError("雷达监控尚未建档")
+        return f"监控 {len(_radar_prev)} 个品种"
+
+    async def probe_flash():
+        if not _flash_first["done"]:
+            uptime = (datetime.now() - _APP_STARTED).total_seconds()
+            if uptime < 120:
+                return "启动初始化中（首轮建档未完成）"
+            raise RuntimeError("突发监控尚未建档")
+        return f"已建档 {len(_flash_seen)} 条"
+
     checks = [
         ("国内实时行情", probe_quote), ("国内日K", probe_kline),
         ("国内分钟线", probe_minute), ("国际行情", probe_intl),
         ("快讯流(新浪/东财)", probe_news), ("产业深研(东财)", probe_deep),
         ("金属快讯(SHMET)", probe_shmet), ("宏观日历", probe_calendar),
-        ("盯盘循环", probe_monitor), ("飞书", probe_feishu),
+        ("超短雷达", probe_scalp), ("雷达异变监控", probe_radar_loop),
+        ("突发资讯监控", probe_flash), ("盯盘循环", probe_monitor), ("飞书", probe_feishu),
         ("AI 服务", probe_ai), ("本地数据", probe_disk),
     ]
 
@@ -3445,9 +3547,9 @@ async def _generate_report() -> str:
         pct = q.get("change_pct")
         line = f"- {s}（{name}）：最新 {q.get('last')}，日内 {'+' if (pct or 0) >= 0 else ''}{pct}%，持仓 {q.get('position')}"
         try:
-            ind = await get_indicators(s)
+            ind = await get_indicators(s, "15m")
             sigs = "；".join(x["name"] for x in ind["signals"][:3]) or "无明显信号"
-            line += f"；日线信号：{sigs}"
+            line += f"；15分信号：{sigs}"
         except Exception:
             pass
         lines.append(line)

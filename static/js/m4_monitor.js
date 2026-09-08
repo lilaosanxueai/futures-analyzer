@@ -226,6 +226,8 @@ async function pollMonitor() {
           if (e.kind === "trail") {
             toast(e.text, true);
             flashTitle(`${e.symbol} 移动止盈`);
+          } else if (e.kind === "radar") {
+            if (e.level === "warn") { toast(`📡 ${e.text}`, true); flashTitle(`${e.symbol} 雷达异变`); }
           } else if (e.kind === "flash") {
             toast(`⚡ ${(e.text || "").slice(0, 50)}`, true);
             flashTitle("突发资讯");
@@ -253,6 +255,14 @@ async function pollMonitor() {
           return `<div class="mon-event trail-ev">
             <div class="mon-line"><span class="mon-time">${hhmm}</span>
             <b>${e.symbol}</b><span>${esc(e.text)}</span></div>
+          </div>`;
+        }
+        // 超短雷达异变事件（评分跨档/IR突破/量价翻转）
+        if (e.kind === "radar") {
+          return `<div class="mon-event radar-ev${e.level === "warn" ? " warn-ev" : ""}">
+            <div class="mon-line"><span class="mon-time">${hhmm}</span>
+            <b>📡 ${e.symbol}</b><span>${esc(e.text)}</span>
+            <span class="muted small">→ ${e.price}</span></div>
           </div>`;
         }
         // 突发资讯事件（品种关联/地缘/宏观强事件）
