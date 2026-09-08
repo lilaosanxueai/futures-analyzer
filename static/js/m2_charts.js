@@ -566,7 +566,13 @@ $("btnTradeEval").addEventListener("click", async () => {
       c.reward_amt ? `潜在盈利 ¥${c.reward_amt.toLocaleString()}` : "",
     ].filter(Boolean).map((s) => `<span class="cmp-stat">${s}</span>`).join("");
     $("teCalc").innerHTML = stats;
-    result.innerHTML = `<div class="md">${renderMarkdown(d.advice)}</div>`;
+    const checksHtml = (c.checks || []).length
+      ? `<div class="te-checks">${c.checks.map((k) => `
+          <div class="te-check ${k.level === "warn" ? "warn" : "info"}">
+            <span class="tc-id">${k.rule}</span><span>${k.text}</span>
+          </div>`).join("")}</div>`
+      : "";
+    result.innerHTML = `${checksHtml}<div class="md">${renderMarkdown(d.advice)}</div>`;
   } catch (e) {
     const msg = e.name === "AbortError" ? "评估超时，请重试" : e.message;
     result.innerHTML = `<div class="msg error">评估失败：${msg}</div>`;

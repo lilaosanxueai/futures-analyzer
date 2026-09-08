@@ -867,3 +867,12 @@ input:focus, select:focus { border-color: var(--primary); }
 .annot-btn:hover { color: var(--text); border-color: var(--muted); }
 .annot-btn.active { background: rgba(245, 166, 35, .15); color: var(--accent); border-color: var(--accent); }
 .legend-dot { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 4px; }
+
+/* 开仓评估：体系规则预检徽章（P001-P004） */
+.te-checks { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 10px; }
+.te-check { display: flex; gap: 8px; align-items: flex-start; padding: 7px 10px; border-radius: 8px; font-size: 12px; line-height: 1.55; border: 1px solid; }
+.te-check .tc-id { font-weight: 700; flex-shrink: 0; font-size: 11px; padding: 0 5px; border-radius: 4px; margin-top: 1px; }
+.te-check.warn { background: rgba(255, 159, 10, .10); border-color: rgba(255, 159, 10, .45); }
+.te-check.warn .tc-id { color: #ffb02e; background: rgba(255, 159, 10, .18); }
+.te-check.info { background: rgba(10, 132, 255, .08); border-color: rgba(10, 132, 255, .35); }
+.te-check.info .tc-id { color: #4d9fff; background: rgba(10, 132, 255, .16); }

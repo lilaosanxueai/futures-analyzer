@@ -1237,6 +1237,84 @@ class TradeEvalIn(BaseModel):
     lots: float = 1
 
 
+# 高相关品种组（P001：同向持仓 = 隐形杠杆，须合并计算）
+CORR_GROUPS = {
+    "原油系化工": {"MA", "TA", "V", "SC", "PG", "FU", "BU", "EB", "EG", "LU", "NR", "PP", "L"},
+    "黑色系": {"RB", "HC", "I", "J", "JM", "SF", "SM"},
+    "贵金属": {"AU", "AG"},
+    "有色": {"CU", "AL", "ZN", "NI", "PB", "SN", "SS"},
+    "油脂油料": {"M", "Y", "P", "OI", "RM"},
+}
+
+# 地缘敏感品种（P004：方向可被外生事件一夜逆转）
+GEO_PREFIXES = {"MA", "TA", "SC", "PG", "FU", "BU", "LU", "NR", "V", "EB", "EG"}
+
+
+async def _eval_rule_checks(symbol: str, direction: str, stop_price: float, last: float) -> list[dict]:
+    """体系规则 P001-P004 的确定性预检（可计算部分），结果进 AI 上下文与前端徽章"""
+    checks: list[dict] = []
+    prefix = _variety_prefix(symbol)
+
+    # P001：相关品种组已有同向持仓 → 合并隐形杠杆
+    try:
+        group = next((g for g, members in CORR_GROUPS.items() if prefix in members), "")
+        if group:
+            same = [
+                t for t in _load_trades()
+                if t["status"] == "open" and t["direction"] == direction
+                and t["symbol"] != symbol
+                and _variety_prefix(t["symbol"]) in CORR_GROUPS[group]
+            ]
+            if same:
+                lst = "、".join(f"{t['symbol']} {t['lots']}手" for t in same)
+                checks.append({
+                    "rule": "P001", "level": "warn",
+                    "text": f"已持有同向 {lst}（同属{group}），与本计划构成加倍仓位——组合保证金须 ≤ 账户净值30%",
+                })
+    except Exception:
+        pass
+
+    # P003：左侧交易判定（做多但现价仍在20日线下方）
+    ma20 = low20 = None
+    try:
+        daily = [d for d in await get_daily(symbol) if d.get("close")]
+        closes = [d["close"] for d in daily]
+        if len(closes) >= 20:
+            ma20 = round(sum(closes[-20:]) / 20, 2)
+            low20 = round(min(d.get("low") or d["close"] for d in daily[-20:]), 2)
+    except Exception:
+        pass
+    if direction == "long" and ma20 and last and last < ma20:
+        checks.append({
+            "rule": "P003", "level": "warn",
+            "text": f"现价 {last} 仍在20日线 {ma20} 下方 → 属左侧做多：仓位上限降为正常一半，止损放前低（近20日低 {low20}）下方结构位",
+        })
+
+    # P002：止损设在扎堆位（整数关口附近 / 贴近近20日低点）
+    if stop_price > 0:
+        nearest_round = round(stop_price / 100) * 100
+        tol = max(10.0, stop_price * 0.004)
+        if abs(stop_price - nearest_round) <= tol:
+            checks.append({
+                "rule": "P002", "level": "warn",
+                "text": f"止损价 {stop_price} 贴近整数关口 {nearest_round:g}——重仓者止损扎堆区，最易被「最后一跌」扫掉；请改用逻辑止损（做多理由被证伪的价位）",
+            })
+        if low20 and abs(stop_price - low20) / low20 < 0.005:
+            checks.append({
+                "rule": "P002", "level": "info",
+                "text": f"止损价贴着近20日低点 {low20}——恰是扫损高发区，建议放到低点下方留出噪音余量",
+            })
+
+    # P004：地缘敏感品种跳空自检
+    if prefix in GEO_PREFIXES:
+        checks.append({
+            "rule": "P004", "level": "info",
+            "text": f"{prefix} 属地缘敏感品种：开仓前自答「若中东局势反向突变，仓位能否承受一个跳空？」不能则减仓到能承受",
+        })
+
+    return checks
+
+
 TRADE_EVAL_PROMPT = """你是严格的日内短线交易风险教练（国内期货，T+0 双向交易）。交易者提交了开仓计划，请基于参考数据做开仓前风险体检。
 
 【交易计划】
@@ -1246,6 +1324,9 @@ TRADE_EVAL_PROMPT = """你是严格的日内短线交易风险教练（国内期
 - 盈亏比 {rr}，手数 {lots}{risk_amt}
 - 止损幅度占日内已实现波幅 {stop_vs_range}%，占近5日平均日波幅 {stop_vs_avg}%
 - 参考位：今日最高 {day_high} / 最低 {day_low}，日内均价 {day_avg}，昨结 {prev_settle}
+
+【体系规则预检（程序已判定，评估必须逐条回应是否满足）】
+{rule_checks}
 
 【参考数据（实时）】
 {context}
@@ -1322,6 +1403,8 @@ async def trade_eval(body: TradeEvalIn):
 
     profile = _profile_context()
     position = _position_context()
+    rule_checks = await _eval_rule_checks(symbol, body.direction, stop_price, last)
+    rule_checks_text = "\n".join(f"- [{c['rule']}] {c['text']}" for c in rule_checks) or "- （未触发任何规则警示）"
     prompt = ((profile + "\n\n" if profile else "")
               + (position + "\n\n" if position else "")
               + TRADE_EVAL_PROMPT.format(
@@ -1333,6 +1416,7 @@ async def trade_eval(body: TradeEvalIn):
         stop_vs_range=stop_vs_range if stop_vs_range is not None else "--",
         stop_vs_avg=stop_vs_avg if stop_vs_avg is not None else "--",
         day_high=day_high, day_low=day_low, day_avg=day_avg, prev_settle=quote.get("prev_settle"),
+        rule_checks=rule_checks_text,
         context=context,
     ))
 
@@ -1357,6 +1441,7 @@ async def trade_eval(body: TradeEvalIn):
             "risk_amt": body.stop_points * mult * body.lots if mult else None,
             "reward_amt": body.target_points * mult * body.lots if mult else None,
             "multiplier": mult or None,
+            "checks": rule_checks,
         },
         "advice": advice,
     }
@@ -2584,7 +2669,11 @@ def _profile_context() -> str:
     if p.get("lessons"):
         lines.append("历史教训（注意避免重复）：")
         for les in p["lessons"][-5:]:
-            lines.append(f"  - {les[:80]}")
+            lines.append(f"  - {les[:120]}")
+    for r in p.get("rules", []):
+        lines.append(f"体系规则 {r.get('id','')}（必须遵守）：{r.get('rule','')}")
+        if r.get("reason"):
+            lines.append(f"  原因：{r['reason'][:80]}")
     if not lines:
         return ""
     return "\n【交易者画像（AI 记忆，分析时个性化适配）】\n" + "\n".join(lines)
