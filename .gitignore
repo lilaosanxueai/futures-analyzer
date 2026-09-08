@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 server.log
 trader_profile.json
+trades.json
