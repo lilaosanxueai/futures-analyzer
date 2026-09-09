@@ -607,7 +607,9 @@ async def set_ai_config(body: AiConfigIn):
 
 
 async def _build_market_context(symbol: Optional[str]) -> str:
-    """把已缓存的实时行情与选中合约近期日线拼成文字上下文"""
+    """把已缓存的实时行情与选中合约近期日线拼成文字上下文。
+    token 优化：自选行情压缩为单行摘要；日线只取 5 天（指标已概括趋势）；
+    要闻 5 条——分析质量主要取决于指标与结构，历史明细冗余。"""
     parts = []
     cached_quotes = [
         {"ts": ts, "q": q}
@@ -615,15 +617,33 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         if not q.get("error")
     ]
     if cached_quotes:
-        lines = []
-        for c in sorted(cached_quotes, key=lambda x: x["q"]["symbol"]):
-            q = c["q"]
-            pct = f"{q['change_pct']:+.2f}%" if q.get("change_pct") is not None else "--"
-            lines.append(
-                f"- {q['symbol']} {q.get('name', '')}：最新 {q['last']}，昨结 {q.get('prev_settle')}，"
-                f"涨跌 {pct}，成交量 {q.get('volume')}，持仓量 {q.get('position')}（行情时间 {q.get('time')}）"
-            )
-        parts.append("【当前已加载的实时行情】\n" + "\n".join(lines))
+        rows = sorted(cached_quotes, key=lambda x: x["q"]["symbol"])
+        if symbol:
+            # 选中品种单独一行详细，其余自选压缩为一行摘要（省 token）
+            sel = next((c for c in rows if c["q"]["symbol"] == symbol), None)
+            others = [c for c in rows if c["q"]["symbol"] != symbol]
+            lines = []
+            if sel:
+                q = sel["q"]
+                pct = f"{q['change_pct']:+.2f}%" if q.get("change_pct") is not None else "--"
+                lines.append(
+                    f"- {q['symbol']} {q.get('name', '')}：最新 {q['last']}，昨结 {q.get('prev_settle')}，"
+                    f"涨跌 {pct}，成交量 {q.get('volume')}，持仓量 {q.get('position')}（行情时间 {q.get('time')}）"
+                )
+            if others:
+                brief = "；".join(
+                    f"{c['q']['symbol']} {c['q']['last']}({c['q'].get('change_pct')}%)"
+                    for c in others
+                )
+                lines.append(f"- 其他自选：{brief}")
+            parts.append("【当前已加载的实时行情】\n" + "\n".join(lines))
+        else:
+            lines = [
+                f"- {c['q']['symbol']} {c['q'].get('name', '')}：最新 {c['q']['last']}，"
+                f"涨跌 {c['q'].get('change_pct')}%"
+                for c in rows
+            ]
+            parts.append("【当前已加载的实时行情】\n" + "\n".join(lines))
 
     if symbol:
         try:
@@ -634,9 +654,9 @@ async def _build_market_context(symbol: Optional[str]) -> str:
                 f"{d['date']} 开{_num(d.get('open'))} 高{_num(d.get('high'))} "
                 f"低{_num(d.get('low'))} 收{_num(d.get('close'))} "
                 f"量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
-                for d in daily[-10:]
+                for d in daily[-5:]
             ]
-            parts.append(f"【{symbol}（{name}）近 10 个交易日日线】\n" + "\n".join(lines))
+            parts.append(f"【{symbol}（{name}）近 5 个交易日日线】\n" + "\n".join(lines))
         except Exception:
             pass
 
@@ -686,7 +706,7 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         try:
             vnews = _news_cache.get("items") or []
             if vnews:
-                lines = [f"- [{it['time'][5:16]}] {'🇺🇸' if 'trump' in it['groups'] else '🌍'} {it['title'][:60]}" for it in vnews[:8]]
+                lines = [f"- [{it['time'][5:16]}] {'🇺🇸' if 'trump' in it['groups'] else '🌍'} {it['title'][:55]}" for it in vnews[:5]]
                 parts.append("【宏观要闻（特朗普发言/中东重大动向）】\n" + "\n".join(lines))
         except Exception:
             pass
@@ -1902,11 +1922,8 @@ async def discipline_check(body: DisciplineCheckIn):
                                  f"60分钟数据不可用：{type(e).__name__}，本次跳过共振验证")
 
     # ---- 第二阶段：AI 主观审查（反转确认 / 品种认知 / 冲动检测 / 决策评估）----
-    try:
-        context = await _build_market_context(symbol)
-    except Exception:
-        context = ""
-    # 实时盘面快照（盘口/日内分时结构/30 分钟节奏/现价），纪律审查同享实时数据
+    # token 优化：不再注入完整市场上下文（10 天 OHLC 明细/基本面框架等与纪律判定无关），
+    # 只用实时快照（现价/盘口/日内结构/30m 节奏/指标/宏观要闻）——与快照内容不重复
     try:
         rt = await _realtime_snapshot(symbol)
         rt_lines = [
@@ -1916,18 +1933,17 @@ async def discipline_check(body: DisciplineCheckIn):
             f"盘口：{rt['book']}",
             f"日内结构：{rt['intra'] or '数据不足'}",
             f"30分钟节奏（近12根）：{rt['m30'] or '数据不足'}",
+            f"日线指标：{rt['ind_txt']}",
+            f"宏观要闻（特朗普/中东）：{rt['news']}",
         ]
         rt_block = "\n".join(rt_lines)
     except Exception:
-        rt_block = ""
+        rt_block = "实时盘面不可用"
     sig_txt = "；".join(f"{s['name']}（{s.get('detail', '')}）" for s in ind_signals) or "无"
     today_pnl_txt = f"{stats['today_pnl']:+.2f}%"
     ai_prompt = f"""你是严格客观的期货交易纪律审查官。禁止迎合用户，只依据数据判定，证据不足即为 false。
 交易者只提交了纯客观计划参数（品种/方向/入场/止损/目标），无任何自评或理由陈述——
 你既要审查计划，也要**代为生成交易计划说明**（核心矛盾与关键价位）并**推断其情绪状态**。
-
-【市场上下文】
-{context}
 
 {rt_block}
 
@@ -2146,8 +2162,16 @@ async def discipline_holding_review(body: DisciplineDeleteIn):
         last = quote.get("last")
     except Exception:
         last = None
+    # token 优化：用轻量实时快照替代完整市场上下文（体检只需指标/日内/要闻，无需 OHLC 明细）
     try:
-        context = await _build_market_context(symbol)
+        rt = await _realtime_snapshot(symbol)
+        context = "\n".join([
+            f"【实时盘面（{rt['now']}）】现价 {rt['quote']['last']}",
+            f"日内结构：{rt['intra'] or '数据不足'}",
+            f"日线指标：{rt['ind_txt']}",
+            f"60分钟趋势：{rt['m60_dir']}",
+            f"宏观要闻（特朗普/中东）：{rt['news']}",
+        ])
     except Exception:
         context = ""
     ai0 = e.get("ai_review") or {}

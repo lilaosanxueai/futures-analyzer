@@ -2290,10 +2290,19 @@ $("searchDrop").addEventListener("click", (e) => {
 });
 
 /* ---------- 实时解读：最新行情 → AI 盘中快评（手动 + 可选自动 15 分钟） ---------- */
-const rtState = { loading: false, timer: null, sym: null };
+const rtState = { loading: false, timer: null, sym: null, lastAutoPrice: null };
 
 function rtTarget() {
   return state.selected || state.watchlist[0] || "RB0";
+}
+
+// token 优化：自动模式跳过条件——周末休市、或最新价与上次解读时完全一致（数据无变化）
+function rtAutoSkip() {
+  const day = new Date().getDay();
+  if (day === 0 || day === 6) return "周末休市";
+  const q = state.quotes[rtTarget()];
+  if (q && q.last != null && q.last === rtState.lastAutoPrice) return "价格未变";
+  return null;
 }
 
 async function loadRealtime(force = 0) {
@@ -2311,6 +2320,7 @@ async function loadRealtime(force = 0) {
   try {
     const d = await api(`/api/ai/realtime?symbol=${sym}${force ? "&force=1" : ""}`);
     if (rtState.sym !== sym) return;  // 已切换合约，丢弃过期结果
+    rtState.lastAutoPrice = d.last;   // 记录本次解读时的价格
     $("rtSym").textContent = `${d.symbol} ${d.name || ""} · ${d.last} · 生成于 ${d.generated_at}`;
     $("rtBox").dataset.loaded = "1";
     $("rtBox").innerHTML = `<div class="md">${renderMarkdown(d.analysis)}</div>`;
@@ -2324,14 +2334,21 @@ async function loadRealtime(force = 0) {
 
 $("btnRealtime").addEventListener("click", () => loadRealtime(1));
 
-// 自动模式：每 15 分钟按当前选中合约刷新
+// 自动模式：每 15 分钟按当前选中合约刷新（休市/价格未变时自动跳过，零消耗）
+function rtAutoTick() {
+  if (currentView() !== "work") return;  // 仅工作台可见时刷新
+  const skip = rtAutoSkip();
+  if (skip) {
+    $("rtSym").textContent = `自动解读待机（${skip}）`;
+    return;
+  }
+  loadRealtime(1);
+}
 $("rtAuto").addEventListener("change", (e) => {
   localStorage.setItem("fa_rt_auto", e.target.checked ? "1" : "");
   if (e.target.checked) {
     loadRealtime(1);
-    rtState.timer = setInterval(() => {
-      if (currentView() === "work") loadRealtime(1);  // 仅工作台可见时刷新，节省 token
-    }, 15 * 60 * 1000);
+    rtState.timer = setInterval(rtAutoTick, 15 * 60 * 1000);
   } else {
     clearInterval(rtState.timer);
     rtState.timer = null;
@@ -2339,9 +2356,7 @@ $("rtAuto").addEventListener("change", (e) => {
 });
 if (localStorage.getItem("fa_rt_auto")) {
   $("rtAuto").checked = true;
-  rtState.timer = setInterval(() => {
-    if (currentView() === "work") loadRealtime(1);
-  }, 15 * 60 * 1000);
+  rtState.timer = setInterval(rtAutoTick, 15 * 60 * 1000);
 }
 
 /* ---------- AI 对话 ---------- */
@@ -2546,11 +2561,19 @@ async function sendChat(text) {
   try {
     const ctrl = new AbortController();
     abortTimer = setTimeout(() => ctrl.abort(), 120000);
+    // token 优化：历史裁剪——最近 4 条完整，更早的消息每条截断到 200 字
+    const allMsgs = state.chat.filter((m) => m.role === "user" || m.role === "assistant");
+    const msgs = allMsgs.slice(-20).map((m, i, arr) => {
+      const keepFull = i >= arr.length - 4 || m.role === "user";
+      return m.content && m.content.length > 200 && !keepFull
+        ? { ...m, content: m.content.slice(0, 200) + "…（已截断）" }
+        : m;
+    });
     const data = await api("/api/ai/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        messages: state.chat.filter((m) => m.role === "user" || m.role === "assistant").slice(-20),
+        messages: msgs,
         symbol: state.selected,
       }),
       signal: ctrl.signal,
