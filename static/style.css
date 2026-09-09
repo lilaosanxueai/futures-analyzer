@@ -629,9 +629,9 @@ html[data-theme="aurora"] .btn.primary { color: #0b1020; }  /* 亮主色底配�
 
 /* ---------- 交易纪律页 ---------- */
 .disc-pane { overflow-y: auto; padding: 12px 14px; }
-.disc-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 16px; }
+.disc-grid { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 18px; }
 .disc-form, .disc-result { min-width: 0; }
-@media (max-width: 900px) { .disc-grid { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .disc-grid { grid-template-columns: 1fr; } }
 .disc-form h3, .disc-result h3 { margin: 0 0 10px; font-size: 13px; }
 .disc-selfs { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; font-size: 12px; }
 .chk { display: flex; align-items: center; gap: 6px; cursor: pointer; }

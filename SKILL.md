@@ -169,6 +169,7 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 3. 品种行内层 flex 加 `flex-wrap:wrap`、下拉加 `min-width:120px`——极窄时「现价/填入」换行而非重叠。
 4. 「运行开仓检查」按钮加 `margin-top:12px` 与说明文字拉开间距。
 5. Playwright 三宽度（1280/860/2000px）包围盒几何检测全部通过：无交叠、无横向滚动。
+6. 后续（0826a，应用户要求）：左列 340→420px 加宽、列距 16→18px、单列断点 900→980px。
 
 ## 国际品种全链路支持（v0825x）
 
