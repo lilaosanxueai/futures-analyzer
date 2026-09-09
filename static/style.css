@@ -841,6 +841,46 @@ body, .btn, .view-tab, .filter-chip, input, select, textarea {
   background: var(--panel-2);
 }
 
+/* ---------- 合约详情优化：盘口对峙 / 日内位置条 / 指标分组 ---------- */
+.book-duel {
+  display: flex; align-items: stretch; gap: 0;
+  margin: 8px 0 4px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.book-side {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 10px;
+}
+.book-side.bid { background: rgba(243, 78, 78, .08); }
+.book-side.ask { background: rgba(34, 197, 94, .08); }
+.book-side .book-price { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.book-side.bid .book-price { color: var(--up); }
+.book-side.ask .book-price { color: var(--down); }
+.book-side .book-label { font-size: 11px; color: var(--muted); }
+.book-mid {
+  display: flex; align-items: center; padding: 0 10px;
+  font-size: 11px; border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.range-bar-wrap {
+  display: flex; align-items: center; gap: 8px; margin: 6px 0 2px;
+}
+.range-bar {
+  flex: 1; position: relative; height: 6px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--down), var(--up)); opacity: .85;
+}
+.range-fill { height: 100%; border-radius: 3px; background: transparent; }
+.range-dot {
+  position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--text-strong); border: 2px solid var(--panel);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+}
+.ind-group { margin-bottom: 8px; }
+.ind-group-title {
+  font-size: 11px; color: var(--muted); margin: 4px 0;
+  padding-left: 6px; border-left: 3px solid var(--primary);
+}
+
 /* ---------- 对话历史面板 ---------- */
 .chat-hist { border-bottom: 1px solid var(--border); }
 .chat-hist.hidden { display: none; }

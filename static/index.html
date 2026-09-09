@@ -11,7 +11,7 @@
     if (t && t !== "dark") document.documentElement.setAttribute("data-theme", t);
   })();
 </script>
-<link rel="stylesheet" href="/static/style.css?v=0825u">
+<link rel="stylesheet" href="/static/style.css?v=0825v">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825u</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0825v</span>
     <div style="position:relative">
       <button id="btnTheme" class="btn ghost" title="切换皮肤">🎨</button>
       <div id="themePop" class="theme-pop hidden"></div>
@@ -80,7 +80,7 @@
             <span id="monitorStatus" class="muted small">启动中…</span>
           </div>
           <div id="monitorList" class="monitor-list">
-            <div class="muted small monitor-hint">重点监控：WTI 原油、布伦特原油、COMEX 黄金、美元指数。急涨急跌时此处提示并推送声音/横幅/标题提醒，AI 自动给出解读。</div>
+            <div class="muted small monitor-hint">24H 监控：WTI 原油、布伦特原油、COMEX 黄金、美元指数；交易时段监控：自选与持仓的国内品种。急涨急跌时此处提示并推送声音/横幅/标题提醒，AI 自动给出解读。</div>
           </div>
         </div>
         <div class="hint">量仓等完整数据见中间详情栏 · 每 5 秒刷新 · 不构成投资建议</div>
@@ -109,10 +109,8 @@
         <div id="imgPreviews" class="img-previews hidden"></div>
         <div class="chat-input-row" id="chatInputRow">
           <button id="btnAnalyze" class="btn accent" title="让 AI 结合实时行情分析当前选中合约">📊 分析当前合约</button>
-          <button id="btnAddImg" class="btn" title="添加图片（也可直接粘贴截图或拖拽到输入框）">📎 图片</button>
-          <input id="chatInput" placeholder="向 AI 提问…（可贴图：Ctrl+V 粘贴截图 / 📎 选择 / 拖拽）" autocomplete="off">
+          <input id="chatInput" placeholder="向 AI 提问…（可贴图：Ctrl+V 粘贴截图 / 拖拽图片）" autocomplete="off">
           <button id="btnSend" class="btn primary">发送</button>
-          <input id="imgFileInput" type="file" accept="image/*" multiple class="hidden-file">
         </div>
       </section>
 
@@ -368,6 +366,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0825u"></script>
+<script src="/static/app.js?v=0825v"></script>
 </body>
 </html>

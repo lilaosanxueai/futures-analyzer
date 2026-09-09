@@ -1395,14 +1395,16 @@ async def _check_symbol(sym: str, mult: float):
 
 
 async def monitor_loop():
-    """AI 盯盘：每 30 秒巡检四国际品种（WTI/布伦特/黄金/美元指数），
-    与 5/15 分钟前采样比较检测急涨急跌"""
+    """AI 盯盘双轨：
+    - 国际品种（WTI/布伦特/黄金/美元指数）：24 小时监控（采样对比 5 分钟急涨急跌）
+    - 国内品种（自选 + 持仓）：仅国内交易时段监控（1 分钟线检测）"""
     await asyncio.sleep(20)  # 等待预热与首轮行情
     hist: list[tuple[float, dict]] = []  # [(loop_ts, {sym: last})]
     while True:
         try:
             mon_cfg = (load_config().get("monitor") or DEFAULT_CONFIG["monitor"])
             if mon_cfg.get("enabled", True):
+                # 轨道 1：国际品种 24 小时
                 try:
                     items = await fetch_intl()
                 except Exception:
@@ -1413,6 +1415,19 @@ async def monitor_loop():
                     hist.append((now_ts, prices))
                     hist = hist[-40:]  # 保留 ~20 分钟采样
                     _check_intl(hist, mon_cfg.get("sensitivity", 1.0))
+                # 轨道 2：国内品种仅交易时段
+                if is_trading_time():
+                    symbols = set(_MONITOR["watch"])
+                    try:
+                        symbols |= {
+                            str(e["symbol"]).upper()
+                            for e in _load_discipline_log()
+                            if e.get("allowed") and e.get("status") == "open"
+                        }
+                    except Exception:
+                        pass
+                    for sym in sorted(symbols):
+                        await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
         except Exception:
             pass

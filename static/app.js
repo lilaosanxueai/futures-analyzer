@@ -432,21 +432,42 @@ function renderQuoteArea() {
   const cls = chgClass(q.change_pct);
   const sign = q.change_pct > 0 ? "+" : "";
   const name = state.names[sym] || "";
+  const dg2 = q.digits ?? 1;
+  // 日内区间位置条：现价位于（今开~最高 或 最低~最高）区间的百分比
+  let rangeBar = "";
+  if (q.high != null && q.low != null && q.high > q.low && q.last != null) {
+    const posPct = Math.max(0, Math.min(100, ((q.last - q.low) / (q.high - q.low)) * 100));
+    rangeBar = `
+      <div class="range-bar-wrap">
+        <span class="muted small">低 ${fmt(q.low, dg2)}</span>
+        <div class="range-bar"><div class="range-fill" style="width:${posPct.toFixed(0)}%"></div><div class="range-dot" style="left:${posPct.toFixed(0)}%"></div></div>
+        <span class="muted small">高 ${fmt(q.high, dg2)}</span>
+        <span class="small ${cls}" style="margin-left:6px">日内 ${posPct.toFixed(0)}% 位</span>
+      </div>`;
+  }
   box.innerHTML = `
     <div class="detail-top">
       <span class="detail-name">${sym}<span class="exch">${q.exchange || ""}${name ? " · " + name : ""}</span></span>
-      <span id="detailLast" class="detail-last ${cls}">${fmt(q.last, q.digits ?? 1)}</span>
-      <span class="detail-chg ${cls}">${sign}${fmt(q.change, q.digits ?? 1)}（${sign}${fmt(q.change_pct, 2)}%）</span>
+      <span id="detailLast" class="detail-last ${cls}">${fmt(q.last, dg2)}</span>
+      <span class="detail-chg ${cls}">${sign}${fmt(q.change, dg2)}（${sign}${fmt(q.change_pct, 2)}%）</span>
     </div>
+    ${rangeBar}
     <div class="detail-grid">
-      ${dg("今开", fmt(q.open, q.digits ?? 1))}
-      ${dg("最高", fmt(q.high, q.digits ?? 1))}
-      ${dg("最低", fmt(q.low, q.digits ?? 1))}
-      ${dg("昨结", fmt(q.prev_settle, q.digits ?? 1))}
-      ${dg(`买一${q.bid != null ? `（${fmt(q.bid_vol)}）` : ""}`, q.bid != null ? fmt(q.bid, q.digits ?? 1) : "--")}
-      ${dg(`卖一${q.ask != null ? `（${fmt(q.ask_vol)}）` : ""}`, q.ask != null ? fmt(q.ask, q.digits ?? 1) : "--")}
+      ${dg("今开", fmt(q.open, dg2))}
+      ${dg("昨结", fmt(q.prev_settle, dg2))}
       ${dg("成交量", fmt(q.volume))}
       ${dg("持仓量", fmt(q.position))}
+    </div>
+    <div class="book-duel">
+      <div class="book-side bid">
+        <span class="book-label">买一 ${q.bid_vol != null ? fmt(q.bid_vol) : "--"} 手</span>
+        <span class="book-price">${q.bid != null ? fmt(q.bid, dg2) : "--"}</span>
+      </div>
+      <div class="book-mid muted">盘口</div>
+      <div class="book-side ask">
+        <span class="book-price">${q.ask != null ? fmt(q.ask, dg2) : "--"}</span>
+        <span class="book-label">卖一 ${q.ask_vol != null ? fmt(q.ask_vol) : "--"} 手</span>
+      </div>
     </div>
     <div class="tick-wrap">
       <div class="spark-title">实时走势（本次会话）</div>
@@ -539,15 +560,20 @@ async function renderSignalArea() {
       ? d.signals.map((s) => `<span class="sig ${s.dir}" title="${s.detail}">${s.name}<span class="d">${s.detail}</span></span>`).join("")
       : `<span class="muted small">当前无明显技术信号</span>`;
     const fv = (x) => (x == null ? "--" : x);
+    const group = (title, items) => `
+      <div class="ind-group">
+        <div class="ind-group-title">${title}</div>
+        <div class="detail-grid">${items.map(([k, val]) => dg(k, fv(val))).join("")}</div>
+      </div>`;
     box.innerHTML = `
       <div class="sig-box">
         <div class="sig-title">技术信号（${d.date} 日线）</div>
         <div class="sig-chips">${chips}</div>
-        <div class="detail-grid" style="margin-top:10px">
-          ${dg("MA5", fv(v.ma5))}${dg("MA10", fv(v.ma10))}${dg("MA20", fv(v.ma20))}${dg("MA60", fv(v.ma60))}
-          ${dg("DIF", fv(v.dif))}${dg("DEA", fv(v.dea))}${dg("MACD柱", fv(v.macd_hist))}${dg("RSI6", fv(v.rsi6))}
-          ${dg("RSI12", fv(v.rsi12))}${dg("K", fv(v.k))}${dg("D", fv(v.d))}${dg("J", fv(v.j))}
-          ${dg("BOLL上轨", fv(v.boll_up))}${dg("BOLL中轨", fv(v.boll_mid))}${dg("BOLL下轨", fv(v.boll_low))}
+        <div style="margin-top:10px">
+          ${group("趋势 · 均线", [["MA5", v.ma5], ["MA10", v.ma10], ["MA20", v.ma20], ["MA60", v.ma60]])}
+          ${group("动能 · MACD / RSI", [["DIF", v.dif], ["DEA", v.dea], ["MACD柱", v.macd_hist], ["RSI6", v.rsi6], ["RSI12", v.rsi12]])}
+          ${group("超买超卖 · KDJ", [["K", v.k], ["D", v.d], ["J", v.j]])}
+          ${group("波动 · 布林带", [["上轨", v.boll_up], ["中轨", v.boll_mid], ["下轨", v.boll_low]])}
         </div>
       </div>`;
   } catch (e) {
@@ -2432,12 +2458,6 @@ function renderImgPreviews() {
     btn.addEventListener("click", () => removePendingImg(Number(btn.dataset.i)));
   });
 }
-
-$("btnAddImg").addEventListener("click", () => $("imgFileInput").click());
-$("imgFileInput").addEventListener("change", (e) => {
-  addImages(e.target.files);
-  e.target.value = "";  // 允许重复选择同一文件
-});
 
 // 全局粘贴截图：截图后在页面任意位置 Ctrl+V 即可附图；
 // 只有剪贴板含图片时才拦截，纯文本粘贴不受影响。
