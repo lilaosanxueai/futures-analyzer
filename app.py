@@ -217,19 +217,73 @@ def market_of(symbol: str) -> str:
     return "CFFEX" if _CFFEX_RE.match(symbol.upper()) else "CF"
 
 
-def is_trading_time(now: Optional[datetime] = None) -> bool:
-    """简化的国内期货交易时段判断（多数品种夜盘到 23:00，少数延至凌晨，此处不细分）"""
+# 国内期货夜盘收盘时间（分钟数，按品种前缀；夜盘统一 21:00 开始）。
+# 三档：23:00 收盘（多数品种）/ 01:00（金属类）/ 02:30（SC 原油、AU 黄金、AG 白银）。
+# 未列出的默认 23:00（若有夜盘）；None = 无夜盘。
+_NIGHT_CLOSE = {
+    "SC": 150, "AU": 150, "AG": 150,                     # 原油/黄金/白银 至 02:30
+    "CU": 60, "AL": 60, "ZN": 60, "PB": 60, "NI": 60,    # 金属 至 01:00
+    "SN": 60, "SS": 60, "BC": 60, "AO": 60,
+    "AP": None, "CJ": None, "JD": None, "LH": None, "PK": None,  # 无夜盘
+}
+
+
+def _night_close_min(prefix: str):
+    """该品种夜盘收盘（分钟数，可能跨午夜如 150=02:30）；无夜盘返回 None"""
+    if prefix in _NIGHT_CLOSE:
+        v = _NIGHT_CLOSE[prefix]
+        return v if v is not None else None
+    return 23 * 60  # 默认 23:00（有夜盘品种）
+
+
+def domestic_session_active(prefix: str, now: Optional[datetime] = None) -> bool:
+    """单品种国内交易时段判断：
+    - 日盘（周一至周五）：9:00-10:15 / 10:30-11:30 / 13:30-15:00
+    - 夜盘（周一至周五 21:00 起）：按品种 23:00 / 01:00 / 02:30 分档收盘，
+      凌晨时段属前一交易日夜盘（周六凌晨=周五夜盘延续）"""
     now = now or datetime.now()
-    if now.weekday() >= 5:
-        return False
-    t = now.time()
-    sessions = [
-        (dtime(9, 0), dtime(10, 15)),
-        (dtime(10, 30), dtime(11, 30)),
-        (dtime(13, 30), dtime(15, 0)),
-        (dtime(21, 0), dtime(23, 0)),
-    ]
-    return any(a <= t <= b for a, b in sessions)
+    wd, t = now.weekday(), now.time()
+    nm = t.hour * 60 + t.minute
+
+    # 日盘（周六日无）
+    if wd <= 4:
+        for a, b in ((dtime(9, 0), dtime(10, 15)), (dtime(10, 30), dtime(11, 30)), (dtime(13, 30), dtime(15, 0))):
+            a_m, b_m = a.hour * 60 + a.minute, b.hour * 60 + b.minute
+            if a_m <= nm < b_m:
+                return True
+
+    close = _night_close_min(prefix)
+    if close is None:
+        return False  # 无夜盘品种
+
+    night_start = 21 * 60
+    if close > night_start:
+        # 不跨午夜（23:00 收盘）：周一至周五 21:00-23:00
+        return wd <= 4 and night_start <= nm < close
+    # 跨午夜（01:00 / 02:30 收盘）：
+    #   21:00-24:00（周一开始的夜盘）或 0:00-收盘（前一交易日夜盘延续）
+    if wd <= 4 and nm >= night_start:
+        return True
+    # 凌晨段：周六=周五夜盘延续；周二至周五=前一交易日夜盘延续
+    return (nm < close) and (wd == 5 or 1 <= wd <= 4)
+
+
+def is_trading_time(now: Optional[datetime] = None) -> bool:
+    """国内期货总体交易时段（任一品种在交易，即夜盘最晚至 02:30）。
+    供 market_open 状态展示；盯盘的分品种时段用 domestic_session_active()。"""
+    now = now or datetime.now()
+    wd, t = now.weekday(), now.time()
+    nm = t.hour * 60 + t.minute
+    if wd <= 4:
+        for a, b in ((dtime(9, 0), dtime(10, 15)), (dtime(10, 30), dtime(11, 30)), (dtime(13, 30), dtime(15, 0))):
+            if a.hour * 60 + a.minute <= nm < b.hour * 60 + b.minute:
+                return True
+        if 21 * 60 <= nm:
+            return True
+    # 凌晨 0:00-02:30：周六=周五夜盘延续；周二至周五=前一交易日夜盘延续
+    if nm < 150 and (wd == 5 or 1 <= wd <= 4):
+        return True
+    return False
 
 
 def _fmt_time(raw) -> str:
@@ -1415,7 +1469,7 @@ async def monitor_loop():
                     hist.append((now_ts, prices))
                     hist = hist[-40:]  # 保留 ~20 分钟采样
                     _check_intl(hist, mon_cfg.get("sensitivity", 1.0))
-                # 轨道 2：国内品种仅交易时段
+                # 轨道 2：国内品种按各自交易时段（SC/AU/AG 夜盘至 02:30，金属至 01:00，多数至 23:00）
                 if is_trading_time():
                     symbols = set(_MONITOR["watch"])
                     try:
@@ -1427,7 +1481,8 @@ async def monitor_loop():
                     except Exception:
                         pass
                     for sym in sorted(symbols):
-                        await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
+                        if domestic_session_active(_variety_prefix(sym)):
+                            await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
         except Exception:
             pass
