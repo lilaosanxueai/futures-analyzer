@@ -517,6 +517,109 @@ async def indicators(symbol: str):
     return {"ok": True, **data}
 
 
+# ---------------------------------------------------------------- 资金情绪引擎（价量仓三要素）
+
+def fund_sentiment(symbol: str, daily: list) -> Optional[dict]:
+    """主力资金情绪分析：基于日线价/量/持仓三要素（持仓量=保证金占用，反映资金进出）。
+    返回 {score(-100~+100), bias(倾向标签), factors(因子列表), summary(一句话)}"""
+    rows = [r for r in daily[-60:] if r.get("close") and r.get("volume") is not None]
+    if len(rows) < 21:
+        return None
+    closes = [float(r["close"]) for r in rows]
+    vols = [float(r["volume"] or 0) for r in rows]
+    holds = [float(r["hold"]) for r in rows if r.get("hold") is not None]
+    factors = []
+    score = 0.0
+
+    # ① 近 5 日价量仓配合（经典八状态，权重最大）
+    win = rows[-5:]
+    price_chg = (closes[-1] / closes[-6] - 1) * 100 if closes[-6] else 0.0
+    hold_win = [float(r.get("hold") or 0) for r in win]
+    hold_chg = (hold_win[-1] - hold_win[0]) / hold_win[0] * 100 if hold_win and hold_win[0] else 0.0
+    rising = price_chg > 0
+    adding = hold_chg > 0
+    if adding:
+        score += 30 if rising else -30
+        factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 且增仓 {abs(hold_chg):.1f}%：{'多头主动进攻' if rising else '空头主动施压'}（资金{'流入' if rising else '做空'}意愿强）")
+    else:
+        score += 10 if rising else -10
+        factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 但减仓 {abs(hold_chg):.1f}%：{'空头止损推动' if rising else '多头止盈离场'}（趋势持续性存疑）")
+
+    # ② 20 日持仓趋势（中期资金流向）
+    if len(holds) >= 21:
+        h20 = (holds[-1] - holds[-21]) / holds[-21] * 100
+        if abs(h20) >= 2:
+            pts = min(20, abs(h20) * 2)
+            score += pts if h20 > 0 else -pts
+            factors.append(f"20 日持仓{'增' if h20 > 0 else '减'} {abs(h20):.1f}%：中期资金{'持续流入' if h20 > 0 else '逐步撤离'}")
+
+    # ③ 量能活跃度（5 日均量 / 60 日均量）
+    v5 = sum(vols[-5:]) / 5
+    v60 = sum(vols[-60:]) / 60
+    ratio = v5 / v60 if v60 else 1.0
+    if ratio >= 1.5:
+        factors.append(f"量能为 60 日均量的 {ratio:.1f} 倍：明显放量，资金关注度升温")
+    elif ratio <= 0.7:
+        score *= 0.7  # 缩市中信号可靠性下降，衰减评分
+        factors.append(f"量能仅为 60 日均量的 {ratio:.1f} 倍：缩量观望，信号可靠性打折")
+
+    # ④ 近 3 日持仓边际变化（最新资金转向）
+    if len(holds) >= 4:
+        d3 = (holds[-1] - holds[-4]) / holds[-4] * 100 if holds[-4] else 0.0
+        if abs(d3) >= 1:
+            score += 15 if d3 > 0 else -15
+            factors.append(f"近 3 日持仓{'增' if d3 > 0 else '减'} {abs(d3):.1f}%：短线资金{'转强' if d3 > 0 else '转弱'}")
+
+    score = max(-100, min(100, round(score)))
+    if score >= 40:
+        bias = "🔥 多头资金主导"
+    elif score >= 15:
+        bias = "📈 偏多"
+    elif score <= -40:
+        bias = "❄️ 空头资金主导"
+    elif score <= -15:
+        bias = "📉 偏空"
+    else:
+        bias = "⚖️ 资金分歧 / 中性"
+    summary = {
+        "🔥 多头资金主导": "增仓上行，主力资金积极做多",
+        "📈 偏多": "价仓配合偏多，可顺势关注",
+        "⚖️ 资金分歧 / 中性": "多空资金分歧或观望，方向待选择",
+        "📉 偏空": "价仓配合偏空，反弹宜谨慎",
+        "❄️ 空头资金主导": "增仓下行，主力资金积极做空",
+    }[bias]
+    return {
+        "symbol": symbol,
+        "score": score,
+        "bias": bias,
+        "factors": factors,
+        "summary": summary,
+    }
+
+
+def _fund_text(fs: dict) -> str:
+    """资金情绪转 AI 上下文文字"""
+    if not fs:
+        return ""
+    lines = [f"资金情绪评分 {fs['score']:+d}（{fs['bias']}）—— {fs['summary']}"]
+    lines += [f"- {f}" for f in fs["factors"]]
+    return "\n".join(lines)
+
+
+@app.get("/api/fund/{symbol}")
+async def fund_api(symbol: str):
+    """主力资金情绪：价量仓三要素分析"""
+    symbol = symbol.upper()
+    try:
+        daily = await get_daily(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"日线数据获取失败：{e}")
+    fs = fund_sentiment(symbol, daily)
+    if not fs:
+        raise HTTPException(status_code=400, detail="日线数据不足，无法分析资金情绪")
+    return {"ok": True, **fs}
+
+
 KLINE_PERIODS = {"day": None, "60m": "60", "30m": "30", "15m": "15", "5m": "5", "1m": "1"}
 
 
@@ -756,6 +859,14 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         except Exception:
             pass
 
+        # 主力资金情绪（价量仓三要素）
+        try:
+            fs_txt = _fund_text(fund_sentiment(symbol, await get_daily(symbol)))
+            if fs_txt:
+                parts.append(f"【{symbol} 主力资金情绪】\n{fs_txt}")
+        except Exception:
+            pass
+
         # 消息面（仅宏观要闻：特朗普发言 + 中东重大动向，白名单过滤）
         try:
             vnews = _news_cache.get("items") or []
@@ -934,6 +1045,13 @@ async def ai_chat(body: ChatIn):
 
     logger.info(f"[ai-chat] 完成：耗时 {_time.time() - t0:.0f}s，共 {len(full_reply)} 字"
                 + (f"（续写 {truncated_rounds} 轮）" if truncated_rounds else ""))
+    # 对话自动记录到飞书（品种+时间+问答；异步执行不阻塞响应，失败静默）
+    if cfg.get("feishu", {}).get("auto_chat_log", True) and body.messages:
+        last_q = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
+        if last_q.strip():
+            asyncio.create_task(
+                _feishu_log_chat_round(body.symbol, last_q.strip(), full_reply)
+            )
     return {"ok": True, "reply": full_reply}
 
 
@@ -1027,6 +1145,13 @@ async def _realtime_snapshot(symbol: str) -> dict:
                    f"BOLL {v.get('boll_low')}~{v.get('boll_up')}（中轨 {v.get('boll_mid')}）；信号：{sigs}")
     except Exception:
         ind_txt = "指标不可用"
+    try:
+        fs = fund_sentiment(symbol, await get_daily(symbol))
+        fs_txt = _fund_text(fs) if fs else ""
+    except Exception:
+        fs_txt = ""
+    if fs_txt:
+        ind_txt += "\n主力资金情绪：" + fs_txt
     try:
         vnews = (_news_cache.get("items") or [])[:5]
         news_txt = "；".join(it["title"][:40] for it in vnews) or "无特朗普/中东相关要闻"
@@ -2542,6 +2667,59 @@ class ChatExportIn(BaseModel):
     title: str = "AI 对话记录"
 
 
+async def _feishu_chat_doc_id():
+    """确保《AI 对话记录》文档存在并返回 doc_id；失败返回 None（不抛异常）"""
+    import logging
+    cfg = load_config()
+    doc_id = (cfg.get("feishu") or {}).get("chat_doc_id") or ""
+    if doc_id:
+        return doc_id
+    try:
+        token = await _feishu_get_token()
+        async with httpx.AsyncClient(timeout=20) as _client:
+            r = await _client.post(
+                f"{FEISHU_BASE}/docx/v1/documents",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"title": "AI 对话记录"},
+            )
+        data = r.json()
+        logging.getLogger("uvicorn.error").info(
+            f"[chat-export] 创建文档：code={data.get('code')} msg={data.get('msg')}")
+        if data.get("code") == 0 and data.get("data", {}).get("document"):
+            doc_id = data["data"]["document"]["document_id"]
+            cfg.setdefault("feishu", {})["chat_doc_id"] = doc_id
+            save_config(cfg)
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[chat-export] 创建文档异常：{type(e).__name__} {e}")
+    if not doc_id:
+        doc_id = await _feishu_ensure_doc()  # 兜底：追加到心得文档
+    return doc_id or None
+
+
+async def _feishu_log_chat_round(symbol, question: str, answer: str):
+    """每轮 AI 对话自动追加到飞书文档（品种+时间+问答）；失败静默不影响对话"""
+    import logging
+    try:
+        doc_id = await _feishu_chat_doc_id()
+        if not doc_id:
+            return
+        name = ""
+        if symbol:
+            try:
+                name = (await get_directory()).get(symbol, {}).get("name", "")
+            except Exception:
+                pass
+        head = f"【{datetime.now().strftime('%Y-%m-%d %H:%M')}】{symbol or '未关联品种'}{('（' + name + '）') if name else ''}"
+        text = f"{head}\n【问】{question[:500]}\n【AI 答】{answer[:1500]}\n"
+        blocks = [
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": text[i:i + 900], "text_element_style": {}}}], "style": {}}}
+            for i in range(0, len(text), 900)
+        ]
+        await _feishu_append(doc_id, blocks)
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[chat-log] 自动记录失败：{type(e).__name__} {e}")
+
+
 @app.post("/api/chat-export")
 async def chat_export(body: ChatExportIn):
     """将 AI 对话历史导出追加到飞书云文档《AI 对话记录》（上游 38d03d2 整合）"""
@@ -2553,30 +2731,9 @@ async def chat_export(body: ChatExportIn):
     if not text:
         raise HTTPException(status_code=400, detail="对话内容为空")
 
-    doc_id = fs.get("chat_doc_id") or ""
+    doc_id = await _feishu_chat_doc_id()
     if not doc_id:
-        import logging
-        token = await _feishu_get_token()
-        try:
-            async with httpx.AsyncClient(timeout=20) as _client:
-                r = await _client.post(
-                    f"{FEISHU_BASE}/docx/v1/documents",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"title": body.title},
-                )
-            data = r.json()
-            logging.getLogger("uvicorn.error").info(
-                f"[chat-export] 创建文档：code={data.get('code')} msg={data.get('msg')}")
-            if data.get("code") == 0 and data.get("data", {}).get("document"):
-                doc_id = data["data"]["document"]["document_id"]
-                cfg.setdefault("feishu", {})["chat_doc_id"] = doc_id
-                save_config(cfg)
-        except Exception as e:
-            import logging
-            logging.getLogger("uvicorn.error").info(f"[chat-export] 创建文档异常：{type(e).__name__} {e}")
-    if not doc_id:
-        # 创建失败兜底：追加到心得文档
-        doc_id = await _feishu_ensure_doc()
+        raise HTTPException(status_code=502, detail="创建对话文档失败，请检查飞书配置")
 
     blocks = [
         {"block_type": 2, "text": {"elements": [{"text_run": {"content": text[i:i + 900], "text_element_style": {}}}], "style": {}}}

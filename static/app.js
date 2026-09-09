@@ -566,6 +566,7 @@ async function renderSignalArea() {
         <div class="detail-grid">${items.map(([k, val]) => dg(k, fv(val))).join("")}</div>
       </div>`;
     box.innerHTML = `
+      <div id="fundPanel"></div>
       <div class="sig-box">
         <div class="sig-title">技术信号（${d.date} 日线）</div>
         <div class="sig-chips">${chips}</div>
@@ -576,8 +577,34 @@ async function renderSignalArea() {
           ${group("波动 · 布林带", [["上轨", v.boll_up], ["中轨", v.boll_mid], ["下轨", v.boll_low]])}
         </div>
       </div>`;
+    loadFundPanel(sym);  // 骨架稳定后再异步加载资金情绪
   } catch (e) {
     box.innerHTML = `<div class="sig-box"><div class="sig-title">技术信号与指标</div><span class="muted small">加载失败：${e.message}</span></div>`;
+  }
+}
+
+/* 资金情绪面板：价量仓三要素 → 评分条 + 因子列表 */
+async function loadFundPanel(sym) {
+  const el = $("fundPanel");
+  if (!el) return;
+  el.innerHTML = `<div class="sig-box"><div class="sig-title">主力资金情绪</div><span class="muted small">分析中…</span></div>`;
+  try {
+    const fs = await api(`/api/fund/${sym}`);
+    const pctPos = ((fs.score + 100) / 2).toFixed(0);  // -100~100 → 0~100%
+    const factors = (fs.factors || []).map((f) => `<li>${esc(f)}</li>`).join("");
+    el.innerHTML = `<div class="sig-box fund-panel">
+      <div class="sig-title">主力资金情绪（价量仓三要素）</div>
+      <div class="fund-score-row">
+        <span class="fund-bias">${esc(fs.bias)}</span>
+        <span class="fund-score-num ${fs.score > 0 ? "up" : fs.score < 0 ? "down" : ""}">${fs.score > 0 ? "+" : ""}${fs.score}</span>
+      </div>
+      <div class="fund-gauge"><div class="fund-gauge-dot" style="left:${pctPos}%"></div></div>
+      <div class="fund-gauge-labels muted small"><span>空头主导 -100</span><span>0</span><span>+100 多头主导</span></div>
+      <ul class="fund-factors">${factors}</ul>
+      <div class="muted small">💡 ${esc(fs.summary)}</div>
+    </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="sig-box"><div class="sig-title">主力资金情绪</div><span class="muted small">资金情绪分析不可用：${e.message}</span></div>`;
   }
 }
 

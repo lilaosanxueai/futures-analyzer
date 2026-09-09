@@ -881,6 +881,28 @@ body, .btn, .view-tab, .filter-chip, input, select, textarea {
   padding-left: 6px; border-left: 3px solid var(--primary);
 }
 
+/* ---------- 资金情绪面板 ---------- */
+.fund-panel { margin-bottom: 12px; }
+.fund-score-row {
+  display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0 4px;
+}
+.fund-bias { font-size: 15px; font-weight: 700; color: var(--text-strong); }
+.fund-score-num { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.fund-score-num.up { color: var(--up); }
+.fund-score-num.down { color: var(--down); }
+.fund-gauge {
+  position: relative; height: 8px; border-radius: 4px; margin: 8px 0 2px;
+  background: linear-gradient(90deg, var(--down), var(--panel-2), var(--up));
+}
+.fund-gauge-dot {
+  position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--text-strong); border: 2px solid var(--panel);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+}
+.fund-gauge-labels { display: flex; justify-content: space-between; margin-bottom: 6px; }
+.fund-factors { margin: 6px 0; padding-left: 18px; font-size: 12px; line-height: 1.8; color: var(--text); }
+
 /* ---------- 对话历史面板 ---------- */
 .chat-hist { border-bottom: 1px solid var(--border); }
 .chat-hist.hidden { display: none; }
