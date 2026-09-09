@@ -682,26 +682,12 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         except Exception:
             pass
 
-        # 消息面（三层：品种产业/供需深研 + 金属行情快讯 + 全球要闻流）
+        # 消息面（仅宏观要闻：特朗普发言 + 中东重大动向，白名单过滤）
         try:
-            deep = await _variety_news_deep(symbol)
-            if deep:
-                lines = [f"- [{it['time'][5:16]}] {it['title']}（{it['source']}）" for it in deep]
-                parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻）】\n" + "\n".join(lines))
-        except Exception:
-            pass
-        try:
-            shm = await _shmet_news(symbol)
-            if shm:
-                lines = [f"- [{it['time']}] {it['title']}" for it in shm]
-                parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
-        except Exception:
-            pass
-        try:
-            vnews = _variety_news(symbol)
+            vnews = _news_cache.get("items") or []
             if vnews:
-                lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
-                parts.append(f"【{symbol} 全球宏观要闻（快讯流）】\n" + "\n".join(lines))
+                lines = [f"- [{it['time'][5:16]}] {'🇺🇸' if 'trump' in it['groups'] else '🌍'} {it['title'][:60]}" for it in vnews[:8]]
+                parts.append("【宏观要闻（特朗普发言/中东重大动向）】\n" + "\n".join(lines))
         except Exception:
             pass
 
@@ -968,8 +954,8 @@ async def _realtime_snapshot(symbol: str) -> dict:
     except Exception:
         ind_txt = "指标不可用"
     try:
-        vnews = _variety_news(symbol, limit=5)
-        news_txt = "；".join(it["title"][:40] for it in vnews) or "无相关要闻"
+        vnews = (_news_cache.get("items") or [])[:5]
+        news_txt = "；".join(it["title"][:40] for it in vnews) or "无特朗普/中东相关要闻"
     except Exception:
         news_txt = "无"
     holds = [
@@ -1097,91 +1083,96 @@ def _variety_prefix(symbol: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-# ---------------------------------------------------------------- 三层品种消息面引擎（上游 dfd545d 整合）
+# ---------------------------------------------------------------- 国际盘监控（WTI/布伦特/黄金/美元指数）
 
-# 品种搜索词（东财品种新闻 / SHMET 快讯过滤用）
-VARIETY_SEARCH = {
-    "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "JM": "焦煤", "J": "焦炭",
-    "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "NI": "沪镍", "SN": "沪锡", "SS": "不锈钢",
-    "AU": "黄金", "AG": "白银", "SC": "原油", "FU": "燃料油", "LU": "低硫燃料油", "NR": "20号胶", "RU": "橡胶",
-    "M": "豆粕", "RM": "菜粕", "Y": "豆油", "P": "棕榈油", "OI": "菜油", "A": "豆一", "B": "豆二",
-    "TA": "PTA", "MA": "甲醇", "EG": "乙二醇", "EB": "苯乙烯", "PP": "聚丙烯", "L": "塑料", "V": "PVC", "PG": "液化气",
-    "FG": "玻璃", "SA": "纯碱", "UR": "尿素", "C": "玉米", "CS": "玉米淀粉", "CF": "棉花", "SR": "白糖",
-    "JD": "鸡蛋", "LH": "生猪", "SP": "纸浆", "LC": "碳酸锂", "SI": "工业硅", "EC": "集运",
-    "IF": "沪深300", "IH": "上证50", "IC": "中证500", "IM": "中证1000", "T": "国债",
-}
-
-# SHMET 金属快讯对非金属品种的通用宏观过滤词
-_MACRO_KW = ["黄金", "金价", "原油", "油价", "美元", "美联储", "央行", "降息", "加息", "通胀",
-             "地缘", "伊朗", "中东", "霍尔木兹", "智利", "秘鲁", "新能源", "光伏", "环保", "关税", "贸易"]
-
-# 缓存：品种深研（东财，10 分钟）+ SHMET 快讯（90 秒）
-_deep_news_cache: dict[str, tuple[float, list]] = {}
-_shmet_cache: dict = {"ts": 0.0, "items": []}
-DEEP_TTL = 600.0
-SHMET_TTL = 90.0
-
-# 金属/能源品种集合（SHMET 快讯直接全量注入）
-_SHMET_FULL = {"CU", "AL", "ZN", "PB", "NI", "SN", "SS", "AU", "AG", "SC", "FU", "LU", "BR", "AO", "LC", "SI"}
+# 新浪 hq 实时接口（字面量 URL，固定四品种，一次请求全部返回）
+_INTL_HQ_URL = "https://hq.sinajs.cn/list=hf_CL,hf_OIL,hf_GC,DINIW"
+_INTL_DEFS = [
+    {"symbol": "WTI", "name": "WTI 原油", "threshold": 1.0},
+    {"symbol": "BRENT", "name": "布伦特原油", "threshold": 1.0},
+    {"symbol": "GOLD", "name": "COMEX 黄金", "threshold": 0.6},
+    {"symbol": "DXY", "name": "美元指数", "threshold": 0.3},
+]
+_intl_cache: dict = {"ts": 0.0, "items": [], "by_sym": {}}
+INTL_TTL = 30.0
 
 
-def _variety_search_word(symbol: str) -> str:
-    p = _variety_prefix(symbol)
-    return VARIETY_SEARCH.get(p, p)
-
-
-async def _variety_news_deep(symbol: str, limit: int = 6) -> list[dict]:
-    """东财品种聚焦新闻：产业/供需/库存深度报道（期货日报等），10 分钟缓存"""
-    word = _variety_search_word(symbol)
-    loop_now = asyncio.get_event_loop().time()
-    cached = _deep_news_cache.get(word)
-    if cached and loop_now - cached[0] < DEEP_TTL:
-        return cached[1][:limit]
-    try:
-        df = await call_ak(ak.stock_news_em, symbol=word)
-        items = [
-            {
-                "time": str(r.get("发布时间", ""))[:16],
-                "title": str(r.get("新闻标题", ""))[:70],
-                "summary": str(r.get("新闻内容", ""))[:150],
-                "source": str(r.get("文章来源", "")),
-                "link": str(r.get("新闻链接", "")),
-            }
-            for r in df.to_dict("records")
-            if not _is_stock_noise(str(r.get("新闻标题", "")) + " " + str(r.get("新闻内容", ""))[:80])
-        ]
-        _deep_news_cache[word] = (loop_now, items)
-        return items[:limit]
-    except Exception as e:
-        import logging
-        logging.getLogger("uvicorn.error").info(f"[deep-news] {word} 失败：{e}")
-        return []
-
-
-async def _shmet_news(symbol: str = "", limit: int = 6) -> list[dict]:
-    """SHMET 上海有色网金属快讯（秒级，覆盖金属+宏观地缘），90 秒缓存"""
-    loop_now = asyncio.get_event_loop().time()
-    if loop_now - _shmet_cache["ts"] > SHMET_TTL:
+def _parse_hf(fields: list) -> dict:
+    """新浪 hf_ 外盘格式：[0]最新 [2]买 [3]卖 [4]高 [5]低 [6]时间 [7]昨收 [8]开 [12]日期 [13]名称"""
+    def f(i):
         try:
-            df = await call_ak(ak.futures_news_shmet)
-            _shmet_cache["items"] = [
-                {"time": str(r.get("发布时间", ""))[5:16], "title": str(r.get("内容", ""))[:90]}
-                for r in df.to_dict("records")
-            ]
-            _shmet_cache["ts"] = loop_now
-        except Exception as e:
-            import logging
-            logging.getLogger("uvicorn.error").info(f"[shmet] 失败：{e}")
-            return []
-    items = _shmet_cache["items"]
-    if symbol:
-        p = _variety_prefix(symbol)
-        if p in _SHMET_FULL:
-            return items[:limit]  # 金属/能源品种：快讯直接全给
-        # 其他品种：过滤出宏观/共性因子相关条目
-        hit = [it for it in items if any(k in it["title"] for k in _MACRO_KW)]
-        return hit[:limit]
-    return items[:limit]
+            return float(fields[i])
+        except (ValueError, IndexError):
+            return None
+    last, prev = f(0), f(7)
+    chg = round(last - prev, 3) if last is not None and prev else None
+    pct = round(chg / prev * 100, 2) if chg is not None and prev else None
+    return {
+        "last": last, "open": f(8), "high": f(4), "low": f(5),
+        "prev_settle": prev, "chg": chg, "chg_pct": pct,
+        "time": fields[6] if len(fields) > 6 else "",
+        "date": fields[12] if len(fields) > 12 else "",
+    }
+
+
+def _parse_diniw(fields: list) -> dict:
+    """新浪 DINIW 美元指数格式：[0]时间 [1]最新 [3]昨收 [5]开 [6]高 [7]低 [9]名称 [10]日期"""
+    def f(i):
+        try:
+            return float(fields[i])
+        except (ValueError, IndexError):
+            return None
+    last, prev = f(1), f(3)
+    chg = round(last - prev, 3) if last is not None and prev else None
+    pct = round(chg / prev * 100, 2) if chg is not None and prev else None
+    return {
+        "last": last, "open": f(5), "high": f(6), "low": f(7),
+        "prev_settle": prev, "chg": chg, "chg_pct": pct,
+        "time": fields[0] if fields else "",
+        "date": fields[10] if len(fields) > 10 else "",
+    }
+
+
+async def fetch_intl(force: bool = False) -> list[dict]:
+    """四国际品种实时快照（新浪 hq 单请求，30 秒缓存）"""
+    loop_now = asyncio.get_event_loop().time()
+    if not force and _intl_cache["items"] and loop_now - _intl_cache["ts"] < INTL_TTL:
+        return _intl_cache["items"]
+    import requests
+    r = await asyncio.to_thread(
+        requests.get, _INTL_HQ_URL,
+        headers={"Referer": "https://finance.sina.com.cn"}, timeout=10,
+    )
+    r.encoding = "gbk"
+    by_code = {}
+    for line in r.text.strip().splitlines():
+        if '="' not in line:
+            continue
+        code = line.split("hq_str_")[1].split("=")[0].strip()
+        raw = line.split('="', 1)[1].rstrip('";')
+        by_code[code] = [x for x in raw.split(",")]
+    code_of = {0: "hf_CL", 1: "hf_OIL", 2: "hf_GC", 3: "DINIW"}
+    rows = []
+    for i, d in enumerate(_INTL_DEFS):
+        row = {**d}
+        raw_fields = by_code.get(code_of[i])
+        if raw_fields:
+            parsed = _parse_diniw(raw_fields) if d["symbol"] == "DXY" else _parse_hf(raw_fields)
+            row.update(parsed)
+        else:
+            row.update({"last": None, "chg_pct": None})
+        rows.append(row)
+    _intl_cache["items"] = rows
+    _intl_cache["by_sym"] = {r["symbol"]: r for r in rows}
+    _intl_cache["ts"] = loop_now
+    return rows
+
+
+@app.get("/api/intl")
+async def intl(force: int = 0):
+    """国际盘监控：WTI / 布伦特 / 国际黄金 / 美元指数 实时快照"""
+    items = await fetch_intl(force=bool(force))
+    return {"ok": True, "items": items}
 
 
 def _variety_profile(symbol: str) -> str:
@@ -1189,19 +1180,6 @@ def _variety_profile(symbol: str) -> str:
     return VARIETY_PROFILE.get(p, "")
 
 
-def _variety_news(symbol: str, limit: int = 8) -> list[dict]:
-    """从要闻缓存中过滤与品种相关的条目"""
-    kws = VARIETY_NEWS_KW.get(_variety_prefix(symbol))
-    if not kws or not _news_cache.get("items"):
-        return []
-    hits = []
-    for it in _news_cache["items"]:
-        text = (it.get("title", "") + " " + it.get("summary", "")[:100]).lower()
-        if any(k.lower() in text for k in kws):
-            hits.append(it)
-        if len(hits) >= limit:
-            break
-    return hits
 
 
 async def _intraday_summary(symbol: str) -> str:
@@ -1316,14 +1294,19 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
 
 async def _ai_comment_for_event(event: dict):
     """异动事件的 AI 一句话解读（异步补充到事件上）"""
-    directory = await get_directory()
-    name = directory.get(event["symbol"], {}).get("name", "")
+    name = event.get("name") or ""
+    if not name:
+        try:
+            directory = await get_directory()
+            name = directory.get(event["symbol"], {}).get("name", "")
+        except Exception:
+            name = ""
     pos = event.get("pos_chg")
     pos_line = f"，近 15 分钟持仓{'增加' if pos > 0 else '减少'} {abs(pos):.0f} 手" if pos else ""
     prompt = (
         f"你是期货盯盘助手。刚检测到异动：{event['symbol']}（{name}）最近 5 分钟"
         f"{'急涨' if event['dir'] == 'up' else '跳水'} {event['chg5']:+.2f}%，现价 {event['price']}；"
-        f"15 分钟 {event['chg15']:+.2f}%，日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%{pos_line}。"
+        f"日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%{pos_line}。"
         f"请用一两句话点出可能的驱动因素和需要关注的价位/风险，口语化，80 字以内，不构成投资建议。"
     )
     try:
@@ -1332,11 +1315,12 @@ async def _ai_comment_for_event(event: dict):
     except Exception:
         event["ai"] = "（AI 解读不可用：未配置 Key 或调用失败）"
     # 推送飞书群（配置了 webhook 时；上游整合）
+    c15 = event.get("chg15")
     await _feishu_push(
         f"🤖 盯盘异动\n"
         f"{event['symbol']}（{name}）5分钟{'急涨' if event['dir'] == 'up' else '跳水'} {event['chg5']:+.2f}%，"
         f"现价 {event['price']}\n"
-        f"15分钟 {event['chg15']:+.2f}% | 日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%{pos_line}\n\n"
+        f"日内 {event['day_chg'] if event['day_chg'] is not None else '--'}%{pos_line}\n\n"
         f"💡 {str(event['ai'])[:600]}"
     )
 
@@ -1391,28 +1375,70 @@ async def _check_symbol(sym: str, mult: float):
 
 
 async def monitor_loop():
-    """AI 盯盘：每 30 秒巡检自选 + 重点品种（原油/黄金等），检测 5 分钟急涨急跌"""
+    """AI 盯盘：每 30 秒巡检四国际品种（WTI/布伦特/黄金/美元指数），
+    与 5/15 分钟前采样比较检测急涨急跌"""
     await asyncio.sleep(20)  # 等待预热与首轮行情
+    hist: list[tuple[float, dict]] = []  # [(loop_ts, {sym: last})]
     while True:
         try:
             mon_cfg = (load_config().get("monitor") or DEFAULT_CONFIG["monitor"])
             if mon_cfg.get("enabled", True):
-                symbols = {s.upper() for s in (mon_cfg.get("focus") or [])} | set(_MONITOR["watch"])
-                # 持仓品种并入监控（即使移出自选也盯住风险）
                 try:
-                    symbols |= {
-                        str(e["symbol"]).upper()
-                        for e in _load_discipline_log()
-                        if e.get("allowed") and e.get("status") == "open"
-                    }
+                    items = await fetch_intl()
                 except Exception:
-                    pass
-                for sym in sorted(symbols):
-                    await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
+                    items = _intl_cache.get("items") or []
+                now_ts = asyncio.get_event_loop().time()
+                prices = {it["symbol"]: it.get("last") for it in items if it.get("last") is not None}
+                if prices:
+                    hist.append((now_ts, prices))
+                    hist = hist[-40:]  # 保留 ~20 分钟采样
+                    _check_intl(hist, mon_cfg.get("sensitivity", 1.0))
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
         except Exception:
             pass
         await asyncio.sleep(MONITOR_INTERVAL)
+
+
+def _check_intl(hist: list, sensitivity: float):
+    """用历史采样检测四国际品种 5 分钟急涨急跌（阈值 = 品种基准 × 灵敏度）"""
+    now_ts = hist[-1][0]
+    cur = hist[-1][1]
+    ref5 = next((p for t, p in reversed(hist) if now_ts - t >= 280), None)
+    if not ref5 or not cur:
+        return
+    for d in _INTL_DEFS:
+        sym = d["symbol"]
+        last, base = cur.get(sym), ref5.get(sym)
+        if not last or not base:
+            continue
+        chg5 = (last / base - 1) * 100
+        threshold = d["threshold"] * sensitivity
+        if abs(chg5) < threshold:
+            continue
+        direction = "up" if chg5 > 0 else "down"
+        if now_ts - _MONITOR["cooldown"].get((sym, direction), 0) < MONITOR_COOLDOWN:
+            continue
+        _MONITOR["cooldown"][(sym, direction)] = now_ts
+        snap = _intl_cache["by_sym"].get(sym, {})
+        event = {
+            "id": f"{sym}-{direction}-{int(now_ts)}",
+            "ts": int(datetime.now().timestamp() * 1000),
+            "symbol": sym,
+            "name": d["name"],
+            "dir": direction,
+            "chg5": round(chg5, 2),
+            "chg15": None,
+            "day_chg": snap.get("chg_pct"),
+            "price": last,
+            "from": base,
+            "pos_chg": None,
+            "threshold": round(threshold, 2),
+            "ai": None,
+        }
+        _MONITOR["events"].append(event)
+        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
+            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
+        asyncio.create_task(_ai_comment_for_event(event))
 
 
 @app.get("/api/monitor/events")
@@ -2543,134 +2569,36 @@ async def feishu_push_test():
     return {"ok": True}
 
 
-# ---------------------------------------------------------------- 主题要闻
+# ---------------------------------------------------------------- 宏观要闻监控（仅特朗普发言 + 中东重大动向）
 
-# 多主题关键词：每条快讯会标记命中的全部主题
-NEWS_TOPICS = {
-    # 原油/黄金及宏观驱动
-    "oilgold": [
-        "原油", "油价", "wti", "布伦特", "brent", "opec", "欧佩克", "石油", "炼厂", "燃料油", "燃油",
-        "黄金", "金价", "期金", "白银", "银价", "贵金属", "comex",
-        "美联储", "fed", "加息", "降息", "利率决议", "非农", "cpi", "通胀", "美元指数",
-        "避险", "关税",
+# 两组白名单关键词：只监控对市场影响巨大的事件，其余快讯一律丢弃
+_NEWS_GROUPS = {
+    "trump": [
+        "特朗普", "trump", "白宫", "美国国务院", "五角大楼", "美国财政部",
+        "贝森特", "关税", "对等关税",
     ],
-    # 美伊冲突：核心方言论与动作
-    "usiran": [
-        # 美方
-        "特朗普", "白宫", "美国国务院", "五角大楼", "美国国防部", "美军", "美国中央司令部",
-        "美国官员", "华盛顿号",
-        # 伊朗方
-        "伊朗", "德黑兰", "哈梅内伊", "伊朗总统", "伊朗外长", "革命卫队", "伊朗核",
-        "铀浓缩", "国际原子能机构", "iaea",
-        # 冲突动作与关联方（保持聚焦，泛词如"地缘/俄乌"归 oilgold 主题）
-        "空袭", "霍尔木兹", "红海", "胡塞", "停火谈判", "以色列", "沙特遇袭", "对伊制裁",
+    "mideast": [
+        "伊朗", "德黑兰", "哈梅内伊", "革命卫队", "伊朗核", "铀浓缩", "对伊制裁",
+        "以色列", "空袭", "袭击", "霍尔木兹", "红海", "胡塞", "停火", "加沙",
+        "哈马斯", "真主党", "黎巴嫩", "中东", "导弹", "石油设施", "沙特",
+        "opec", "欧佩克", "美国中央司令部",
     ],
 }
 
 _news_cache: dict = {"ts": 0.0, "items": []}
 NEWS_TTL = 120.0
-
-# AI 语义筛选（上游 bdd7573 整合）：规则过滤后再由 AI 批量判定相关性并标注类别
-_news_ai: dict = {"ts": 0.0, "running": False, "tags": {}}
-NEWS_AI_TTL = 300.0   # AI 筛选结果缓存 5 分钟
-NEWS_AI_LIMIT = 60    # 只筛最新 60 条
-
-_AI_FILTER_PROMPT = """你是国内期货资讯筛选器，判定标准严格。下面是财经快讯（已去除股市行情与公司财报类噪音）。请判断每条是否与【国内期货交易】直接相关：
-【判定为相关】：直接涉及期货品种的供需/价格/库存/产量（如 OPEC、EIA、USDA、港口库存、开工率）、宏观货币政策直接影响资产定价（央行/利率决议/通胀/非农/美元指数）、地缘冲突直接冲击商品供给或避险（战争/制裁/袭击产油设施/霍尔木兹）。
-【判定为不相关】：政府机构一般动态、公司融资/人事/股权变动、科技产品、社会民生、文体、医疗、教育、旅游、他国国内政治、间接沾边的泛产业新闻。拿不准的一律判不相关。
-输出严格 JSON 数组，只列出【相关】的条目，每个元素形如 {"i": 序号, "tag": "类别"}，tag 从以下选一个：原油/能源、贵金属、黑色金属、农产品、化工、油脂、宏观利率、美元、地缘、产业数据、天气。不要输出任何其它文字。
-
-条目列表：
-"""
+NEWS_MAX = 60
 
 
-async def _ai_filter_news(items: list) -> dict:
-    """批量调用 AI 判定相关性，返回 {索引: 类别}；失败自动对半重试，最终失败降级"""
-    import logging
-    logger = logging.getLogger("uvicorn.error")
-    tags: dict = {}
-    cfg = load_config()
-    if not cfg["api_keys"].get(cfg["provider"]):
-        return tags
-
-    async def ask_chunk(base: int, chunk: list) -> None:
-        lines = [
-            f"{i}. {(it.get('title') or '')[:70]} {(it.get('summary') or '')[:80]}".replace("\n", " ")
-            for i, it in enumerate(chunk)
-        ]
-        raw = await _llm_text_retry(
-            _AI_FILTER_PROMPT + "\n".join(lines),
-            max_tokens=min(8192, max_output_for(cfg["model"] or "")),
-        )
-        arr = json.loads(raw[raw.find("["): raw.rfind("]") + 1])
-        for item in arr:
-            if isinstance(item, dict) and "i" in item:
-                idx = base + int(item["i"])
-                if 0 <= idx < len(items):
-                    tags[idx] = str(item.get("tag", ""))[:8]
-
-    async def ask_with_retry(base: int, chunk: list, depth: int = 0) -> None:
-        try:
-            await ask_chunk(base, chunk)
-        except Exception as e:
-            # 推理模型偶发输出超限：对半拆分重试（最小 3 条）
-            if depth < 2 and len(chunk) > 3:
-                logger.info(f"[ai-news] 块 {base} 失败（{type(e).__name__}），对半重试")
-                mid = len(chunk) // 2
-                await ask_with_retry(base, chunk[:mid], depth + 1)
-                await ask_with_retry(base + mid, chunk[mid:], depth + 1)
-            else:
-                logger.info(f"[ai-news] 块 {base} 放弃：{type(e).__name__} {str(e)[:60]}")
-
-    chunk_size = 10
-    for start in range(0, len(items), chunk_size):
-        chunk = items[start:start + chunk_size]
-        await ask_with_retry(start, chunk)
-    logger.info(f"[ai-news] 全部完成：相关 {len(tags)} 条")
-    return tags
-
-
-async def _ai_filter_job():
-    _news_ai["running"] = True
-    try:
-        items = _news_cache["items"][:NEWS_AI_LIMIT]
-        _news_ai["tags"] = await _ai_filter_news(items)
-        _news_ai["ts"] = asyncio.get_event_loop().time()
-    except Exception:
-        pass
-    finally:
-        _news_ai["running"] = False
-
-
-# 股市噪音词：命中即剔除（只保留与期货相关的大宗/能源/贵金属/宏观资讯；上游 bdd7573 扩充）
-_STOCK_NOISE_KW = [
-    "股价", "股票", "股市", "a股", "港股", "美股", "纳指", "纳斯达克", "道指", "标普",
-    "韩股", "日经", "欧股", "沪指", "深指", "创业板", "科创板", "北交所", "恒生",
-    "涨停", "跌停", "财报", "营收", "净利润", "ipo", "股份回购", "市值", "科技股",
-    "芯片股", "ai芯片", "两市", "成交额", "目标价", "重申", "公告称", "评级",
-    "基金", "券商", "业绩", "季报", "年报", "增持", "减持", "上市公司", "游资",
-    "家电", "游戏", "流水", "服务器", "晶圆", "pcbs", "存储芯片", "半导体设备",
-    "银行股", "保险股", "券商股", "龙头股", "概念股", "题材股", "翻倍", "套牢",
-]
-
-
-def _is_stock_noise(text: str) -> bool:
+def _match_news_groups(text: str) -> list[str]:
     t = text.lower()
-    return any(k in t for k in _STOCK_NOISE_KW)
-
-
-def _news_topics(text: str) -> list[str]:
-    """返回文本命中的全部主题（不区分大小写）"""
-    t = text.lower()
-    return [topic for topic, kws in NEWS_TOPICS.items() if any(k in t for k in kws)]
+    return [g for g, kws in _NEWS_GROUPS.items() if any(k.lower() in t for k in kws)]
 
 
 @app.get("/api/news")
 async def news(topic: str = ""):
-    """主题要闻：新浪全球快讯（市场异动流）+ 东方财富全球快讯，多主题命中标记。
-
-    topic 传入 NEWS_TOPICS 的键时仅返回该主题命中的条目。
-    """
+    """宏观要闻监控：单源新浪全球快讯，严格白名单过滤——
+    只保留【特朗普发言/动作】与【中东重大动向】两类，其余一律丢弃。"""
     loop_now = asyncio.get_event_loop().time()
     if loop_now - _news_cache["ts"] > NEWS_TTL:
         items, seen = [], set()
@@ -2680,18 +2608,19 @@ async def news(topic: str = ""):
             if not key or key in seen:
                 return
             text = title + " " + summary
-            if _is_stock_noise(text):
-                return  # 只保留与期货相关（大宗/能源/贵金属/宏观），剔除纯股市与公司新闻
+            groups = _match_news_groups(text)
+            if not groups:
+                return  # 白名单外全部丢弃
             seen.add(key)
-            hit = _news_topics(text)
             items.append({
                 "time": str(time_s),
                 "title": title or (summary[:40] if summary else ""),
                 "summary": summary,
                 "link": link,
                 "source": source,
-                "matched": "oilgold" in hit,   # 兼容字段：原油/黄金主题
-                "topics": hit,
+                "groups": groups,
+                "matched": "trump" in groups,  # 兼容字段
+                "topics": groups,
             })
 
         try:
@@ -2701,37 +2630,15 @@ async def news(topic: str = ""):
                 _add(r.get("时间", ""), content, content, "", "新浪")
         except Exception:
             pass
-        try:
-            df = await call_ak(ak.stock_info_global_em)
-            for _, r in df.iterrows():
-                _add(r.get("发布时间", ""), str(r.get("标题", "")), str(r.get("摘要", "")),
-                     str(r.get("链接", "")), "东财")
-        except Exception:
-            pass
 
         items.sort(key=lambda x: x["time"], reverse=True)
-        _news_cache["items"] = items[:80]
+        _news_cache["items"] = items[:NEWS_MAX]
         _news_cache["ts"] = loop_now
 
     result_items = _news_cache["items"]
-    if topic in NEWS_TOPICS:
-        result_items = [it for it in result_items if topic in it["topics"]]
-
-    # AI 语义筛选状态：首次请求异步触发，前端轮询拿到 ready
-    ai_stale = loop_now - _news_ai["ts"] > NEWS_AI_TTL
-    if ai_stale and not _news_ai["running"] and result_items:
-        _news_ai["tags"] = {}
-        asyncio.create_task(_ai_filter_job())
-    ai_tags = {} if ai_stale else _news_ai["tags"]
-    return {
-        "ok": True,
-        "items": result_items,
-        "topics": NEWS_TOPICS,
-        "ai": {
-            "status": "ready" if ai_tags else ("filtering" if _news_ai["running"] else "off"),
-            "tags": {str(k): v for k, v in ai_tags.items()},
-        },
-    }
+    if topic in _NEWS_GROUPS:
+        result_items = [it for it in result_items if topic in it["groups"]]
+    return {"ok": True, "items": result_items, "groups": list(_NEWS_GROUPS.keys())}
 
 
 # ---------------------------------------------------------------- AI 晨报
@@ -2769,40 +2676,35 @@ def _save_reports(data: dict) -> None:
 
 
 async def _generate_report() -> str:
-    """晨/夜报：主题要闻 + 自选品种快照与信号 → AI 汇总"""
+    """晨/夜报：宏观要闻（特朗普/中东）+ 国际盘四品种快照 + 持仓与纪律 → AI 汇总"""
     parts = []
 
     try:
         nd = await news()
-        matched = [i for i in nd.get("items", []) if i.get("matched")][:20]
+        matched = nd.get("items", [])[:20]
         if matched:
-            lines = [f"- [{i['time'][5:16]}] {i['title'][:60]}" for i in matched]
-            parts.append("【近期要闻（原油/黄金/宏观主题）】\n" + "\n".join(lines))
+            lines = [
+                f"- [{'🇺🇸' if 'trump' in i.get('groups', []) else '🌍'} {i['time'][5:16]}] {i['title'][:60]}"
+                for i in matched
+            ]
+            parts.append("【近期要闻（特朗普发言/中东重大动向）】\n" + "\n".join(lines))
     except Exception:
         pass
 
-    syms = sorted(set(_MONITOR["watch"]) | {"SC0", "AU0"})
-    directory = await get_directory()
-    lines = []
-    for s in syms[:10]:
-        q = _quote_cache.get(s, (0, {}))[1]
-        if not q:
-            try:
-                q = await fetch_quote(s)
-            except Exception:
-                continue
-        name = directory.get(s, {}).get("name", "")
-        pct = q.get("change_pct")
-        line = f"- {s}（{name}）：最新 {q.get('last')}，日内 {'+' if (pct or 0) >= 0 else ''}{pct}%，持仓 {q.get('position')}"
-        try:
-            ind = await get_indicators(s)
-            sigs = "；".join(x["name"] for x in ind["signals"][:3]) or "无明显信号"
-            line += f"；日线信号：{sigs}"
-        except Exception:
-            pass
-        lines.append(line)
-    if lines:
-        parts.append("【自选品种快照】\n" + "\n".join(lines))
+    # 国际盘四品种快照
+    try:
+        intl_items = await fetch_intl()
+        lines = []
+        for it in intl_items:
+            pct = it.get("chg_pct")
+            lines.append(
+                f"- {it['name']}：最新 {it.get('last')}，日内 {'+' if (pct or 0) >= 0 else ''}{pct}%"
+                f"（高 {it.get('high')} / 低 {it.get('low')}）"
+            )
+        if lines:
+            parts.append("【国际盘快照】\n" + "\n".join(lines))
+    except Exception:
+        pass
 
     # 持仓与纪律状态（决策后闭环，供晨报提醒风险与执行情况）
     try:

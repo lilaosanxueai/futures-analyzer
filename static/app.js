@@ -1366,128 +1366,92 @@ $("notesList").addEventListener("click", (e) => {
 
 /* ---------- 主题要闻（资讯视图：全部 / 原油黄金 / 美伊冲突） ---------- */
 
-const newsState = {
-  seen: new Set(), geopolSeen: new Set(), loaded: false,
-  topics: {}, all: [],
-  ai: { status: "off", tags: {} },
-  aiOnly: false,
-  filter: localStorage.getItem("fa_news_filter") || "all",
-};
+const newsState = { seen: new Set(), loaded: false, items: [] };
 
-function highlightKeywords(text, topic) {
-  let html = text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-  const topics = Array.isArray(topic) ? topic : [topic];
-  const kws = topics.flatMap((t) => newsState.topics[t] || []);
-  for (const kw of [...new Set(kws)]) {
-    if (!kw) continue;
+function highlightKeywords(text, group) {
+  let html = esc(text);
+  const kws = group === "trump"
+    ? ["特朗普", "白宫", "关税", "贝森特", "美国财政部"]
+    : ["伊朗", "以色列", "空袭", "霍尔木兹", "停火", "中东", "红海", "胡塞", "加沙", "哈马斯", "导弹", "OPEC", "欧佩克", "沙特"];
+  for (const kw of kws) {
     try {
-      html = html.replace(new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>");
+      html = html.replace(new RegExp(`(${kw})`, "gi"), "<mark>$1</mark>");
     } catch (e) { /* 忽略非法正则 */ }
   }
   return html;
 }
 
+async function loadIntl() {
+  try {
+    const d = await api("/api/intl");
+    $("intlTime").textContent = "行情时间 " + (d.items[0]?.time || "--");
+    $("intlCards").innerHTML = d.items.map((it) => {
+      const pct = it.chg_pct;
+      const cls = pct > 0 ? "up" : pct < 0 ? "down" : "";
+      return `<div class="intl-card">
+        <div class="intl-name">${esc(it.name)}</div>
+        <div class="intl-last ${cls}">${it.last ?? "--"}</div>
+        <div class="intl-chg ${cls}">${pct != null ? (pct > 0 ? "+" : "") + pct + "%" : "--"}</div>
+        <div class="muted small">高 ${it.high ?? "--"} / 低 ${it.low ?? "--"}</div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    $("intlCards").innerHTML = `<div class="muted small">国际盘数据加载失败：${e.message}</div>`;
+  }
+}
+
 function renderNewsView() {
   const list = $("newsList");
   if (!list) return;
-  const hlTopics = newsState.filter === "all" ? ["oilgold", "usiran"] : [newsState.filter];
-  let items = newsState.all.filter((it) =>
-    newsState.filter === "all" ? true : (it.topics || []).includes(newsState.filter)
-  );
-  // AI 语义筛选：开启"只看相关"时仅保留 AI 判定相关的条目
-  if (newsState.aiOnly && newsState.ai.status === "ready") {
-    items = items.filter((_, i) => newsState.ai.tags[String(i)]);
-  }
-  // AI 判定相关的条目优先，其次主题命中多的
-  if (newsState.ai.status === "ready") {
-    const rank = (it) => (newsState.ai.tags[String(newsState.all.indexOf(it))] ? 1 : 0) + (it.topics || []).length * 0.1;
-    items = [...items].sort((a, b) => rank(b) - rank(a));
-  } else {
-    items = [...items].sort((a, b) => ((b.topics || []).length) - ((a.topics || []).length));
-  }
-  if (!items.length) {
-    list.innerHTML = `<div class="muted small monitor-hint">该主题暂无条目（数据源每 2 分钟更新）</div>`;
+  if (!newsState.items.length) {
+    list.innerHTML = `<div class="muted small monitor-hint">暂无特朗普/中东相关要闻（每 2 分钟扫描一次快讯流）</div>`;
     return;
   }
-  list.innerHTML = items
+  list.innerHTML = newsState.items
     .map((it) => {
-      const idx = newsState.all.indexOf(it);
-      const aiTag = newsState.ai.tags[String(idx)];
+      const isTrump = (it.groups || []).includes("trump");
       const hm = it.time ? it.time.slice(11, 16) : "";
       const day = it.time ? it.time.slice(5, 10) : "";
+      const tag = isTrump ? '<span class="news-aitag">🇺🇸 特朗普</span>' : '<span class="news-aitag">🌍 中东</span>';
       const body = it.link
-        ? `<a href="${it.link}" target="_blank" rel="noopener" title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</a>`
-        : `<span title="${(it.summary || "").replace(/"/g, "&quot;")}">${highlightKeywords(it.title, hlTopics)}</span>`;
-      const tags = (it.topics || []).map((t) => t === "usiran" ? "⚔️" : t === "oilgold" ? "🛢" : "").join(" ");
-      return `<div class="news-item${(it.topics || []).length || aiTag ? " matched" : ""}">
-        <span class="news-time">${day} ${hm}</span>${body}<span class="news-src">${aiTag ? `<span class="news-aitag">${aiTag}</span> ` : ""}${tags} ${it.source}</span>
+        ? `<a href="${it.link}" target="_blank" rel="noopener">${highlightKeywords(it.title, isTrump ? "trump" : "mideast")}</a>`
+        : `<span>${highlightKeywords(it.title, isTrump ? "trump" : "mideast")}</span>`;
+      return `<div class="news-item matched">
+        <span class="news-time">${day} ${hm}</span>${tag} ${body}<span class="news-src">${esc(it.source)}</span>
       </div>`;
     })
     .join("");
-  // AI 筛选状态徽章
-  const badge = $("newsAiBadge");
-  if (badge) {
-    const st = newsState.ai.status;
-    badge.textContent = st === "ready" ? `🤖 AI 已筛 ${Object.keys(newsState.ai.tags).length} 条相关`
-      : st === "filtering" ? "🤖 AI 筛选中…" : "";
-  }
 }
 
 async function pollNews() {
   try {
     const d = await api("/api/news");
-    newsState.topics = d.topics || {};
-    newsState.all = d.items || [];
-    newsState.ai = d.ai || { status: "off", tags: {} };
-    if (!newsState.all.length) return;
-
-    // 新命中条目提醒（首次加载静默；两类主题分别去重）
+    const fresh = d.items || [];
     if (newsState.loaded) {
-      for (const it of newsState.all.slice(0, 12)) {
-        if (it.matched && !newsState.seen.has(it.title)) {
-          toast(`📰 ${it.title.slice(0, 46)}${it.title.length > 46 ? "…" : ""}`);
-        }
-        if ((it.topics || []).includes("usiran") && !newsState.geopolSeen.has(it.title)) {
-          toast(`⚔️ 美伊 ${it.title.slice(0, 44)}${it.title.length > 44 ? "…" : ""}`);
+      for (const it of fresh.slice(0, 10)) {
+        if (!newsState.seen.has(it.title)) {
+          const tag = (it.groups || []).includes("trump") ? "🇺🇸" : "🌍";
+          toast(`${tag} ${it.title.slice(0, 46)}${it.title.length > 46 ? "…" : ""}`);
         }
       }
     }
-    newsState.all.forEach((it) => {
-      newsState.seen.add(it.title);
-      if ((it.topics || []).includes("usiran")) newsState.geopolSeen.add(it.title);
-    });
+    newsState.seen = new Set(fresh.map((it) => it.title));
+    newsState.items = fresh;
     newsState.loaded = true;
     renderNewsView();
-  } catch (e) { /* 新闻轮询失败静默 */ }
+  } catch (e) { /* 快讯轮询失败静默 */ }
 }
 
-document.querySelectorAll(".filter-chip").forEach((chip) => {
-  if (chip.dataset.filter === newsState.filter) chip.classList.add("active");
-  chip.addEventListener("click", () => {
-    document.querySelectorAll(".filter-chip").forEach((c) => c.classList.toggle("active", c === chip));
-    newsState.filter = chip.dataset.filter;
-    localStorage.setItem("fa_news_filter", newsState.filter);
-    renderNewsView();
-  });
-});
-
-// AI 筛选"只看相关"开关（上游整合）
-$("newsAiOnly").addEventListener("change", (e) => {
-  newsState.aiOnly = e.target.checked;
-  localStorage.setItem("fa_news_ai_only", e.target.checked ? "1" : "");
-  renderNewsView();
-});
-if (localStorage.getItem("fa_news_ai_only")) {
-  $("newsAiOnly").checked = true;
-  newsState.aiOnly = true;
-}
+setInterval(() => {
+  if (currentView() === "news") loadIntl();  // 停留监控页时每 5 秒跟随主轮询刷新报价
+}, 5000);
 
 /* ---------- 命令面板 Ctrl+K（上游 14ce111 整合，适配本地视图） ---------- */
 
 const CMDK_COMMANDS = [
   { key: "工作台", desc: "视图", run: () => switchView("work") },
   { key: "详情", desc: "视图", run: () => switchView("detail") },
-  { key: "资讯/要闻", desc: "视图", run: () => switchView("news") },
+  { key: "国际盘", desc: "WTI/布伦特/黄金/美元指数", run: () => switchView("news") },
   { key: "纪律", desc: "开仓检查/交易记录", run: () => switchView("discipline") },
   { key: "心得", desc: "视图", run: () => switchView("notes") },
   { key: "晨报", desc: "生成/查看 AI 简报", run: () => $("btnReport").click() },
@@ -1621,7 +1585,7 @@ function switchView(name) {
     const d = $("noteDate");
     if (d && !d.value) d.value = new Date().toISOString().slice(0, 10);
   }
-  if (name === "news" && !newsState.loaded) pollNews();
+  if (name === "news") { if (!newsState.loaded) pollNews(); loadIntl(); }
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
