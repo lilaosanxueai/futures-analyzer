@@ -33,6 +33,10 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* 国际品种（与后端 INTL_SYMBOLS 对应，可走纪律检查/资金情绪/K线日线/实时解读） */
+const INTL_SYMBOLS = ["WTI", "BRENT", "GOLD", "DXY"];
+const _INTL_NAMES = { WTI: "WTI 原油", BRENT: "布伦特原油", GOLD: "COMEX 黄金", DXY: "美元指数" };
+
 /* 主题（皮肤）：色卡预览 + 切换 + 持久化 */
 const THEMES = [
   { id: "dark",   name: "深夜蓝", bg: "#0d1117", panel: "#1c2330", accent: "#3b82f6" },
@@ -1609,11 +1613,12 @@ function syncDetailSymSelect() {
 function fillDetailSymOptions() {
   const sel = $("detailSym");
   if (!sel) return;
+  const intlOpts = INTL_SYMBOLS.map((s) => `<option value="${s}">${s} ${_INTL_NAMES[s]}（24H）</option>`).join("");
   const opts = state.candidates.length
     ? state.candidates.map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("")
     : state.watchlist.map((s) => `<option value="${s}">${s}</option>`).join("");
-  sel.innerHTML = opts;
-  sel.value = state.selected || "";
+  sel.innerHTML = `<optgroup label="国内期货">${opts}</optgroup><optgroup label="国际盘 24H">${intlOpts}</optgroup>`;
+  if (INTL_SYMBOLS.includes(state.selected)) sel.value = state.selected;
 }
 
 function switchView(name) {
@@ -1665,11 +1670,12 @@ const dcState = { inited: false, lastResult: null };
 function fillDcSymbolOptions() {
   const sel = $("dcSymbol");
   if (!sel) return;
+  const intlOpts = INTL_SYMBOLS.map((s) => `<option value="${s}">${s} ${_INTL_NAMES[s]}（24H）</option>`).join("");
   const opts = state.candidates.length
     ? state.candidates.map((c) => `<option value="${c.symbol}">${c.symbol} ${c.name}</option>`).join("")
     : state.watchlist.map((s) => `<option value="${s}">${s}</option>`).join("");
   const prev = sel.value || state.selected || state.watchlist[0] || "RB0";
-  sel.innerHTML = opts;
+  sel.innerHTML = `<optgroup label="国内期货">${opts}</optgroup><optgroup label="国际盘 24H">${intlOpts}</optgroup>`;
   if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
 }
 

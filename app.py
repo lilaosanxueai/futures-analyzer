@@ -320,13 +320,40 @@ async def get_directory() -> dict[str, dict]:
     return _dir_cache["data"]
 
 
+# 国际品种定义：实时快照品种 ↔ 新浪外盘日线 symbol 映射（DXY 无日线历史，仅实时）
+INTL_SYMBOLS = ["WTI", "BRENT", "GOLD", "DXY"]
+_INTL_HIST_MAP = {"WTI": "CL", "BRENT": "OIL", "GOLD": "GC"}
+_INTL_NAMES = {"WTI": "WTI 原油", "BRENT": "布伦特原油", "GOLD": "COMEX 黄金", "DXY": "美元指数"}
+
+
 async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
-    """日线数据（带缓存：收盘后基本不变，60 秒内复用）"""
+    """日线数据（带缓存：收盘后基本不变，60 秒内复用）。
+    国际品种（WTI/BRENT/GOLD）自动分流到新浪外盘历史接口。"""
     symbol = symbol.upper()
     loop_now = asyncio.get_event_loop().time()
     cached = _daily_cache.get(symbol)
     if cached and loop_now - cached[0] < cached[2]:
         return cached[1]
+
+    if symbol in _INTL_HIST_MAP:
+        # 国际品种：新浪外盘日线（date/open/high/low/close/volume/position）
+        df = await call_ak(ak.futures_foreign_hist, symbol=_INTL_HIST_MAP[symbol])
+        records = [
+            {
+                "date": str(r["date"])[:10],
+                "open": _num(r.get("open")),
+                "high": _num(r.get("high")),
+                "low": _num(r.get("low")),
+                "close": _num(r.get("close")),
+                "volume": _num(r.get("volume")) or 0,
+                "hold": _num(r.get("position")) or 0,
+                "settle": _num(r.get("settle")) or None,
+            }
+            for r in df.to_dict("records")
+        ]
+        _daily_cache[symbol] = (loop_now, records, DAILY_TTL_CLOSED)
+        return records
+
     df = await call_ak(ak.futures_zh_daily_sina, symbol=symbol)
     records = df.to_dict("records")
     # 最后交易日早于今天 → 已收盘，数据不再变化，用长缓存减少对数据源的反复请求
@@ -373,12 +400,41 @@ def _num(v):
 
 
 async def fetch_quote(symbol: str) -> dict:
-    """单合约实时行情（带 5 秒缓存）"""
+    """单合约实时行情（带 5 秒缓存）。国际品种从实时快照组装。"""
     symbol = symbol.strip().upper()
     loop_now = asyncio.get_event_loop().time()
     cached = _quote_cache.get(symbol)
     if cached and loop_now - cached[0] < QUOTE_TTL:
         return cached[1]
+
+    # 国际品种：从 /api/intl 快照（hf_ 实时）组装 quote
+    if symbol in INTL_SYMBOLS:
+        await fetch_intl()
+        it = _intl_cache.get("by_sym", {}).get(symbol, {})
+        if it.get("last") is None:
+            raise HTTPException(status_code=502, detail="国际品种行情获取失败")
+        quote = {
+            "symbol": symbol,
+            "name": it.get("name", _INTL_NAMES.get(symbol, "")),
+            "exchange": "INTL",
+            "time": it.get("time", ""),
+            "last": it.get("last"),
+            "open": it.get("open"),
+            "high": it.get("high"),
+            "low": it.get("low"),
+            "prev_settle": it.get("prev_settle"),
+            "change": it.get("chg"),
+            "change_pct": it.get("chg_pct"),
+            "volume": None,
+            "position": None,
+            "bid": None,
+            "ask": None,
+            "bid_vol": None,
+            "ask_vol": None,
+            "digits": 2,
+        }
+        _quote_cache[symbol] = (loop_now, quote)
+        return quote
 
     try:
         df = await call_ak(ak.futures_zh_spot, symbol=symbol, market=market_of(symbol), adjust="0")
@@ -531,44 +587,57 @@ def fund_sentiment(symbol: str, daily: list) -> Optional[dict]:
     factors = []
     score = 0.0
 
-    # ① 近 5 日价量仓配合（经典八状态，权重最大）
-    win = rows[-5:]
-    price_chg = (closes[-1] / closes[-6] - 1) * 100 if closes[-6] else 0.0
-    hold_win = [float(r.get("hold") or 0) for r in win]
-    hold_chg = (hold_win[-1] - hold_win[0]) / hold_win[0] * 100 if hold_win and hold_win[0] else 0.0
-    rising = price_chg > 0
-    adding = hold_chg > 0
-    if adding:
-        score += 30 if rising else -30
-        factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 且增仓 {abs(hold_chg):.1f}%：{'多头主动进攻' if rising else '空头主动施压'}（资金{'流入' if rising else '做空'}意愿强）")
+    # 外盘数据源无持仓量/成交量（如新浪外盘历史仅 OHLC）：降级为纯价格动量因子
+    if sum(vols) == 0 or sum(holds) == 0:
+        chg5 = (closes[-1] / closes[-6] - 1) * 100 if closes[-6] else 0.0
+        chg20 = (closes[-1] / closes[-21] - 1) * 100 if len(closes) >= 21 and closes[-21] else 0.0
+        score = max(-60, min(60, chg5 * 8 + chg20 * 3))
+        if chg5 > 0:
+            factors.append(f"5 日动量 +{chg5:.2f}%：短期动能向上")
+        else:
+            factors.append(f"5 日动量 {chg5:.2f}%：短期动能向下")
+        if abs(chg20) >= 1:
+            factors.append(f"20 日动量 {chg20:+.2f}%：中期趋势{'向上' if chg20 > 0 else '向下'}")
+        factors.append("（外盘数据源无持仓量/成交量，资金情绪基于价格动量）")
     else:
-        score += 10 if rising else -10
-        factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 但减仓 {abs(hold_chg):.1f}%：{'空头止损推动' if rising else '多头止盈离场'}（趋势持续性存疑）")
+        # ① 近 5 日价量仓配合（经典八状态，权重最大）
+        win = rows[-5:]
+        price_chg = (closes[-1] / closes[-6] - 1) * 100 if closes[-6] else 0.0
+        hold_win = [float(r.get("hold") or 0) for r in win]
+        hold_chg = (hold_win[-1] - hold_win[0]) / hold_win[0] * 100 if hold_win and hold_win[0] else 0.0
+        rising = price_chg > 0
+        adding = hold_chg > 0
+        if adding:
+            score += 30 if rising else -30
+            factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 且增仓 {abs(hold_chg):.1f}%：{'多头主动进攻' if rising else '空头主动施压'}（资金{'流入' if rising else '做空'}意愿强）")
+        else:
+            score += 10 if rising else -10
+            factors.append(f"5日{'涨' if rising else '跌'}{abs(price_chg):.2f}% 但减仓 {abs(hold_chg):.1f}%：{'空头止损推动' if rising else '多头止盈离场'}（趋势持续性存疑）")
 
-    # ② 20 日持仓趋势（中期资金流向）
-    if len(holds) >= 21:
-        h20 = (holds[-1] - holds[-21]) / holds[-21] * 100
-        if abs(h20) >= 2:
-            pts = min(20, abs(h20) * 2)
-            score += pts if h20 > 0 else -pts
-            factors.append(f"20 日持仓{'增' if h20 > 0 else '减'} {abs(h20):.1f}%：中期资金{'持续流入' if h20 > 0 else '逐步撤离'}")
+        # ② 20 日持仓趋势（中期资金流向）
+        if len(holds) >= 21:
+            h20 = (holds[-1] - holds[-21]) / holds[-21] * 100
+            if abs(h20) >= 2:
+                pts = min(20, abs(h20) * 2)
+                score += pts if h20 > 0 else -pts
+                factors.append(f"20 日持仓{'增' if h20 > 0 else '减'} {abs(h20):.1f}%：中期资金{'持续流入' if h20 > 0 else '逐步撤离'}")
 
-    # ③ 量能活跃度（5 日均量 / 60 日均量）
-    v5 = sum(vols[-5:]) / 5
-    v60 = sum(vols[-60:]) / 60
-    ratio = v5 / v60 if v60 else 1.0
-    if ratio >= 1.5:
-        factors.append(f"量能为 60 日均量的 {ratio:.1f} 倍：明显放量，资金关注度升温")
-    elif ratio <= 0.7:
-        score *= 0.7  # 缩市中信号可靠性下降，衰减评分
-        factors.append(f"量能仅为 60 日均量的 {ratio:.1f} 倍：缩量观望，信号可靠性打折")
+        # ③ 量能活跃度（5 日均量 / 60 日均量）
+        v5 = sum(vols[-5:]) / 5
+        v60 = sum(vols[-60:]) / 60
+        ratio = v5 / v60 if v60 else 1.0
+        if ratio >= 1.5:
+            factors.append(f"量能为 60 日均量的 {ratio:.1f} 倍：明显放量，资金关注度升温")
+        elif ratio <= 0.7:
+            score *= 0.7  # 缩市中信号可靠性下降，衰减评分
+            factors.append(f"量能仅为 60 日均量的 {ratio:.1f} 倍：缩量观望，信号可靠性打折")
 
-    # ④ 近 3 日持仓边际变化（最新资金转向）
-    if len(holds) >= 4:
-        d3 = (holds[-1] - holds[-4]) / holds[-4] * 100 if holds[-4] else 0.0
-        if abs(d3) >= 1:
-            score += 15 if d3 > 0 else -15
-            factors.append(f"近 3 日持仓{'增' if d3 > 0 else '减'} {abs(d3):.1f}%：短线资金{'转强' if d3 > 0 else '转弱'}")
+        # ④ 近 3 日持仓边际变化（最新资金转向）
+        if len(holds) >= 4:
+            d3 = (holds[-1] - holds[-4]) / holds[-4] * 100 if holds[-4] else 0.0
+            if abs(d3) >= 1:
+                score += 15 if d3 > 0 else -15
+                factors.append(f"近 3 日持仓{'增' if d3 > 0 else '减'} {abs(d3):.1f}%：短线资金{'转强' if d3 > 0 else '转弱'}")
 
     score = max(-100, min(100, round(score)))
     if score >= 40:
@@ -629,6 +698,9 @@ async def kline(symbol: str, period: str = "day", limit: int = 120):
     period = period if period in KLINE_PERIODS else "day"
     limit = min(max(limit, 30), 500)
     symbol = symbol.upper()
+    # 国际品种：数据源仅日线（无分钟线）
+    if symbol in INTL_SYMBOLS and period != "day":
+        raise HTTPException(status_code=400, detail="国际品种数据源仅支持日 K")
     try:
         if period == "day":
             raw = await get_daily(symbol)
@@ -692,6 +764,8 @@ def _round_ma(v):
 @app.get("/api/intraday/{symbol}")
 async def intraday(symbol: str):
     symbol = symbol.upper()
+    if symbol in INTL_SYMBOLS:
+        raise HTTPException(status_code=400, detail="国际品种无日内分时数据（仅日 K 与实时报价）")
     loop_now = asyncio.get_event_loop().time()
     cached = _intraday_cache.get(symbol)
     if cached and loop_now - cached[0] < INTRADAY_TTL:
