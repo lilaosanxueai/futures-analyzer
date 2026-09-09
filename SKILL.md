@@ -151,6 +151,16 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## UI 修复：纪律页重叠遮挡（v0825y）
+
+用户截图反馈「交易纪律 · 开仓检查」页存在重叠遮挡。根因是 grid 列的经典溢出：`.disc-grid` 左列固定 320px 但未设 `min-width:0`，grid 项默认 `min-width:auto` 不肯收缩——品种下拉选项文字长（含国际盘 24H 后缀），其内容最小宽度把表单列撑出 320px 轨道，视觉上压到右栏提示文字上；品种行内「现价」标签同样被挤重叠。
+
+1. `.disc-grid` 改 `minmax(0, 340px) minmax(0, 1fr)`，并给 `.disc-form/.disc-result` 加 `min-width:0`——列可收缩，溢出消除。
+2. 全局 `.form-row input/select` 加 `min-width:0`（设置弹窗等同款问题一并修复）。
+3. 品种行内层 flex 加 `flex-wrap:wrap`、下拉加 `min-width:120px`——极窄时「现价/填入」换行而非重叠。
+4. 「运行开仓检查」按钮加 `margin-top:12px` 与说明文字拉开间距。
+5. Playwright 三宽度（1280/860/2000px）包围盒几何检测全部通过：无交叠、无横向滚动。
+
 ## 国际品种全链路支持（v0825x）
 
 打通国际品种（WTI/BRENT/GOLD/DXY）与全应用体系的断层——此前纪律检查/资金情绪/详情页仅支持国内品种：

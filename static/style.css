@@ -518,7 +518,7 @@ input:focus, select:focus { border-color: var(--primary); }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .form-row label { width: 64px; flex-shrink: 0; color: var(--muted); font-size: 13px; }
-.form-row input, .form-row select { flex: 1; }
+.form-row input, .form-row select { flex: 1; min-width: 0; }
 
 /* ---------- 交易心得 ---------- */
 .notes-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -620,7 +620,8 @@ input:focus, select:focus { border-color: var(--primary); }
 
 /* ---------- 交易纪律页 ---------- */
 .disc-pane { overflow-y: auto; padding: 12px 14px; }
-.disc-grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+.disc-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 16px; }
+.disc-form, .disc-result { min-width: 0; }
 @media (max-width: 900px) { .disc-grid { grid-template-columns: 1fr; } }
 .disc-form h3, .disc-result h3 { margin: 0 0 10px; font-size: 13px; }
 .disc-selfs { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; font-size: 12px; }
