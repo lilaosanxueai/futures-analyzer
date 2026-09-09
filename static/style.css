@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0d1117;
   --panel: #161b22;
   --panel-2: #1c2330;
@@ -20,6 +21,7 @@
 
 /* 纯黑（OLED 省电，高对比） */
 html[data-theme="amoled"] {
+  color-scheme: dark;
   --bg: #000000;
   --panel: #0a0a0a;
   --panel-2: #141414;
@@ -38,6 +40,7 @@ html[data-theme="amoled"] {
 
 /* 浅色（白天看盘） */
 html[data-theme="light"] {
+  color-scheme: light;
   --bg: #eef1f6;
   --panel: #ffffff;
   --panel-2: #f4f6fa;
@@ -56,6 +59,7 @@ html[data-theme="light"] {
 
 /* 墨绿护眼（长时间盯盘） */
 html[data-theme="green"] {
+  color-scheme: dark;
   --bg: #0e1712;
   --panel: #13201a;
   --panel-2: #18291f;
@@ -74,6 +78,7 @@ html[data-theme="green"] {
 
 /* 玻璃·夜（半透明毛玻璃 + 渐变光斑背景，上游 d60ece1 借鉴） */
 html[data-theme="glass"] {
+  color-scheme: dark;
   --bg: #0b1020;
   --panel: rgba(22, 30, 52, .58);
   --panel-2: rgba(30, 41, 66, .5);
@@ -99,6 +104,7 @@ html[data-theme="glass"] .view-nav { backdrop-filter: blur(14px); }
 
 /* 极光动态（流动极光渐变 + 玻璃面板，上游借鉴；respect prefers-reduced-motion） */
 html[data-theme="aurora"] {
+  color-scheme: dark;
   --bg: #0a0f1e;
   --panel: rgba(18, 26, 46, .6);
   --panel-2: rgba(26, 36, 60, .5);
@@ -481,16 +487,19 @@ input, select {
 input:focus, select:focus { border-color: var(--primary); }
 
 .btn {
-  border: none;
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 14px;
   font-size: 13px;
   cursor: pointer;
-  color: var(--text-strong);
+  background: var(--panel-2);
+  color: var(--text);
   white-space: nowrap;
 }
-.btn.primary { background: var(--primary); }
+.btn.primary { background: var(--primary); color: #fff; }
 .btn.primary:hover { background: var(--primary); }
+html[data-theme="glass"] .btn.primary,
+html[data-theme="aurora"] .btn.primary { color: #0b1020; }  /* 亮主色底配深字 */
 .btn.accent { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
 .btn.accent:hover { background: rgba(245, 166, 35, .12); }
 .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }

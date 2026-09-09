@@ -151,6 +151,15 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## UI 修复：深色主题下按钮白块（v0825z）
+
+用户截图反馈纪律页「现价」旁有刺眼白块。根因：`.btn` 基础类只设 `color: var(--text-strong)`（深色主题=纯白）却未设 background——Windows Chrome 原生按钮底色是 buttonface 浅灰 rgb(240,240,240)，白字白底文字隐形、按钮成白块。13 处裸 `.btn small-btn` 全部受害（填入/保存参数/纪律周报/CSV/对话历史/测试/平仓/🩺/改/复盘/复制/清空）。
+
+1. `.btn` 基础类补 `background: var(--panel-2); color: var(--text); border: 1px solid var(--border)`——六主题全部可读。
+2. `.btn.primary` 显式 `color:#fff`；glass/aurora 两套亮主色主题单独配深字 `#0b1020`（原继承 --text 在亮底上仅 1.16 对比度）。
+3. 六主题全部补 `color-scheme`（dark×5、light×1）——Windows Chrome 原生控件（下拉弹出列表/数字输入步进箭头/滚动条）此前一直按浅色渲染。
+4. 验证：Playwright 逐主题读取计算样式算 WCAG 对比度，6 主题 × 7 按钮（含 primary/ghost/accent/裸 btn）全部 ≥3:1，多数 10+。注意：藏在收起 `<details>` 内的元素（如 btnDcSave）getComputedStyle 可能返回未重算的旧值，测前须 `details.open=true` + 强制 reflow。
+
 ## UI 修复：纪律页重叠遮挡（v0825y）
 
 用户截图反馈「交易纪律 · 开仓检查」页存在重叠遮挡。根因是 grid 列的经典溢出：`.disc-grid` 左列固定 320px 但未设 `min-width:0`，grid 项默认 `min-width:auto` 不肯收缩——品种下拉选项文字长（含国际盘 24H 后缀），其内容最小宽度把表单列撑出 320px 轨道，视觉上压到右栏提示文字上；品种行内「现价」标签同样被挤重叠。
