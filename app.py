@@ -2648,8 +2648,13 @@ async def ai_review(body: AiReviewIn):
     if chats:
         lines = []
         for c in chats:
-            ts = c.get("ts")
-            when = datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M") if ts else "时间未知"
+            when = "时间未知"
+            try:
+                ts = float(c.get("ts") or 0)
+                if ts > 0:
+                    when = datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M")
+            except (TypeError, ValueError, OSError, OverflowError):
+                pass
             sym = str(c.get("sym") or "")
             ask = c.get("role") == "user"
             lines.append(f"- [{when}{(' ' + sym) if sym else ''}]{'问' if ask else '答'}："

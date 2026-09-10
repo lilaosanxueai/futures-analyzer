@@ -151,6 +151,14 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## 全盘梳理（v0826c）
+
+静态扫描（幽灵 id/孤儿函数/版本残留/路由清单）+ 实测冒烟（四视图 + 零控制台报错）后修掉三处：
+
+1. **对话存档撑爆 localStorage**：`pushMsg` 存档时把 base64 图片（单条最多 4 张、每张数百 KB）一并写入 `fa_chat_history`，几张图即超 5MB 配额 → setItem 抛错被静默吞掉 → **存档从此静默停止更新**（对话历史/AI 复盘对话源双双断粮）。修法：存档时剥离 images 只存 {role,content,ts,sym}。
+2. **错误提示污染三处**：`pushMsg("assistant", "调用失败…", "error")` 以 assistant 角色进入——AI 上下文（浪费 token 且误导模型）、本地存档、AI 复盘语料。修法：改推 `role:"error"`（渲染不变，三处过滤器自动排除）。
+3. **死代码清理**：`renderLines`（SVG 折线图，K 线图替代后零调用）、`loadSparkline`（自注释空壳）删除；对话历史框/飞书导出补显示时间与品种（存档已有 ts/sym）。
+
 ## AI 复盘分析（v0826b）
 
 应用户要求：AI 对话与交易心得按已有记录生成针对性复盘报告，可灵活选时间段、品种。

@@ -655,31 +655,6 @@ function dg(k, v) {
   return `<div class="dg-item"><span class="k">${k}</span><span class="v">${v}</span></div>`;
 }
 
-/* SVG 折线图（一条或多条） */
-function renderLines(container, series, opts = {}) {
-  const w = opts.width || 600;
-  const h = opts.height || 110;
-  const pad = 4;
-  const all = series.flatMap((s) => s.points.filter((p) => p != null));
-  if (all.length < 2) { container.textContent = "暂无数据"; return; }
-  const min = Math.min(...all), max = Math.max(...all);
-  const span = max - min || 1;
-  const n = Math.max(...series.map((s) => s.points.length));
-  const polylines = series
-    .map((s) => {
-      const pts = s.points.map((c, i) => {
-        if (c == null) return null;
-        const x = pad + (i / (n - 1)) * (w - pad * 2);
-        const y = pad + (1 - (c - min) / span) * (h - pad * 2);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      }).filter(Boolean);
-      return `<polyline points="${pts.join(" ")}" fill="none" stroke="${s.color}" stroke-width="1.4"/>`;
-    })
-    .join("");
-  const label = opts.minMax !== false ? `<text x="${pad}" y="11" fill="#8a93a6" font-size="10">${max}</text><text x="${pad}" y="${h - 5}" fill="#8a93a6" font-size="10">${min}</text>` : "";
-  container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${polylines}${label}</svg>`;
-}
-
 /* ---------- K 线蜡烛图（红涨绿跌 + MA + 成交量副图 + 信号标记 + 十字光标） ---------- */
 
 const PERIOD_LABEL = { "1m": "1分", "5m": "5分", "15m": "15分", "30m": "30分", "60m": "60分", "day": "日K" };
@@ -1125,7 +1100,6 @@ async function saveAnnotationsAsNote() {
   }
 }
 
-async function loadSparkline(sym) { /* 已被 K 线图替代，保留空实现避免旧引用 */ }
 
 /* ---------- 价格预警 ---------- */
 
@@ -2283,9 +2257,13 @@ function renderChatHistoryBox() {
     box.innerHTML = `<div class="muted small monitor-hint">暂无对话历史。工作台的 AI 对话会自动存档到本地，也可导出飞书。</div>`;
     return;
   }
+  const fmtTs = (ts) => ts
+    ? new Date(ts).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "";
   const items = msgs.map((m, i) => `
     <div class="chat-hist-item">
       <span class="chat-hist-role ${m.role}">${m.role === "user" ? "我" : "AI"}</span>
+      <span class="muted small" style="white-space:nowrap">${esc([fmtTs(m.ts), m.sym].filter(Boolean).join(" · "))}</span>
       <div class="chat-hist-text">${esc(m.content.slice(0, 300))}${m.content.length > 300 ? "…" : ""}</div>
       <button class="btn small-btn" data-copy="${i}" title="复制全文">📋</button>
     </div>`).join("");
@@ -2312,7 +2290,10 @@ function renderChatHistoryBox() {
     renderChatHistoryBox();
   });
   $("btnChatExport").addEventListener("click", async () => {
-    const text = msgs.map((m) => `【${m.role === "user" ? "我" : "AI"}】\n${m.content}`).join("\n\n---\n\n");
+    const text = msgs.map((m) => {
+      const meta = [fmtTs(m.ts), m.sym].filter(Boolean).join(" · ");
+      return `【${m.role === "user" ? "我" : "AI"}${meta ? "｜" + meta : ""}】\n${m.content}`;
+    }).join("\n\n---\n\n");
     try {
       await api("/api/chat-export", {
         method: "POST",
@@ -2651,11 +2632,12 @@ document.addEventListener("click", (e) => {
 function pushMsg(role, content, cls, images) {
   // ts/sym 供「AI 复盘」按时间段/品种筛选（旧存档无此字段则仅在全部时间档纳入）
   state.chat.push({ role, content, images: images || undefined, ts: Date.now(), sym: state.selected || "" });
-  // 对话自动存档（最近 60 条，含 AI 回复与错误提示不存）
+  // 对话自动存档（最近 60 条，含 AI 回复与错误提示不存；剥离 base64 图片防撑爆 localStorage 配额）
   try {
     const keep = state.chat.slice(-60);
     localStorage.setItem("fa_chat_history", JSON.stringify(
-      keep.filter((m) => m.role === "user" || m.role === "assistant")));
+      keep.filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({ role: m.role, content: m.content, ts: m.ts, sym: m.sym || "" }))));
   } catch (e) { /* 存储满等异常不阻塞 */ }
   const box = $("chatBox");
   const div = document.createElement("div");
@@ -2761,7 +2743,7 @@ async function sendChat(text) {
     const msg = e.name === "AbortError"
       ? "等待超时（超过 2 分钟），请稍后重试或换个更快的模型"
       : `${e.message}\n请检查 AI 设置中的 API Key 是否正确、是否有余额。`;
-    pushMsg("assistant", `调用失败：${msg}`, "error");
+    pushMsg("error", `调用失败：${msg}`, "error");  // error 角色：不进存档/复盘语料/AI 上下文
   }
 }
 
