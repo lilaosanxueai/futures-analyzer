@@ -11,7 +11,7 @@
     if (t && t !== "dark") document.documentElement.setAttribute("data-theme", t);
   })();
 </script>
-<link rel="stylesheet" href="/static/style.css?v=0826e">
+<link rel="stylesheet" href="/static/style.css?v=0826f">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0826e</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0826f</span>
     <div style="position:relative">
       <button id="btnTheme" class="btn ghost" title="切换皮肤">🎨</button>
       <div id="themePop" class="theme-pop hidden"></div>
@@ -297,7 +297,12 @@
       <select id="cfgProvider">
         <option value="zhipu">智谱 GLM（open.bigmodel.cn）</option>
         <option value="deepseek">DeepSeek（platform.deepseek.com）</option>
+        <option value="custom">自定义 / Coding Plan（Z.ai 等）</option>
       </select>
+    </div>
+    <div class="form-row hidden" id="rowBaseUrl">
+      <label>接口地址</label>
+      <input id="cfgBaseUrl" type="text" placeholder="OpenAI 兼容端点，如 https://api.z.ai/api/paas/v4" autocomplete="off">
     </div>
     <div class="form-row">
       <label>API Key</label>
@@ -305,8 +310,10 @@
     </div>
     <div class="form-row">
       <label>模型</label>
-      <input id="cfgModel" type="text" list="modelList" placeholder="如 glm-4-flash / deepseek-chat">
+      <input id="cfgModel" type="text" list="modelList" placeholder="如 glm-5 / deepseek-chat">
       <datalist id="modelList">
+        <option value="glm-5">GLM-5（Coding Plan 主力）</option>
+        <option value="glm-4.6">GLM-4.6（Coding Plan）</option>
         <option value="deepseek-v4-flash-vision-exp">DeepSeek 视觉（支持图片）</option>
         <option value="deepseek-chat">DeepSeek 文本</option>
         <option value="deepseek-reasoner">DeepSeek 推理</option>
@@ -405,6 +412,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0826e"></script>
+<script src="/static/app.js?v=0826f"></script>
 </body>
 </html>

@@ -2773,10 +2773,12 @@ async function loadAiConfig() {
     badge.className = "ai-badge" + (cfg.has_key ? " ready" : "");
     $("cfgProvider").value = cfg.provider;
     $("cfgModel").value = cfg.model;
+    $("cfgBaseUrl").value = cfg.custom_base_url || "";
+    $("rowBaseUrl").classList.toggle("hidden", cfg.provider !== "custom");
     $("cfgStatus").textContent = cfg.has_key ? "已保存 Key，可直接使用" : "";
     if (cfg.keys_status) {
       $("keyStatus").textContent =
-        `Key 状态 — 智谱：${cfg.keys_status.zhipu ? "✓ 已保存" : "✗ 未保存"}　DeepSeek：${cfg.keys_status.deepseek ? "✓ 已保存" : "✗ 未保存"}`;
+        `Key 状态 — 智谱：${cfg.keys_status.zhipu ? "✓ 已保存" : "✗ 未保存"}　DeepSeek：${cfg.keys_status.deepseek ? "✓ 已保存" : "✗ 未保存"}　自定义：${cfg.keys_status.custom ? "✓ 已保存" : "✗ 未保存"}`;
     }
     if (typeof cfg.feishu_configured !== "undefined") {
       $("feishuStatus").textContent = `飞书同步：${cfg.feishu_configured ? "✓ 已配置，心得可云端同步" : "未配置（不影响本地记录）"}`;
@@ -2801,9 +2803,10 @@ $("settingsModal").addEventListener("click", (e) => {
   if (e.target === $("settingsModal")) $("settingsModal").classList.add("hidden");
 });
 
-const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-chat" };
+const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-chat", custom: "glm-5" };
 $("cfgProvider").addEventListener("change", () => {
   $("cfgModel").value = DEFAULT_MODELS[$("cfgProvider").value] || "";
+  $("rowBaseUrl").classList.toggle("hidden", $("cfgProvider").value !== "custom");
 });
 
 $("btnSaveSettings").addEventListener("click", async () => {
@@ -2811,6 +2814,7 @@ $("btnSaveSettings").addEventListener("click", async () => {
     provider: $("cfgProvider").value,
     model: $("cfgModel").value.trim() || DEFAULT_MODELS[$("cfgProvider").value],
     api_key: $("cfgApiKey").value.trim(),
+    custom_base_url: $("cfgBaseUrl").value.trim(),
   };
   try {
     await api("/api/ai/config", {

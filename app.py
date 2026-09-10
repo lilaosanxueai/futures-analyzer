@@ -53,7 +53,19 @@ PROVIDERS = {
         "base_url": "https://api.deepseek.com",
         "default_model": "deepseek-chat",
     },
+    "custom": {
+        "label": "自定义 / Coding Plan",
+        "base_url": "",  # 由设置页填写（Coding Plan 等 OpenAI 兼容端点）
+        "default_model": "glm-5",
+    },
 }
+
+
+def provider_base_url(cfg: dict, provider: str) -> str:
+    """自定义服务商的接口地址从配置读取；返回空串由调用方统一报错"""
+    if provider == "custom":
+        return str(cfg.get("custom_base_url") or "").strip().rstrip("/")
+    return PROVIDERS[provider]["base_url"]
 
 # 各模型最大输出 tokens（按模型名片段匹配；未知模型用默认值，超限时自动降级）
 MODEL_MAX_OUTPUT = [
@@ -811,6 +823,7 @@ async def get_ai_config():
         "model": cfg["model"] or PROVIDERS[provider]["default_model"],
         "has_key": bool(cfg["api_keys"].get(provider)),
         "keys_status": {p: bool(cfg["api_keys"].get(p)) for p in PROVIDERS},
+        "custom_base_url": cfg.get("custom_base_url", ""),
         "feishu_configured": bool((cfg.get("feishu") or {}).get("app_id")),
     }
 
@@ -820,6 +833,7 @@ class AiConfigIn(BaseModel):
     model: str = ""
     api_key: str = ""
     clear_key: bool = False
+    custom_base_url: str = ""
 
 
 @app.post("/api/ai/config")
@@ -827,6 +841,10 @@ async def set_ai_config(body: AiConfigIn):
     if body.provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail="不支持的服务商")
     cfg = load_config()
+    if body.custom_base_url.strip():
+        cfg["custom_base_url"] = body.custom_base_url.strip()
+    if body.provider == "custom" and not (cfg.get("custom_base_url") or "").strip():
+        raise HTTPException(status_code=400, detail="自定义服务商需先填写接口地址（如 https://api.z.ai/api/paas/v4）")
     cfg["provider"] = body.provider
     cfg["model"] = body.model.strip() or PROVIDERS[body.provider]["default_model"]
     if body.clear_key:
@@ -1034,7 +1052,9 @@ async def ai_chat(body: ChatIn):
     api_key = cfg["api_keys"].get(provider)
     if not api_key:
         raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在右上角「AI 设置」中配置")
-    base_url = PROVIDERS[provider]["base_url"]
+    base_url = provider_base_url(cfg, provider)
+    if not base_url:
+        raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
     model = cfg["model"] or PROVIDERS[provider]["default_model"]
 
     context = "" if body.light else await _build_market_context(body.symbol)
@@ -1140,7 +1160,9 @@ async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
     api_key = cfg["api_keys"].get(provider)
     if not api_key:
         raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在「⚙ AI 设置」中配置")
-    base_url = PROVIDERS[provider]["base_url"]
+    base_url = provider_base_url(cfg, provider)
+    if not base_url:
+        raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
     model = cfg["model"] or PROVIDERS[provider]["default_model"]
     async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(
@@ -1552,9 +1574,12 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
     api_key = cfg["api_keys"].get(provider)
     if not api_key:
         raise RuntimeError("未配置 API Key")
+    base_url = provider_base_url(cfg, provider)
+    if not base_url:
+        raise RuntimeError("自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
     async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(
-            f"{PROVIDERS[provider]['base_url']}/chat/completions",
+            f"{base_url}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": cfg["model"] or PROVIDERS[provider]["default_model"],
@@ -1952,7 +1977,9 @@ async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
     api_key = cfg["api_keys"].get(provider)
     if not api_key:
         raise HTTPException(status_code=400, detail="尚未配置 API Key——主观项已全部改为 AI 判定，请先在「⚙ AI 设置」中配置")
-    base_url = PROVIDERS[provider]["base_url"]
+    base_url = provider_base_url(cfg, provider)
+    if not base_url:
+        raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
     model = cfg["model"] or PROVIDERS[provider]["default_model"]
     max_tokens = max_tokens or max_output_for(model)
     import logging

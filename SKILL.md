@@ -151,6 +151,15 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## 自定义服务商 / Coding Plan 接入（v0826f）
+
+应用户要求支持把 GLM Coding Plan 等订阅接入应用（替代按量计费）：
+
+1. **PROVIDERS 新增 `custom`**（"自定义 / Coding Plan"）：接口地址由设置页填写存 `config.json` 的 `custom_base_url`（Key 仍按服务商独立存 `api_keys.custom`，不进源码）。`provider_base_url(cfg, provider)` 统一解析，ai_chat/_llm_text/_llm_json/_call_ai_simple 四处调用点替换；custom 未填地址时 400/RuntimeError 明确报错。
+2. **设置页**：服务商下拉加「自定义 / Coding Plan（Z.ai 等）」→ 出现「接口地址」行（如 `https://api.z.ai/api/paas/v4`，OpenAI 兼容端点）；模型候选加 glm-5/glm-4.6；Key 状态行加自定义。切回内置服务商时地址行隐藏。
+3. **坑**：项目 `.hidden` 无全局规则（全部按组件 `.X.hidden` 成对定义），`#rowBaseUrl` 直接挂 hidden 会被 `.form-row{display:flex}` 压过——补 `#rowBaseUrl.hidden{display:none}`（ID 特异性压 flex）。
+4. 注意：coding plan 定位是编程工具用途，接行情分析属非预期场景，有限流/风控的可能，出问题切回 DeepSeek 即可（Key 独立保存切换不丢）。图片对话需视觉模型（coding plan 的 GLM 文本模型不支持，前端已有提示）。
+
 ## Token 优化补遗（v0826e）
 
 补齐上轮审计盲区（持仓体检/单笔复盘本就轻量无需动），修掉两个残余浪费：
