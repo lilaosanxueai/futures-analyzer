@@ -1151,7 +1151,7 @@ async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.5,
-                "max_tokens": max(1600, max_tokens),
+                "max_tokens": max(max_output_for(model), max_tokens),  # 思维链模型需给足（同 _llm_json）
             },
         )
     if resp.status_code == 401:
@@ -2611,6 +2611,66 @@ async def del_note(note_id: str):
         raise HTTPException(status_code=404, detail="心得不存在")
     _save_notes(remain)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- AI 复盘分析（对话存档 + 心得）
+
+class AiReviewIn(BaseModel):
+    chats: list[dict] = []   # {role, content, ts?, sym?} 前端已按时间段/品种过滤
+    notes: list[dict] = []   # {date, title, symbol, tags, content}
+    symbols: list[str] = []
+    since: str = ""          # YYYY-MM-DD 闭区间
+    until: str = ""
+
+
+def _clip_txt(s, n: int) -> str:
+    s = str(s or "").strip().replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+@app.post("/api/ai/review")
+async def ai_review(body: AiReviewIn):
+    chats = [c for c in (body.chats or []) if str(c.get("content", "")).strip()][:60]
+    notes = [n for n in (body.notes or []) if str(n.get("content", "")).strip()][:50]
+    if not chats and not notes:
+        raise HTTPException(status_code=400, detail="所选范围内没有可分析的记录，请调整时间段或品种")
+
+    parts = []
+    scope = f"（品种：{'、'.join(body.symbols) if body.symbols else '全部'}；时间：{body.since or '最早'} ~ {body.until or '今天'}）"
+    if notes:
+        lines = [
+            f"- [{n.get('date', '')}]{('[' + str(n['symbol']) + ']') if n.get('symbol') else ''}"
+            f"{_clip_txt(n.get('title', ''), 30)}：{_clip_txt(n.get('content', ''), 220)}"
+            f"{(' ' + str(n['tags'])) if n.get('tags') else ''}"
+            for n in notes
+        ]
+        parts.append(f"【交易心得 {len(notes)} 条】（用户亲手记录的判断/教训/反思，最能代表本人视角）\n" + "\n".join(lines))
+    if chats:
+        lines = []
+        for c in chats:
+            ts = c.get("ts")
+            when = datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M") if ts else "时间未知"
+            sym = str(c.get("sym") or "")
+            ask = c.get("role") == "user"
+            lines.append(f"- [{when}{(' ' + sym) if sym else ''}]{'问' if ask else '答'}："
+                         f"{_clip_txt(c.get('content', ''), 100 if ask else 380)}")
+        parts.append(f"【AI 对话 {len(chats)} 条】（用户提问与 AI 助手当时的分析）\n" + "\n".join(lines))
+
+    prompt = f"""以下是这位期货交易者的存档{scope}。请基于且仅基于这些内容，生成一份针对性复盘分析报告：
+
+一、品种关注与观点演化：主要关注哪些品种？观点如何随时间演变（指出转折点）？
+二、判断质量：用户心得与提问体现的判断，哪些被存档中后续内容验证？哪些被证伪？（不得臆造存档外的行情）
+三、行为模式：提问频率、关注点切换、情绪状态（急躁/恐惧/追涨杀跌）反映的交易行为特征。
+四、重复性问题：反复出现的错误或思维陷阱。
+五、值得保留：存档中体现的好习惯，明确肯定。
+六、改进建议：3~5 条可执行建议，逐条对应上述发现。
+
+用中文输出 Markdown（## 分节），关键论断引用存档原句；信息不足时如实说明，不编造。
+
+""" + "\n\n".join(parts)
+
+    report = await _llm_text_retry(prompt, max_tokens=2400)
+    return {"ok": True, "report": report, "stats": {"chats": len(chats), "notes": len(notes)}}
 
 
 # ---------------------------------------------------------------- 飞书云文档同步

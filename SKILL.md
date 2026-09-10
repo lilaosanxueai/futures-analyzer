@@ -151,6 +151,16 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## AI 复盘分析（v0826b）
+
+应用户要求：AI 对话与交易心得按已有记录生成针对性复盘报告，可灵活选时间段、品种。
+
+1. **`POST /api/ai/review`**：前端按筛选条件过滤后传 chats（{role,content,ts,sym}，截 60 条：问≤100 字/答≤380 字）+ notes（截 50 条 content≤220 字）→ 组装六段式复盘 prompt（品种观点演化/判断质量验证/行为模式/重复性问题/保留做法/改进建议，要求引用原句、禁止臆造存档外行情）→ `_llm_text_retry` 生成 Markdown 报告。
+2. **对话存档补 ts/sym**：`pushMsg` 落 `Date.now()` 与当前选中品种（此前只有 role/content，无法按时间/品种筛）。旧存档无 ts 的条目仅在「全部时间」档纳入；无 sym 的按内容关键词匹配品种。
+3. **心得页新增「🧠 AI 复盘」按钮 + 弹窗**：数据源勾选（AI 对话/交易心得）、时间段（7/30/90 天/全部/自定义起止）、品种（逗号分隔+datalist 候选，前缀匹配 SC→SC0）、实时统计预览「命中对话 X 条、心得 Y 条」；报告渲染复用 renderMarkdown。
+4. **顺带修复 `_llm_text` 空响应**：max_tokens 下限从硬编码 1600 改为 `max_output_for(model)`（deepseek 系 8192）——与 `_llm_json` 对齐；此前 deepseek-v4-flash 思维链耗尽 1600 token 必返回空，实时解读等所有 `_llm_text` 调用方一并受益。
+5. 实测：真实生成 1519 字报告，AI 对单条记录如实说明局限、引用原句、不编造。
+
 ## UI 修复：深色主题下按钮白块（v0825z）
 
 用户截图反馈纪律页「现价」旁有刺眼白块。根因：`.btn` 基础类只设 `color: var(--text-strong)`（深色主题=纯白）却未设 background——Windows Chrome 原生按钮底色是 buttonface 浅灰 rgb(240,240,240)，白字白底文字隐形、按钮成白块。13 处裸 `.btn small-btn` 全部受害（填入/保存参数/纪律周报/CSV/对话历史/测试/平仓/🩺/改/复盘/复制/清空）。

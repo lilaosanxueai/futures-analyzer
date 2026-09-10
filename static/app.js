@@ -1406,6 +1406,124 @@ $("noteContent").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) addNote();
 });
 $("btnNoteSync").addEventListener("click", () => syncNotes());
+
+/* ---------- AI 复盘分析（对话存档 + 心得，按时间段/品种筛选） ---------- */
+
+function rvDateStr(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function rvRangeDates() {
+  const mode = $("rvRange").value;
+  if (mode === "all") return { since: "", until: "" };
+  if (mode === "custom") {
+    return { since: $("rvFrom").value || "", until: $("rvTo").value || "" };
+  }
+  const n = parseInt(mode, 10);
+  const until = new Date();
+  const since = new Date(Date.now() - (n - 1) * 86400000);
+  return { since: rvDateStr(since.getTime()), until: rvDateStr(until.getTime()) };
+}
+
+function rvSymFilters() {
+  return [...new Set($("rvSymbols").value.split(/[,，\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
+}
+
+function rvMatchSym(target, filters, content) {
+  if (!filters.length) return true;
+  if (target) return filters.some((f) => target === f || target.startsWith(f) || f.startsWith(target));
+  return filters.some((f) => (content || "").includes(f) || (content || "").includes(f.replace(/0$/, "")));
+}
+
+function rvCollect() {
+  const { since, until } = rvRangeDates();
+  const filters = rvSymFilters();
+  const inRange = (d) => (!since || d >= since) && (!until || d <= until);
+  const chats = [];
+  const notes = [];
+  if ($("rvChats").checked) {
+    for (const m of state.chat) {
+      if (m.role !== "user" && m.role !== "assistant") continue;
+      const d = m.ts ? rvDateStr(m.ts) : "";
+      // 旧存档无时间戳：仅在"全部时间"档纳入
+      if (d ? !inRange(d) : (since || until)) continue;
+      if (!rvMatchSym(m.sym, filters, m.content)) continue;
+      chats.push({ role: m.role, content: m.content, ts: m.ts, sym: m.sym || "" });
+    }
+  }
+  if ($("rvNotes").checked) {
+    for (const n of notesState.items) {
+      if (!inRange(n.date || "")) continue;
+      if (!rvMatchSym(n.symbol, filters, n.title + " " + n.content)) continue;
+      notes.push({ date: n.date, title: n.title, symbol: n.symbol || "", tags: n.tags || "", content: n.content });
+    }
+  }
+  return { since, until, filters, chats, notes };
+}
+
+function rvUpdateStat() {
+  const { since, until, filters, chats, notes } = rvCollect();
+  const anySrc = $("rvChats").checked || $("rvNotes").checked;
+  const rangeTxt = since || until ? `${since || "…"} ~ ${until || "…"}` : "全部时间";
+  $("rvStat").textContent = anySrc
+    ? `范围：${rangeTxt} · 品种：${filters.join("、") || "全部"} → 命中 AI 对话 ${chats.length} 条、心得 ${notes.length} 条${(!chats.length && !notes.length) ? "（无记录，请放宽条件）" : ""}`
+    : "请至少选择一个数据源";
+}
+
+async function runAiReview() {
+  const { since, until, filters, chats, notes } = rvCollect();
+  if (!chats.length && !notes.length) {
+    toast("所选范围内没有可分析的记录", true);
+    return;
+  }
+  const btn = $("btnReviewRun");
+  btn.disabled = true;
+  $("rvStatus").textContent = "分析中，约 0.5~2 分钟…";
+  $("reviewOut").classList.add("hidden");
+  try {
+    const d = await api("/api/ai/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chats, notes, symbols: filters, since, until }),
+    });
+    $("reviewOut").innerHTML = renderMarkdown(d.report || "");
+    $("reviewOut").classList.remove("hidden");
+    $("rvStatus").textContent = `已生成（对话 ${d.stats.chats} 条 + 心得 ${d.stats.notes} 条）`;
+  } catch (e) {
+    $("rvStatus").textContent = "";
+    toast(`复盘生成失败：${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function openReviewModal() {
+  if (!notesState.items.length) loadNotes();
+  // 品种候选：心得中出现过的 + 当前自选 + 国际盘
+  const syms = new Set([
+    ...notesState.items.map((n) => n.symbol).filter(Boolean),
+    ...state.watchlist,
+    ...INTL_SYMBOLS,
+  ]);
+  $("rvSymbolList").innerHTML = [...syms].map((s) => `<option value="${esc(s)}">`).join("");
+  $("reviewOut").classList.add("hidden");
+  $("rvStatus").textContent = "";
+  $("reviewModal").classList.remove("hidden");
+  rvUpdateStat();
+}
+
+$("btnAiReview").addEventListener("click", openReviewModal);
+$("btnCloseReview").addEventListener("click", () => $("reviewModal").classList.add("hidden"));
+$("btnReviewRun").addEventListener("click", runAiReview);
+["rvChats", "rvNotes", "rvRange", "rvFrom", "rvTo"].forEach((id) =>
+  $(id).addEventListener("change", () => {
+    $("rvFrom").classList.toggle("hidden", $("rvRange").value !== "custom");
+    $("rvTo").classList.toggle("hidden", $("rvRange").value !== "custom");
+    rvUpdateStat();
+  })
+);
+$("rvSymbols").addEventListener("input", rvUpdateStat);
 // 品种输入框：默认带出当前选中合约，可下拉选主力合约或自由输入
 function prefillNoteSymbol() {
   const el = $("noteSymbol");
@@ -2531,7 +2649,8 @@ document.addEventListener("click", (e) => {
 });
 
 function pushMsg(role, content, cls, images) {
-  state.chat.push({ role, content, images: images || undefined });
+  // ts/sym 供「AI 复盘」按时间段/品种筛选（旧存档无此字段则仅在全部时间档纳入）
+  state.chat.push({ role, content, images: images || undefined, ts: Date.now(), sym: state.selected || "" });
   // 对话自动存档（最近 60 条，含 AI 回复与错误提示不存）
   try {
     const keep = state.chat.slice(-60);
