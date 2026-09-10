@@ -882,9 +882,8 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             directory = await get_directory()
             name = directory.get(symbol, {}).get("name", "")
             lines = [
-                f"{d['date']} 开{_num(d.get('open'))} 高{_num(d.get('high'))} "
-                f"低{_num(d.get('low'))} 收{_num(d.get('close'))} "
-                f"量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
+                f"{d['date']} 高{_num(d.get('high'))} 低{_num(d.get('low'))} "
+                f"收{_num(d.get('close'))} 量{_num(d.get('volume'))} 持仓{_num(d.get('hold'))}"
                 for d in daily[-5:]
             ]
             parts.append(f"【{symbol}（{name}）近 5 个交易日日线】\n" + "\n".join(lines))
@@ -987,13 +986,12 @@ class ChatIn(BaseModel):
     symbol: Optional[str] = None
 
 
-SYSTEM_PROMPT = """你是一位专业的国内期货市场分析助手。用户会给你多维数据：实时行情、主力资金情绪（价量仓三要素评分）、宏观要闻（特朗普/中东）、近期日线与技术指标（MA/MACD/RSI/KDJ/BOLL）及信号、日内走势结构、中期统计、基本面框架。请按以下权重组织分析：
-1)【主力资金动向】资金情绪评分解读、增减仓含义、多空主导力量——主要依据；
-2)【宏观与消息面】特朗普表态、中东局势对供给/避险/定价的影响路径——主要依据；
-3)【基本面】供需逻辑与库存周期；
-4)【技术面】均线/MACD/KDJ/RSI/BOLL 仅作入场时机与关键价位参考，不作为方向主论据。
-要求：观点客观中立、条理清晰、使用中文、引用具体数值；资金面与技术面矛盾时明确指出并以资金面与宏观为主；如某维数据缺失要明说；数据为连续主力合约口径，注意换月影响。
-你的输出仅供研究参考，不构成投资建议，必要时提醒用户注意风险。"""
+SYSTEM_PROMPT = """你是专业期货分析助手。依据所给数据按权重组织分析：
+1) 主力资金动向（资金情绪评分、增减仓含义、多空力量）——主要依据；
+2) 宏观消息面（特朗普表态、中东局势对供给/避险/定价的影响路径）——主要依据；
+3) 基本面（供需逻辑与库存周期）；
+4) 技术面（均线/MACD/KDJ/RSI/BOLL）仅作入场时机与关键价位参考，不作方向主论据。
+要求：中文、客观中立、条理清晰、引用具体数值；资金面与技术面矛盾时明说并以资金面与宏观为准；数据缺失要明说；连续主力合约口径注意换月影响。输出仅供研究参考，不构成投资建议，必要时提醒风险。"""
 
 
 def _build_api_messages(chat_messages: list[ChatMessage], system: str) -> list[dict]:
@@ -1199,9 +1197,12 @@ async def _realtime_snapshot(symbol: str) -> dict:
     m30_txt = ""
     try:
         m30 = (await get_minute(symbol, "30"))[-12:]
-        m30_txt = "；".join(
-            f"{r['datetime'][5:16]} O{r['open']} H{r['high']} L{r['low']} C{r['close']}" for r in m30
-        )
+        # token 优化：12 根 OHLC 逐根展开太长，压缩为收盘序列 + 区间高低（节奏信息保留）
+        cs = [r["close"] for r in m30 if r.get("close")]
+        if len(cs) >= 2:
+            hi = max(r["high"] for r in m30 if r.get("high"))
+            lo = min(r["low"] for r in m30 if r.get("low"))
+            m30_txt = f"近12根收盘 {'、'.join(str(c) for c in cs)}（区间 {lo}~{hi}）"
     except Exception:
         pass
     try:
@@ -3071,7 +3072,7 @@ async def _generate_report() -> str:
 
     try:
         nd = await news()
-        matched = nd.get("items", [])[:20]
+        matched = nd.get("items", [])[:12]  # token 优化：12 条已足够覆盖主线
         if matched:
             lines = [
                 f"- [{'🇺🇸' if 'trump' in i.get('groups', []) else '🌍'} {i['time'][5:16]}] {i['title'][:60]}"

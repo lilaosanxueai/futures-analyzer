@@ -2529,8 +2529,8 @@ function compressImage(file) {
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
-        // 缩到最大边 1568px（视觉模型友好分辨率），转 JPEG 控制体积
-        const MAX_SIDE = 1568;
+        // 缩到最大边 1120px（视觉模型按分辨率计 token，1120 已足够看清图表/K线）转 JPEG 控制体积
+        const MAX_SIDE = 1120;
         const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
         const h = Math.max(1, Math.round(img.height * scale));
@@ -2715,12 +2715,12 @@ async function sendChat(text) {
   try {
     const ctrl = new AbortController();
     abortTimer = setTimeout(() => ctrl.abort(), 120000);
-    // token 优化：历史裁剪——最近 4 条完整，更早的消息每条截断到 200 字
+    // token 优化：历史裁剪——最近 4 条完整，更早的截到 120 字；窗口 14 条
     const allMsgs = state.chat.filter((m) => m.role === "user" || m.role === "assistant");
-    const msgs = allMsgs.slice(-20).map((m, i, arr) => {
+    const msgs = allMsgs.slice(-14).map((m, i, arr) => {
       const keepFull = i >= arr.length - 4 || m.role === "user";
-      return m.content && m.content.length > 200 && !keepFull
-        ? { ...m, content: m.content.slice(0, 200) + "…（已截断）" }
+      return m.content && m.content.length > 120 && !keepFull
+        ? { ...m, content: m.content.slice(0, 120) + "…（已截断）" }
         : m;
     });
     const data = await api("/api/ai/chat", {
