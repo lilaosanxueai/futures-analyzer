@@ -688,7 +688,8 @@ html[data-theme="aurora"] .btn.primary { color: #0b1020; }  /* 亮主色底配�
   box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
 }
 .search-drop.hidden { display: none; }
-#rowBaseUrl.hidden { display: none; }  /* 接口地址行按服务商显隐（.form-row 的 flex 会压过通用 hidden） */
+#rowBaseUrl.hidden { display: none; }
+.hidden { display: none !important; }  /* 全局兜底：任何元素挂 .hidden 即隐藏（此前仅按组件成对定义，裸元素会失效） */  /* 接口地址行按服务商显隐（.form-row 的 flex 会压过通用 hidden） */
 .drop-item { padding: 6px 10px; cursor: pointer; font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
 .drop-item:hover, .drop-item.hl { background: var(--selected); }
 .drop-item b { min-width: 38px; }

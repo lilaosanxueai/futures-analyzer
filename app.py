@@ -70,6 +70,27 @@ def provider_base_url(cfg: dict, provider: str) -> str:
 
 _PROVIDER_HARD_CODES = (401, 402, 429)  # 认证/欠费/限流——换服务商可解，触发兜底
 
+# 熔断降级：连续 2 次硬错误的服务商 10 分钟内排到候选末尾（仍可兜底，不再每次先撞墙）
+_provider_health: dict[str, dict] = {}
+
+
+def _note_provider_fail(provider: str) -> None:
+    import time as _t
+    h = _provider_health.setdefault(provider, {"fails": 0, "until": 0.0})
+    h["fails"] += 1
+    if h["fails"] >= 2:
+        h["until"] = _t.monotonic() + 600
+
+
+def _note_provider_ok(provider: str) -> None:
+    _provider_health.pop(provider, None)
+
+
+def _provider_demoted(provider: str) -> bool:
+    import time as _t
+    h = _provider_health.get(provider)
+    return bool(h and h["until"] > _t.monotonic())
+
 
 def _is_provider_hard_error(resp) -> bool:
     if getattr(resp, "status_code", 0) in _PROVIDER_HARD_CODES:
@@ -90,6 +111,7 @@ def _llm_candidates(cfg: dict) -> list[dict]:
             continue
         model = (cfg["model"] or PROVIDERS[p]["default_model"]) if p == active else PROVIDERS[p]["default_model"]
         out.append({"provider": p, "base_url": url, "api_key": key, "model": model})
+    out.sort(key=lambda c: _provider_demoted(c["provider"]))  # 稳定排序：被熔断的沉底
     return out
 
 # 各模型最大输出 tokens（按模型名片段匹配；未知模型用默认值，超限时自动降级）
@@ -1131,6 +1153,7 @@ async def ai_chat(body: ChatIn):
                 or (resp.status_code == 400 and "model" in resp.text.lower())  # 模型名失效（平台目录变更）也换下家
             ):
                 logger.info(f"[ai-chat] {provider}/{model} 错误 {resp.status_code}，切换兜底服务商")
+                _note_provider_fail(provider)
                 fallback_used = True
                 break  # 换下一个候选
 
@@ -1174,6 +1197,7 @@ async def ai_chat(body: ChatIn):
                 {"role": "user", "content": "继续，从你刚才中断的地方接着写，不要重复已有内容"},
             ]
         if full_reply:
+            _note_provider_ok(provider)
             break  # 本候选成功
 
     logger.info(f"[ai-chat] 完成：{provider}/{model}，耗时 {_time.time() - t0:.0f}s，共 {len(full_reply)} 字"
@@ -1224,10 +1248,12 @@ async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
             if content:
                 if idx > 0:
                     logger.info(f"[llm-text] 主服务商不可用，由 {cand['provider']}/{cand['model']} 兜底")
+                _note_provider_ok(cand["provider"])
                 return content
             last = {"code": 502, "detail": "AI 返回空内容（推理模型思维链耗尽 token，请重试）"}
         elif _is_provider_hard_error(resp) and idx < len(candidates) - 1:
             logger.info(f"[llm-text] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            _note_provider_fail(cand["provider"])
             continue
         else:
             detail = ""
@@ -1652,11 +1678,13 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
             if content:
                 if idx > 0:
                     logger.info(f"[ai-simple] 主服务商不可用，由 {cand['provider']}/{cand['model']} 兜底")
+                _note_provider_ok(cand["provider"])
                 return content
             last_err = RuntimeError("AI 返回空内容")
             continue
         if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
             logger.info(f"[ai-simple] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            _note_provider_fail(cand["provider"])
             continue
         resp.raise_for_status()
     raise last_err
@@ -2071,6 +2099,7 @@ async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
                 resp = await build(max_tokens)
         if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
             logger.info(f"[discipline-ai] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            _note_provider_fail(cand["provider"])
             continue
         if resp.status_code == 401:
             raise HTTPException(status_code=401, detail="API Key 无效，请检查 AI 设置")
@@ -2098,6 +2127,7 @@ async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
             raise HTTPException(status_code=502, detail=f"AI 的 JSON 无法解析：{content[:120]}")
         logger.info(f"[discipline-ai] {cand['provider']}/{model} 判定完成，耗时 {_time.time() - t0:.0f}s"
                     + ("（兜底）" if idx > 0 else ""))
+        _note_provider_ok(cand["provider"])
         return out
     raise HTTPException(status_code=502, detail="AI 调用失败")
 
@@ -2777,6 +2807,62 @@ async def ai_review(body: AiReviewIn):
 
     report = await _llm_text_retry(prompt, max_tokens=2400)
     return {"ok": True, "report": report, "stats": {"chats": len(chats), "notes": len(notes)}}
+
+
+class ReviewSaveIn(BaseModel):
+    report: str
+    since: str = ""
+    until: str = ""
+    symbols: list[str] = []
+    stats: dict = {}
+
+
+async def _feishu_review_doc_id():
+    """确保《AI 复盘报告》文档存在并返回 doc_id；失败返回 None（不抛异常）"""
+    import logging
+    cfg = load_config()
+    doc_id = (cfg.get("feishu") or {}).get("review_doc_id") or ""
+    if doc_id:
+        return doc_id
+    try:
+        token = await _feishu_get_token()
+        async with httpx.AsyncClient(timeout=20) as _client:
+            r = await _client.post(
+                f"{FEISHU_BASE}/docx/v1/documents",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"title": "AI 复盘报告"},
+            )
+        data = r.json()
+        if data.get("code") == 0 and data.get("data", {}).get("document"):
+            doc_id = data["data"]["document"]["document_id"]
+            cfg.setdefault("feishu", {})["review_doc_id"] = doc_id
+            save_config(cfg)
+    except Exception as e:
+        logging.getLogger("uvicorn.error").info(f"[review-save] 创建文档异常：{type(e).__name__} {e}")
+    return doc_id or None
+
+
+@app.post("/api/ai/review-save")
+async def ai_review_save(body: ReviewSaveIn):
+    """把生成的复盘报告追加到飞书《AI 复盘报告》文档（刷新不丢、手机可看）"""
+    cfg = load_config()
+    fs = cfg.get("feishu") or {}
+    if not fs.get("app_id") or not fs.get("app_secret"):
+        raise HTTPException(status_code=400, detail="未配置飞书应用凭证（⚙ 设置 → 飞书同步）")
+    if not body.report.strip():
+        raise HTTPException(status_code=400, detail="报告内容为空")
+    doc_id = await _feishu_review_doc_id()
+    if not doc_id:
+        raise HTTPException(status_code=502, detail="飞书文档创建失败，请稍后重试")
+    rng = f"{body.since or '最早'}~{body.until or '今天'}" if (body.since or body.until) else "全部时间"
+    st = body.stats or {}
+    head = (
+        f"# 复盘报告 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"- 范围：{rng} · 品种：{'、'.join(body.symbols) or '全部'}"
+        f" · 对话 {st.get('chats', 0)} 条 + 心得 {st.get('notes', 0)} 条\n"
+    )
+    await _feishu_append(doc_id, _md_to_feishu_blocks(head + body.report))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- 飞书云文档同步

@@ -151,6 +151,12 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## 复盘存飞书 + 熔断降级（v0826i）
+
+1. **AI 复盘报告存飞书**：`POST /api/ai/review-save`（report/since/until/symbols/stats）→ 确保《AI 复盘报告》文档（`_feishu_review_doc_id`，复用 chat_doc_id 模式，`review_doc_id` 存 config）→ `_md_to_feishu_blocks` 追加（标题行含生成时间/范围/品种/样本量）。复盘弹窗生成后出现「☁ 存飞书」按钮——此前报告刷新即丢，至此全部 AI 产出（对话/心得/晨报/复盘）均可留痕飞书。未配置飞书凭证时 400 明确指引。
+2. **熔断降级**：`_provider_health`（内存）——服务商连续 2 次硬错误后 10 分钟内在 `_llm_candidates` 中沉底（稳定排序，仍可兜底不摘除），成功即复位；四调用点已埋 `_note_provider_fail/ok`。主服务商被打满时不再每次先撞 429 再换家（省一次往返延迟）。
+3. **补全局 `.hidden { display:none !important }`**：此前 `.hidden` 仅按组件成对定义（.modal.hidden 等），**裸元素挂 hidden 完全不隐藏**（rowBaseUrl、btnReviewSave 连续两次踩坑）——全局规则一劳永逸，四视图冒烟回归无副作用。
+
 ## LLM 服务商自动兜底（v0826h）
 
 用户切 Coding Plan 的 glm-5.3-flash 后全模型 429（plan 额度/限流窗口打满，与其 AI 编程会话共享），暴露单服务商依赖的脆弱性：

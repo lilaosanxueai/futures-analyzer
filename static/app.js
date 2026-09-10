@@ -1445,6 +1445,8 @@ function rvUpdateStat() {
     : "请至少选择一个数据源";
 }
 
+let rvLast = null;  // 最近一次生成的报告（存飞书用）
+
 async function runAiReview() {
   const { since, until, filters, chats, notes } = rvCollect();
   if (!chats.length && !notes.length) {
@@ -1455,6 +1457,7 @@ async function runAiReview() {
   btn.disabled = true;
   $("rvStatus").textContent = "分析中，约 0.5~2 分钟…";
   $("reviewOut").classList.add("hidden");
+  $("btnReviewSave").classList.add("hidden");
   try {
     const d = await api("/api/ai/review", {
       method: "POST",
@@ -1464,6 +1467,8 @@ async function runAiReview() {
     $("reviewOut").innerHTML = renderMarkdown(d.report || "");
     $("reviewOut").classList.remove("hidden");
     $("rvStatus").textContent = `已生成（对话 ${d.stats.chats} 条 + 心得 ${d.stats.notes} 条）`;
+    rvLast = { report: d.report || "", since, until, symbols: filters, stats: d.stats };
+    $("btnReviewSave").classList.remove("hidden");
   } catch (e) {
     $("rvStatus").textContent = "";
     toast(`复盘生成失败：${e.message}`, true);
@@ -1471,6 +1476,24 @@ async function runAiReview() {
     btn.disabled = false;
   }
 }
+
+$("btnReviewSave").addEventListener("click", async () => {
+  if (!rvLast) return;
+  const btn = $("btnReviewSave");
+  btn.disabled = true;
+  try {
+    await api("/api/ai/review-save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rvLast),
+    });
+    toast("已存入飞书《AI 复盘报告》");
+  } catch (e) {
+    toast(`存飞书失败：${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function openReviewModal() {
   if (!notesState.items.length) loadNotes();
@@ -1482,6 +1505,7 @@ function openReviewModal() {
   ]);
   $("rvSymbolList").innerHTML = [...syms].map((s) => `<option value="${esc(s)}">`).join("");
   $("reviewOut").classList.add("hidden");
+  $("btnReviewSave").classList.add("hidden");
   $("rvStatus").textContent = "";
   $("reviewModal").classList.remove("hidden");
   rvUpdateStat();
