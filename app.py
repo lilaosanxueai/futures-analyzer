@@ -1020,6 +1020,14 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         if profile:
             parts.append(f"【{symbol} 基本面框架（背景知识，供分析参考）】{profile}")
 
+        # 专项基本面量化数据（交易所库存趋势 + 现货/主力/基差，日更缓存）
+        try:
+            fund_txt = await _variety_fundamentals(symbol)
+            if fund_txt:
+                parts.append(f"【{symbol} 专项基本面量化数据（库存与基差为核心供需晴雨表，第三部分必须引用）】\n{fund_txt}")
+        except Exception:
+            pass
+
         # 用户当前持仓（分析时请考虑持仓风险与原计划）
         try:
             holds = [
@@ -1056,7 +1064,7 @@ class ChatIn(BaseModel):
 SYSTEM_PROMPT = """你是专业期货分析助手。依据所给数据按权重组织分析：
 1) 主力资金动向（资金情绪评分、增减仓含义、多空力量）——主要依据；
 2) 宏观消息面（特朗普表态、中东局势对供给/避险/定价的影响路径）——主要依据；
-3) 基本面（供需逻辑与库存周期）；
+3) 基本面（供需逻辑与库存周期——必须引用专项库存/基差量化数据，升贴水含义要讲透；开工率/产量等无公开源的项目明说即可，不必展开推演）；
 4) 技术面（均线/MACD/KDJ/RSI/BOLL）仅作入场时机与关键价位参考，不作方向主论据。
 要求：中文、客观中立、条理清晰、引用具体数值；资金面与技术面矛盾时明说并以资金面与宏观为准；数据缺失要明说；连续主力合约口径注意换月影响。输出仅供研究参考，不构成投资建议，必要时提醒风险。"""
 
@@ -1459,6 +1467,92 @@ VARIETY_NEWS_KW = {
 def _variety_prefix(symbol: str) -> str:
     m = re.match(r"^([A-Za-z]{1,2})", symbol or "")
     return m.group(1).upper() if m else ""
+
+
+# ---------------------------------------------------------------- 品种专项基本面量化数据（库存 + 现货基差）
+
+_fund_cache: dict[str, tuple[float, str, float]] = {}  # 品种前缀 -> (loop_ts, 文本, ttl)
+FUND_TTL = 3600.0  # 数据日更，1 小时缓存足够
+FUND_EMPTY_TTL = 600.0  # 无数据品种（能源中心/国际盘等）短负缓存，防每次分析重试打爆源
+
+
+def _nearby_trading_days(n: int = 5) -> list[str]:
+    """最近的 n 个工作日（YYYYMMDD，今天在前）——现货基差表按交易日发布"""
+    from datetime import date, timedelta
+    d = date.today()
+    out = []
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y%m%d"))
+        d -= timedelta(days=1)
+    return out
+
+
+async def _spot_basis_row(prefix: str) -> Optional[dict]:
+    """最近交易日的现货价与主力基差（全品种单表按代码过滤；找不到返回 None）"""
+    for d in _nearby_trading_days():
+        try:
+            df = await call_ak(ak.futures_spot_price, date=d)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        hit = df[df["symbol"].astype(str).str.upper() == prefix.upper()]
+        if len(hit):
+            return hit.iloc[-1].to_dict()
+    return None
+
+
+async def _variety_fundamentals(symbol: str) -> str:
+    """品种专项基本面量化数据：交易所库存趋势（东财）+ 现货价/主力/基差。
+    开工率、周产量、日熔量等无免费公开源（隆众/卓创付费），有库存与基差
+    两个核心供需晴雨表即可支撑量化结论。任一源失败静默跳过。"""
+    prefix = _variety_prefix(symbol)
+    if not prefix:
+        return ""
+    key = prefix.upper()
+    loop_now = asyncio.get_event_loop().time()
+    cached = _fund_cache.get(key)
+    if cached and loop_now - cached[0] < cached[2]:
+        return cached[1]
+    lines = []
+    # ① 交易所库存：最新值 + 近两周变化（em 品种代码=大写交易所代码，少数小写）
+    try:
+        df = None
+        for code in (key, key.lower()):
+            try:
+                df = await call_ak(ak.futures_inventory_em, symbol=code)
+                break
+            except ValueError:
+                continue
+        if df is not None and len(df) >= 6:
+            latest = df.iloc[-1]
+            base = df.iloc[max(0, len(df) - 11)]  # 约两周前
+            chg = float(latest["库存"]) - float(base["库存"])
+            chg_pct = chg / float(base["库存"]) * 100 if float(base["库存"]) else 0.0
+            lines.append(
+                f"- 交易所库存（{latest['日期']}）：{latest['库存']}，近两周 {chg:+.0f}（{chg_pct:+.1f}%），最新增减 {latest['增减']}"
+            )
+    except Exception:
+        pass
+    # ② 现货价与主力基差（正=现货升水，负=贴水）
+    try:
+        row = await _spot_basis_row(prefix)
+        if row:
+            def _n(v):
+                try:
+                    return round(float(v), 2)
+                except (TypeError, ValueError):
+                    return v
+            lines.append(
+                f"- 现货 {_n(row.get('spot_price'))}，主力 {row.get('dominant_contract')} {_n(row.get('dominant_contract_price'))}，"
+                f"基差 {_n(row.get('dom_basis'))}（口径=主力-现货，{float(row.get('dom_basis_rate') or 0) * 100:+.1f}%；负值=现货升水/盘面贴水，正值=期货升水）"
+            )
+    except Exception:
+        pass
+    text = "\n".join(lines)
+    _fund_cache[key] = (loop_now, text, FUND_TTL if text else FUND_EMPTY_TTL)
+    return text
 
 
 # ---------------------------------------------------------------- 国际盘监控（WTI/布伦特/黄金/美元指数）
