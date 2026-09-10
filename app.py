@@ -89,6 +89,7 @@ def max_output_for(model: str) -> int:
 DEFAULT_CONFIG = {
     "provider": "zhipu",
     "model": PROVIDERS["zhipu"]["default_model"],
+    "custom_base_url": "",  # 自定义服务商（Coding Plan 等）的 OpenAI 兼容端点
     "api_keys": {},  # 按服务商独立保存：{"zhipu": "...", "deepseek": "..."}
     "feishu": {},    # 飞书云文档同步：{"app_id", "app_secret", "doc_title", "doc_id"}
     "monitor": {
