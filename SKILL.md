@@ -151,6 +151,13 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## Token 优化补遗（v0826e）
+
+补齐上轮审计盲区（持仓体检/单笔复盘本就轻量无需动），修掉两个残余浪费：
+
+1. **chat 轻量模式**：`ChatIn.light=1` 跳过 `_build_market_context`。**纪律周报**（走 /api/ai/chat 且 symbol=null，此前白背自选行情块）与**自检**（`?selftest=1` 只验链路却注入约 1200 字行情）改走 light——system 仅剩 268 字 SYSTEM_PROMPT，省约 80%/次。
+2. **「分析当前合约」按钮指令去重**：四层权重说明与 SYSTEM_PROMPT 逐字重复，压为一句引用（230→120 字），语义不变（权重在 system 里逐字保留）。
+
 ## Token 消耗再优化（v0826d，应用层降量）
 
 零 LLM 调用的构建器实测（导入 app 模块直接量 prompt 体积）定位大头后逐项瘦身：

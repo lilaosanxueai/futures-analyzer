@@ -2164,6 +2164,7 @@ $("btnDcWeekly").addEventListener("click", async () => {
 ${lines.join("\n")}`,
         }],
         symbol: null,
+        light: 1,  // 周报分析历史日志，无需实时行情上下文（省 token）
       }),
     });
     box.innerHTML = `<div class="md" style="padding:4px 2px 8px;max-height:400px;overflow-y:auto;border-top:1px solid var(--border)">${renderMarkdown(resp.reply)}</div>`;
@@ -2679,7 +2680,7 @@ window.addEventListener("unhandledrejection", (e) => {
   toast(`异步错误：${msg}`, true);
 });
 
-async function sendChat(text) {
+async function sendChat(text, opts = {}) {
   text = (text || "").trim();
   if (!text && !pendingImgs.length) return;
   const images = pendingImgs.map((p) => p.dataUrl);
@@ -2729,6 +2730,7 @@ async function sendChat(text) {
       body: JSON.stringify({
         messages: msgs,
         symbol: state.selected,
+        light: opts.light ? 1 : 0,
       }),
       signal: ctrl.signal,
     });
@@ -2756,12 +2758,7 @@ $("btnAnalyze").addEventListener("click", () => {
     toast("请先在左侧选择一个合约", true);
     return;
   }
-  sendChat(`请综合分析 ${state.selected}（${state.names[state.selected] || ""}），按以下权重组织观点：
-一、主力资金情绪与量仓动向（评分、增减仓、价量配合、多空主导）——核心依据；
-二、宏观与消息面（特朗普表态、中东局势等对该品种的影响路径）——核心依据；
-三、基本面供需逻辑；
-四、技术指标（均线/MACD/KDJ/RSI/BOLL）与最新信号——仅作入场时机与关键价位参考，不作为方向主论据。
-输出：资金面结论、消息面影响、关键支撑压力位、综合观点（明确多空倾向与置信度）、主要风险。若资金面与技术面矛盾，请明确指出并以资金面为准。`);
+  sendChat(`请综合分析 ${state.selected}（${state.names[state.selected] || ""}），按系统设定权重组织（资金情绪与宏观消息面为主，技术面仅时机与价位参考）。输出：资金面结论、消息面影响、关键支撑压力位、综合观点（明确多空倾向与置信度）、主要风险；资金面与技术面矛盾时明确指出并以资金面为准。`);
 });
 
 /* ---------- AI 设置 ---------- */
@@ -2983,7 +2980,7 @@ function initSplitters() {
 
   // 自检模式：打开 /?selftest=1 会自动发一条消息，用于验证对话链路
   if (new URLSearchParams(location.search).get("selftest") === "1") {
-    setTimeout(() => sendChat("自检：请只回复『链路正常』四个字"), 4000);
+    setTimeout(() => sendChat("自检：请只回复『链路正常』四个字", { light: true }), 4000);
   }
 
   // 窗口尺寸变化后按新宽度重绘图表（后端有缓存，代价很小）

@@ -984,6 +984,7 @@ class ChatMessage(BaseModel):
 class ChatIn(BaseModel):
     messages: list[ChatMessage]
     symbol: Optional[str] = None
+    light: int = 0  # 1=跳过行情上下文（周报/自检等与实时行情无关的调用，省 token）
 
 
 SYSTEM_PROMPT = """你是专业期货分析助手。依据所给数据按权重组织分析：
@@ -1036,7 +1037,7 @@ async def ai_chat(body: ChatIn):
     base_url = PROVIDERS[provider]["base_url"]
     model = cfg["model"] or PROVIDERS[provider]["default_model"]
 
-    context = await _build_market_context(body.symbol)
+    context = "" if body.light else await _build_market_context(body.symbol)
     system = SYSTEM_PROMPT + ("\n\n" + context if context else "")
 
     messages = _build_api_messages(body.messages, system)
