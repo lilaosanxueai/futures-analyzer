@@ -51,7 +51,7 @@ PROVIDERS = {
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com",
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-flash",  # 2026-09 平台目录：仅剩 deepseek-flash / deepseek-v4-pro
     },
     "custom": {
         "label": "自定义 / Coding Plan",
@@ -66,6 +66,31 @@ def provider_base_url(cfg: dict, provider: str) -> str:
     if provider == "custom":
         return str(cfg.get("custom_base_url") or "").strip().rstrip("/")
     return PROVIDERS[provider]["base_url"]
+
+
+_PROVIDER_HARD_CODES = (401, 402, 429)  # 认证/欠费/限流——换服务商可解，触发兜底
+
+
+def _is_provider_hard_error(resp) -> bool:
+    if getattr(resp, "status_code", 0) in _PROVIDER_HARD_CODES:
+        return True
+    return resp.status_code == 403 and "balance" in resp.text.lower()
+
+
+def _llm_candidates(cfg: dict) -> list[dict]:
+    """LLM 调用候选（含兜底）：当前服务商在前，其余已存 Key 的按序在后。
+    主服务商限流/欠费时自动降级到备用（如 Coding Plan 打满 → DeepSeek），
+    应用不因单一服务商停摆。兜底候选用该服务商的默认模型。"""
+    active = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
+    out = []
+    for p in [active] + [x for x in PROVIDERS if x != active]:
+        key = cfg["api_keys"].get(p)
+        url = provider_base_url(cfg, p)
+        if not key or not url:
+            continue
+        model = (cfg["model"] or PROVIDERS[p]["default_model"]) if p == active else PROVIDERS[p]["default_model"]
+        out.append({"provider": p, "base_url": url, "api_key": key, "model": model})
+    return out
 
 # 各模型最大输出 tokens（按模型名片段匹配；未知模型用默认值，超限时自动降级）
 MODEL_MAX_OUTPUT = [
@@ -1050,13 +1075,12 @@ async def ai_chat(body: ChatIn):
 
     cfg = load_config()
     provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
-    api_key = cfg["api_keys"].get(provider)
-    if not api_key:
+    if not cfg["api_keys"].get(provider):
         raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在右上角「AI 设置」中配置")
     base_url = provider_base_url(cfg, provider)
     if not base_url:
         raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
-    model = cfg["model"] or PROVIDERS[provider]["default_model"]
+    candidates = _llm_candidates(cfg)
 
     context = "" if body.light else await _build_market_context(body.symbol)
     system = SYSTEM_PROMPT + ("\n\n" + context if context else "")
@@ -1068,12 +1092,17 @@ async def ai_chat(body: ChatIn):
 
     logger = logging.getLogger("uvicorn.error")
     t0 = _time.time()
-    max_tokens = max_output_for(model)
-    logger.info(f"[ai-chat] 开始调用 {provider}/{model}（消息 {len(body.messages)} 条，图片 {n_imgs} 张，上下文 {len(system)} 字，max_tokens={max_tokens}）")
+    fallback_used = False
     full_reply = ""
     truncated_rounds = 0
 
     async with httpx.AsyncClient(timeout=180) as client:  # 推理模型长回复需要更长时间
+      for cand in candidates:
+        provider, base_url, api_key, model = cand["provider"], cand["base_url"], cand["api_key"], cand["model"]
+        max_tokens = max_output_for(model)
+        logger.info(f"[ai-chat] 开始调用 {provider}/{model}（消息 {len(body.messages)} 条，图片 {n_imgs} 张，上下文 {len(system)} 字，max_tokens={max_tokens}）")
+        full_reply = ""
+        truncated_rounds = 0
         # 最多 3 轮：正常 1 轮；finish_reason=length（长度截断）时自动续写拼接
         for round_no in range(3):
             async def request_once(mt: int) -> httpx.Response:
@@ -1096,6 +1125,14 @@ async def ai_chat(body: ChatIn):
                 raise HTTPException(status_code=504, detail="AI 服务响应超时（推理型模型可能较慢，请重试或换用轻量模型）")
             except httpx.HTTPError as e:
                 raise HTTPException(status_code=502, detail=f"无法连接 AI 服务：{e}")
+
+            if (cand is not candidates[-1]) and (
+                _is_provider_hard_error(resp)
+                or (resp.status_code == 400 and "model" in resp.text.lower())  # 模型名失效（平台目录变更）也换下家
+            ):
+                logger.info(f"[ai-chat] {provider}/{model} 错误 {resp.status_code}，切换兜底服务商")
+                fallback_used = True
+                break  # 换下一个候选
 
             if resp.status_code == 401:
                 raise HTTPException(status_code=401, detail="API Key 无效，请检查后重新保存")
@@ -1136,9 +1173,12 @@ async def ai_chat(body: ChatIn):
                 {"role": "assistant", "content": full_reply},
                 {"role": "user", "content": "继续，从你刚才中断的地方接着写，不要重复已有内容"},
             ]
+        if full_reply:
+            break  # 本候选成功
 
-    logger.info(f"[ai-chat] 完成：耗时 {_time.time() - t0:.0f}s，共 {len(full_reply)} 字"
-                + (f"（续写 {truncated_rounds} 轮）" if truncated_rounds else ""))
+    logger.info(f"[ai-chat] 完成：{provider}/{model}，耗时 {_time.time() - t0:.0f}s，共 {len(full_reply)} 字"
+                + (f"（续写 {truncated_rounds} 轮）" if truncated_rounds else "")
+                + ("（兜底）" if fallback_used else ""))
     # 对话自动记录到飞书（品种+时间+问答；异步执行不阻塞响应，失败静默）
     if cfg.get("feishu", {}).get("auto_chat_log", True) and body.messages:
         last_q = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
@@ -1146,7 +1186,7 @@ async def ai_chat(body: ChatIn):
             asyncio.create_task(
                 _feishu_log_chat_round(body.symbol, last_q.strip(), full_reply)
             )
-    return {"ok": True, "reply": full_reply}
+    return {"ok": True, "reply": full_reply, "fallback": fallback_used}
 
 
 # ---------------------------------------------------------------- 实时解读：最新数据 → AI 盘中快评
@@ -1155,38 +1195,52 @@ _realtime_cache: dict[str, tuple[float, dict]] = {}  # symbol -> (loop_ts, resul
 
 
 async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
-    """调用已配置的 LLM 输出普通文本（实时解读用，非 JSON）"""
+    """调用已配置的 LLM 输出普通文本（实时解读用，非 JSON）。
+    主服务商 401/402/429 时自动兜底到其余已存 Key 的服务商。"""
+    import logging
+    logger = logging.getLogger("uvicorn.error")
     cfg = load_config()
-    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
-    api_key = cfg["api_keys"].get(provider)
-    if not api_key:
+    candidates = _llm_candidates(cfg)
+    if not candidates:
         raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在「⚙ AI 设置」中配置")
-    base_url = provider_base_url(cfg, provider)
-    if not base_url:
-        raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
-    model = cfg["model"] or PROVIDERS[provider]["default_model"]
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.5,
-                "max_tokens": max(max_output_for(model), max_tokens),  # 思维链模型需给足（同 _llm_json）
-            },
-        )
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="API Key 无效")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
-    try:
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
-    if not content:
-        raise HTTPException(status_code=502, detail="AI 返回空内容（推理模型思维链耗尽 token，请重试）")
-    return content
+    last = {"code": 502, "detail": "AI 调用失败"}
+    for idx, cand in enumerate(candidates):
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{cand['base_url']}/chat/completions",
+                headers={"Authorization": f"Bearer {cand['api_key']}"},
+                json={
+                    "model": cand["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.5,
+                    "max_tokens": max(max_output_for(cand["model"]), max_tokens),
+                },
+            )
+        if resp.status_code == 200:
+            try:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception:
+                content = ""
+            if content:
+                if idx > 0:
+                    logger.info(f"[llm-text] 主服务商不可用，由 {cand['provider']}/{cand['model']} 兜底")
+                return content
+            last = {"code": 502, "detail": "AI 返回空内容（推理模型思维链耗尽 token，请重试）"}
+        elif _is_provider_hard_error(resp) and idx < len(candidates) - 1:
+            logger.info(f"[llm-text] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            continue
+        else:
+            detail = ""
+            try:
+                detail = resp.json().get("error", {}).get("message", "")[:150]
+            except Exception:
+                pass
+            last = {"code": resp.status_code if resp.status_code in (401, 429) else 502,
+                    "detail": f"AI 服务限流或额度不足：{detail}" if resp.status_code == 429 else
+                              (f"API Key 无效" if resp.status_code == 401 else f"AI 服务返回 {resp.status_code}：{detail or '未知错误'}")}
+        if resp.status_code not in (200,) and not (_is_provider_hard_error(resp) and idx < len(candidates) - 1):
+            break  # 非可兜底错误（如 502 解析问题）不再尝试后续
+    raise HTTPException(status_code=last["code"], detail=last["detail"])
 
 
 async def _llm_text_retry(prompt: str, max_tokens: int = 0) -> str:
@@ -1565,32 +1619,47 @@ def _monitor_threshold(symbol: str, mult: float) -> float:
 
 
 async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
-    """供盯盘等内部功能调用的轻量 AI 接口。
+    """供盯盘等内部功能调用的轻量 AI 接口（主服务商硬错误时自动兜底）。
 
     注意：推理型模型（如 deepseek-v4-pro）会先消耗大量 token 生成思维链，
     max_tokens 给足才能保证正文（content）非空。
     """
+    import logging
+    logger = logging.getLogger("uvicorn.error")
     cfg = load_config()
-    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
-    api_key = cfg["api_keys"].get(provider)
-    if not api_key:
+    candidates = _llm_candidates(cfg)
+    if not candidates:
         raise RuntimeError("未配置 API Key")
-    base_url = provider_base_url(cfg, provider)
-    if not base_url:
-        raise RuntimeError("自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
-    async with httpx.AsyncClient(timeout=90) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": cfg["model"] or PROVIDERS[provider]["default_model"],
-                "messages": messages,
-                "temperature": 0.4,
-                "max_tokens": min(2048, max_output_for(cfg["model"] or "")),
-            },
-        )
-    resp.raise_for_status()
-    return (resp.json()["choices"][0]["message"].get("content") or "").strip()
+    last_err: Exception = RuntimeError("AI 调用失败")
+    for idx, cand in enumerate(candidates):
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    f"{cand['base_url']}/chat/completions",
+                    headers={"Authorization": f"Bearer {cand['api_key']}"},
+                    json={
+                        "model": cand["model"],
+                        "messages": messages,
+                        "temperature": 0.4,
+                        "max_tokens": min(2048, max_output_for(cand["model"])),
+                    },
+                )
+        except httpx.HTTPError as e:
+            last_err = RuntimeError(f"无法连接 AI 服务：{e}")
+            continue
+        if resp.status_code == 200:
+            content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+            if content:
+                if idx > 0:
+                    logger.info(f"[ai-simple] 主服务商不可用，由 {cand['provider']}/{cand['model']} 兜底")
+                return content
+            last_err = RuntimeError("AI 返回空内容")
+            continue
+        if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
+            logger.info(f"[ai-simple] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            continue
+        resp.raise_for_status()
+    raise last_err
 
 
 async def _ai_comment_for_event(event: dict):
@@ -1974,61 +2043,63 @@ async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
     temperature 低以稳定格式；容错提取 JSON 块（模型可能加 ```json 包裹）。
     推理型模型思维链会消耗大量 token，max_tokens 按模型上限给足。"""
     cfg = load_config()
-    provider = cfg["provider"] if cfg["provider"] in PROVIDERS else "zhipu"
-    api_key = cfg["api_keys"].get(provider)
-    if not api_key:
+    candidates = _llm_candidates(cfg)
+    if not candidates:
         raise HTTPException(status_code=400, detail="尚未配置 API Key——主观项已全部改为 AI 判定，请先在「⚙ AI 设置」中配置")
-    base_url = provider_base_url(cfg, provider)
-    if not base_url:
-        raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址，请先在「⚙ AI 设置」填写")
-    model = cfg["model"] or PROVIDERS[provider]["default_model"]
-    max_tokens = max_tokens or max_output_for(model)
     import logging
     logger = logging.getLogger("uvicorn.error")
     import time as _time
     t0 = _time.time()
-    async with httpx.AsyncClient(timeout=180) as client:
-        def build(mt: int):
-            return client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": mt,
-                },
-            )
-        resp = await build(max_tokens)
-        if resp.status_code == 400 and "max_tokens" in resp.text.lower() and max_tokens > 4096:
-            max_tokens = 4096
+    for idx, cand in enumerate(candidates):
+        base_url, api_key, model = cand["base_url"], cand["api_key"], cand["model"]
+        max_tokens = max(max_tokens or 0, max_output_for(model))
+        async with httpx.AsyncClient(timeout=180) as client:
+            def build(mt: int):
+                return client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.2,
+                        "max_tokens": mt,
+                    },
+                )
             resp = await build(max_tokens)
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="API Key 无效，请检查 AI 设置")
-    if resp.status_code == 429:
-        raise HTTPException(status_code=429, detail="AI 服务限流，请稍后重试")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
-    try:
-        choice = resp.json()["choices"][0]
-        content = (choice["message"].get("content") or "").strip()
-    except Exception:
-        raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
-    if not content:
-        finish = choice.get("finish_reason", "?")
-        raise HTTPException(
-            status_code=502,
-            detail=f"AI 返回空内容（finish_reason={finish}，max_tokens={max_tokens} 可能被思维链耗尽，请重试或换轻量模型）",
-        )
-    m = re.search(r"\{[\s\S]*\}", content)
-    if not m:
-        raise HTTPException(status_code=502, detail=f"AI 未按 JSON 输出：{content[:120]}")
-    try:
-        out = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail=f"AI 的 JSON 无法解析：{content[:120]}")
-    logger.info(f"[discipline-ai] {provider}/{model} 判定完成，耗时 {_time.time() - t0:.0f}s")
-    return out
+            if resp.status_code == 400 and "max_tokens" in resp.text.lower() and max_tokens > 4096:
+                max_tokens = 4096
+                resp = await build(max_tokens)
+        if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
+            logger.info(f"[discipline-ai] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+            continue
+        if resp.status_code == 401:
+            raise HTTPException(status_code=401, detail="API Key 无效，请检查 AI 设置")
+        if resp.status_code == 429:
+            raise HTTPException(status_code=429, detail="AI 服务限流，请稍后重试")
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
+        try:
+            choice = resp.json()["choices"][0]
+            content = (choice["message"].get("content") or "").strip()
+        except Exception:
+            raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
+        if not content:
+            finish = choice.get("finish_reason", "?")
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI 返回空内容（finish_reason={finish}，max_tokens={max_tokens} 可能被思维链耗尽，请重试或换轻量模型）",
+            )
+        m = re.search(r"\{[\s\S]*\}", content)
+        if not m:
+            raise HTTPException(status_code=502, detail=f"AI 未按 JSON 输出：{content[:120]}")
+        try:
+            out = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=502, detail=f"AI 的 JSON 无法解析：{content[:120]}")
+        logger.info(f"[discipline-ai] {cand['provider']}/{model} 判定完成，耗时 {_time.time() - t0:.0f}s"
+                    + ("（兜底）" if idx > 0 else ""))
+        return out
+    raise HTTPException(status_code=502, detail="AI 调用失败")
 
 
 def _rule(rid, name, severity, ok, detail):

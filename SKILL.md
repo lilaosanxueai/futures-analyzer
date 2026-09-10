@@ -151,6 +151,15 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## LLM 服务商自动兜底（v0826h）
+
+用户切 Coding Plan 的 glm-5.3-flash 后全模型 429（plan 额度/限流窗口打满，与其 AI 编程会话共享），暴露单服务商依赖的脆弱性：
+
+1. **`_llm_candidates(cfg)`**：当前服务商在前 + 其余已存 Key 的服务商按序在后（兜底候选用各自默认模型；custom 未填地址自动跳过）。**四个 LLM 调用点（ai_chat/_llm_text/_llm_json/_call_ai_simple）全部接入**：401/402/429/余额类 403（`_is_provider_hard_error`）或"模型名失效"400 时自动换下一家完成本次调用；ai_chat 响应带 `fallback` 标记，前端 toast「主服务商限流，本次由备用兜底」。
+2. **DeepSeek 平台模型目录变更（2026-09 实测）**：仅剩 `deepseek-flash` / `deepseek-v4-pro`，旧 deepseek-chat / deepseek-v4-flash / 视觉版全部下线——默认模型改 `deepseek-flash`；用户手填 `DeepSeek-V4.1-Flash`（大写带版本号）会 400 模型不存在，模型名须全小写以 `/models` 接口返回为准。
+3. 排障技巧：`GET {base_url}/models`（带 Bearer key）可列出该 Key 实际可用的模型清单（bigmodel 与 deepseek 均支持）；PowerShell 直测注意控制台中文乱码不影响判断（status 200 即通）。
+4. 兜底链实测：deepseek(400 模型名)→zhipu(429)→custom(429) 逐家切换并透传末家错误；修正模型名后 deepseek-flash 直连正常。
+
 ## 自定义服务商 / Coding Plan 接入（v0826f）
 
 应用户要求支持把 GLM Coding Plan 等订阅接入应用（替代按量计费）：

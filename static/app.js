@@ -2736,6 +2736,7 @@ async function sendChat(text, opts = {}) {
     });
     clearTimeout(abortTimer);
     clearInterval(tick);
+    if (data.fallback) toast("⚠ 主服务商限流/额度不足，本次由备用服务商兜底完成");
     typing.remove();
     pushMsg("assistant", data.reply);
   } catch (e) {
@@ -2803,7 +2804,7 @@ $("settingsModal").addEventListener("click", (e) => {
   if (e.target === $("settingsModal")) $("settingsModal").classList.add("hidden");
 });
 
-const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-chat", custom: "glm-5" };
+const DEFAULT_MODELS = { zhipu: "glm-4-flash", deepseek: "deepseek-flash", custom: "glm-5.3-flash" };
 $("cfgProvider").addEventListener("change", () => {
   $("cfgModel").value = DEFAULT_MODELS[$("cfgProvider").value] || "";
   $("rowBaseUrl").classList.toggle("hidden", $("cfgProvider").value !== "custom");
