@@ -1271,7 +1271,7 @@ async function pollMonitor() {
             <span>→ ${e.price}</span>
             <span class="muted small">5分 / 阈值${e.threshold}%</span>
           </div>
-          ${e.ai ? `<div class="mon-ai">💡 ${e.ai}</div>` : `<div class="mon-ai muted">AI 解读生成中…</div>`}
+          ${e.ai ? `<div class="mon-ai">💡 ${esc(e.ai)}</div>` : `<div class="mon-ai muted">AI 解读生成中…</div>`}
         </div>`;
       })
       .join("");
@@ -1317,8 +1317,8 @@ function renderNotes() {
       <div class="note-head">
         <b class="note-title"></b>
         <span class="note-time">${date} ${hm}</span>
-        ${n.symbol ? `<span class="note-sym">${n.symbol}</span>` : ""}
-        ${n.tags ? `<span class="note-tag">#${n.tags}</span>` : ""}
+        ${n.symbol ? `<span class="note-sym">${esc(n.symbol)}</span>` : ""}
+        ${n.tags ? `<span class="note-tag">#${esc(n.tags)}</span>` : ""}
         ${n.synced ? `<span class="note-synced">☁已同步</span>` : ""}
         <span class="note-ops">
           ${n.synced ? "" : `<button data-sync="${n.id}" title="同步这条到飞书">☁</button>`}
@@ -1586,8 +1586,10 @@ function renderNewsView() {
       const hm = it.time ? it.time.slice(11, 16) : "";
       const day = it.time ? it.time.slice(5, 10) : "";
       const tag = isTrump ? '<span class="news-aitag">🇺🇸 特朗普</span>' : '<span class="news-aitag">🌍 中东</span>';
-      const body = it.link
-        ? `<a href="${it.link}" target="_blank" rel="noopener">${highlightKeywords(it.title, isTrump ? "trump" : "mideast")}</a>`
+      // 外链仅放行 http(s)，防 javascript: 等协议注入
+      const safeLink = /^https?:\/\//i.test(it.link || "") ? it.link : "";
+      const body = safeLink
+        ? `<a href="${esc(safeLink)}" target="_blank" rel="noopener">${highlightKeywords(it.title, isTrump ? "trump" : "mideast")}</a>`
         : `<span>${highlightKeywords(it.title, isTrump ? "trump" : "mideast")}</span>`;
       return `<div class="news-item matched">
         <span class="news-time">${day} ${hm}</span>${tag} ${body}<span class="news-src">${esc(it.source)}</span>

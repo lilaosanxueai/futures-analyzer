@@ -2484,8 +2484,10 @@ async def discipline_check(body: DisciplineCheckIn):
             "confidence": str(ai.get("confidence", "")),
         },
     }
-    log.append(entry)
-    _save_discipline_log(log)
+    # AI 审查期间日志可能已被平仓/删除等操作修改——保存点重读，只追加本条，防覆盖
+    fresh = _load_discipline_log()
+    fresh.append(entry)
+    _save_discipline_log(fresh)
     return {
         "ok": True,
         "allowed": allowed,
@@ -2600,7 +2602,7 @@ async def discipline_holding_review(body: DisciplineDeleteIn):
   "key_levels": "<该仓位的生死价位：上方压力与下方支撑，具体数字>"
 }}"""
     ai = await _llm_json(prompt)
-    e["holding_review"] = {
+    review = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "action": ai.get("action"),
         "assessment": str(ai.get("assessment", ""))[:200],
@@ -2610,8 +2612,14 @@ async def discipline_holding_review(body: DisciplineDeleteIn):
         "last": last,
         "floating": floating,
     }
+    # AI 体检期间日志可能被其它操作修改——保存点重读定位原记录，防覆盖
+    log = _load_discipline_log()
+    tgt = next((x for x in log if str(x.get("ts")) == body.ts and x.get("status") == "open"), None)
+    if tgt is None:
+        raise HTTPException(status_code=404, detail="该持仓刚被平仓或删除，请刷新后重试")
+    tgt["holding_review"] = review
     _save_discipline_log(log)
-    return {"ok": True, "review": e["holding_review"]}
+    return {"ok": True, "review": review}
 
 
 @app.post("/api/discipline/trade-review")
@@ -2646,7 +2654,7 @@ async def discipline_trade_review(body: DisciplineDeleteIn):
   "summary": "<80 字内：一句话总评>"
 }}"""
     ai = await _llm_json(prompt)
-    e["review"] = {
+    review = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "plan_followed": bool(ai.get("plan_followed")),
         "execution_grade": str(ai.get("execution_grade", ""))[:2],
@@ -2654,8 +2662,14 @@ async def discipline_trade_review(body: DisciplineDeleteIn):
         "lesson": str(ai.get("lesson", ""))[:120],
         "summary": str(ai.get("summary", ""))[:160],
     }
+    # AI 复盘期间日志可能被其它操作修改——保存点重读定位原记录，防覆盖
+    log = _load_discipline_log()
+    tgt = next((x for x in log if str(x.get("ts")) == body.ts and x.get("status") == "closed"), None)
+    if tgt is None:
+        raise HTTPException(status_code=404, detail="该记录刚被修改或删除，请刷新后重试")
+    tgt["review"] = review
     _save_discipline_log(log)
-    return {"ok": True, "review": e["review"]}
+    return {"ok": True, "review": review}
 
 
 @app.get("/api/discipline/config")
@@ -2835,6 +2849,7 @@ async def _feishu_review_doc_id():
         data = r.json()
         if data.get("code") == 0 and data.get("data", {}).get("document"):
             doc_id = data["data"]["document"]["document_id"]
+            cfg = load_config()  # 重读：创建文档期间 config 可能已被修改
             cfg.setdefault("feishu", {})["review_doc_id"] = doc_id
             save_config(cfg)
     except Exception as e:
@@ -2970,6 +2985,7 @@ async def _feishu_ensure_doc() -> str:
     if data.get("code") != 0:
         raise HTTPException(status_code=502, detail=f"飞书创建文档失败：{data.get('msg')}（请确认应用已开通「云文档」读写权限）")
     doc_id = data["data"]["document"]["document_id"]
+    cfg = load_config()  # 重读：创建文档期间 config 可能已被修改
     cfg.setdefault("feishu", {})
     cfg["feishu"]["doc_id"] = doc_id
     save_config(cfg)
@@ -3013,6 +3029,7 @@ async def _feishu_chat_doc_id():
             f"[chat-export] 创建文档：code={data.get('code')} msg={data.get('msg')}")
         if data.get("code") == 0 and data.get("data", {}).get("document"):
             doc_id = data["data"]["document"]["document_id"]
+            cfg = load_config()  # 重读：创建文档期间 config 可能已被修改
             cfg.setdefault("feishu", {})["chat_doc_id"] = doc_id
             save_config(cfg)
     except Exception as e:
@@ -3096,10 +3113,14 @@ async def notes_feishu_sync(note_id: str = "", all_unsynced: bool = True):
         except Exception:
             raise e
     ids = {n["id"] for n in targets}
-    for n in notes:
+    # 飞书上传期间心得可能被增删——保存点重读，只回写 synced 标记，防覆盖
+    fresh = _load_notes()
+    hit = 0
+    for n in fresh:
         if n["id"] in ids:
             n["synced"] = True
-    _save_notes(notes)
+            hit += 1
+    _save_notes(fresh)
     return {"ok": True, "synced": len(targets), "doc_id": doc_id}
 
 

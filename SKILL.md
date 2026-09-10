@@ -151,6 +151,16 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## 注入面修补 + 写竞态修复（v0826j）
+
+**前端 XSS 审计**（按数据源逐一核对渲染链路）：Markdown 渲染器整体先 esc ✓、心得正文走 textNode ✓、新闻标题先 esc 再高亮 ✓；修掉三处漏网：
+
+1. 盯盘事件 `e.ai`（LLM 输出）未转义直接进 innerHTML——新闻标题若含诱导内容可能让 AI 吐出 HTML，补 esc。
+2. 新闻外链 href 未校验协议（javascript: URI 风险）——仅放行 http(s) 并 esc。
+3. 心得的品种/标签（用户输入）未转义——补 esc。
+
+**后端写竞态**（扫描"读-改-写跨 await"模式，7 处命中、4 类真实）：`discipline_check` 顶部读日志→AI 审查最长 2 分钟→**保存旧快照**，期间任何平仓/删除被静默覆盖；holding_review/trade_review 同款；notes_feishu_sync 上传期间新增心得被回滚；三个飞书文档 ID 创建器保存整份 config 会吞掉并发修改。统一修法：**保存点重读**（AI 返回后重新 load、按 id 定位、只写自己的增量再 save）——无锁不阻塞，事件循环内同步段天然原子。审计脚本模式：向上回溯函数头，检查 `_load_*` 之后 `_save_*` 之前是否有 `await`。
+
 ## 复盘存飞书 + 熔断降级（v0826i）
 
 1. **AI 复盘报告存飞书**：`POST /api/ai/review-save`（report/since/until/symbols/stats）→ 确保《AI 复盘报告》文档（`_feishu_review_doc_id`，复用 chat_doc_id 模式，`review_doc_id` 存 config）→ `_md_to_feishu_blocks` 追加（标题行含生成时间/范围/品种/样本量）。复盘弹窗生成后出现「☁ 存飞书」按钮——此前报告刷新即丢，至此全部 AI 产出（对话/心得/晨报/复盘）均可留痕飞书。未配置飞书凭证时 400 明确指引。
