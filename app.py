@@ -197,24 +197,37 @@ def load_config() -> dict:
 # 后续在其他线程复用会挂起。因此所有调用固定走同一个专属线程。
 # 新浪接口偶发断连/无限挂起：超时或连接错误时丢弃旧线程换新线程并重试，
 # 避免一个挂起的请求把串行队列整个堵死。
-_AK_CALL_TIMEOUT = 60.0
-_AK_MAX_TRIES = 3
+_AK_CALL_TIMEOUT = 18.0  # 数据接口为小 JSON，18s 不回即放弃；过长超时会占住单线程堵死队列
+_AK_MAX_TRIES = 2
 _AK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="akshare")
+# 数据源熔断降温：被废弃的旧线程不会死（akshare 内部请求无超时，被限速
+# 就永久挂住且持续抢 GIL）——连续超时说明源已劣化，停发新请求 90s，
+# 让遗留线程自然结束，避免僵尸线程把事件循环拖垮（实测整机变慢的根因）。
+_ak_degrade = {"fails": 0, "until": 0.0}
+_AK_DEGRADE_PAUSE = 90.0
+_AK_DEGRADE_THRESHOLD = 3
 
 
 async def call_ak(func, *args, **kwargs):
     global _AK_EXECUTOR
     loop = asyncio.get_running_loop()
+    if loop.time() < _ak_degrade["until"]:
+        raise TimeoutError("数据源限流降温中（连续超时自动暂停约 90 秒），稍后自动恢复")
     last_err = None
     for attempt in range(_AK_MAX_TRIES):
         try:
             fut = loop.run_in_executor(_AK_EXECUTOR, partial(func, *args, **kwargs))
             result = await asyncio.wait_for(fut, timeout=_AK_CALL_TIMEOUT)
+            _ak_degrade["fails"] = 0
             return result
         except (asyncio.TimeoutError, OSError) as e:
             # requests 的连接类异常均继承 OSError；超时说明旧线程可能仍
             # 阻塞在网络上，弃用旧 executor 防止后续请求排死队。
             last_err = e
+            _ak_degrade["fails"] += 1
+            if _ak_degrade["fails"] >= _AK_DEGRADE_THRESHOLD:
+                _ak_degrade["until"] = loop.time() + _AK_DEGRADE_PAUSE
+                _ak_degrade["fails"] = 0
             _AK_EXECUTOR = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="akshare"
             )
@@ -353,9 +366,13 @@ def _fmt_time(raw) -> str:
     return s
 
 
-async def get_directory() -> dict[str, dict]:
-    """主力合约目录：symbol(如 RB0) -> {name, exchange}"""
+async def get_directory(max_age: float = 0.0) -> dict[str, dict]:
+    """主力合约目录：symbol(如 RB0) -> {name, exchange}。
+    max_age>0：缓存不老于该秒数就直接用（不刷新）——行情轮询等高频
+    路径用，名称映射极少变化，绝不该为它到 V8 单线程队列里排队。"""
     loop_now = asyncio.get_event_loop().time()
+    if max_age > 0 and _dir_cache["ts"] > 0 and loop_now - _dir_cache["ts"] <= max_age:
+        return _dir_cache["data"]
     if loop_now - _dir_cache["ts"] > DIR_TTL:
         # 失败退避：目录拉取失败后一段时间内不再重试，避免行情轮询
         # 每 5 秒触发一次全量拉取（内部为逐品种匹配请求）轰垮数据源。
@@ -459,6 +476,64 @@ def _num(v):
         return None
 
 
+_HQ_CLIENT: Optional[httpx.AsyncClient] = None  # 复用连接与 SSL 上下文——每 5s 轮询新建客户端会反复
+# 加载 Windows 证书库（CPU 重活），实测能把事件循环饿死
+
+
+async def _hq_quote(symbol: str) -> Optional[dict]:
+    """新浪 hq 国内期货快照（nf_ 前缀，商品期货字段布局；CFFEX 布局不同不支持）。
+    轻量 CDN 接口 ~0.2s 且不占 AkShare V8 单线程——akshare spot 被限速时的快路径。
+    字段（实测 2026-09：1时间 2开 3高 4低 6买 7卖 8最新 10昨结 11买量 12卖量 13持仓 14成交量）"""
+    global _HQ_CLIENT
+    if _HQ_CLIENT is None:
+        _HQ_CLIENT = httpx.AsyncClient(timeout=6)
+    r = await _HQ_CLIENT.get(
+        "https://hq.sinajs.cn/",
+        params={"list": f"nf_{symbol}"},
+        headers={"Referer": "https://finance.sina.com.cn"},
+    )
+    txt = r.content.decode("gbk", errors="replace")
+    m = re.search(r'"([^"]*)"', txt)
+    if not m:
+        return None
+    f = m.group(1).split(",")
+    if len(f) < 15:
+        return None
+
+    def n(i: int):
+        try:
+            v = float(f[i])
+            return v if v == v else None  # NaN -> None
+        except (ValueError, IndexError):
+            return None
+
+    last, prev_settle = n(8), n(10)
+    if last is None:
+        return None
+    info = _dir_cache.get("data", {}).get(symbol, {})  # 名称用现有缓存，不为它联网
+    change = round(last - prev_settle, 2) if prev_settle else None
+    return {
+        "symbol": symbol,
+        "name": info.get("name", ""),
+        "exchange": info.get("exchange", ""),
+        "time": _fmt_time(f[1]),
+        "last": last,
+        "open": n(2),
+        "high": n(3),
+        "low": n(4),
+        "prev_settle": prev_settle,
+        "change": change,
+        "change_pct": round(change / prev_settle * 100, 2) if change is not None and prev_settle else None,
+        "volume": n(14),
+        "position": n(13),
+        "bid": n(6),
+        "ask": n(7),
+        "bid_vol": n(11),
+        "ask_vol": n(12),
+        "digits": 1,
+    }
+
+
 async def fetch_quote(symbol: str) -> dict:
     """单合约实时行情（带 5 秒缓存）。国际品种从实时快照组装。"""
     symbol = symbol.strip().upper()
@@ -496,13 +571,23 @@ async def fetch_quote(symbol: str) -> dict:
         _quote_cache[symbol] = (loop_now, quote)
         return quote
 
+    # 国内商品期货：优先走新浪 hq 快路径（~0.2s、不占 V8 线程），失败退回 akshare
+    if market_of(symbol) != "CFFEX":
+        try:
+            hq = await _hq_quote(symbol)
+            if hq:
+                _quote_cache[symbol] = (loop_now, hq)
+                return hq
+        except Exception:
+            pass
+
     try:
         df = await call_ak(ak.futures_zh_spot, symbol=symbol, market=market_of(symbol), adjust="0")
         row = df.iloc[0].to_dict()
     except Exception as e:
         return {"symbol": symbol, "error": f"行情获取失败：{e}"}
 
-    directory = await get_directory()
+    directory = await get_directory(max_age=3600)  # 名称映射容忍 1h 旧缓存，行情不为目录刷新排队
     info = directory.get(symbol, {})
 
     last = _num(row.get("current_price"))
@@ -945,7 +1030,7 @@ async def _build_market_context(symbol: Optional[str]) -> str:
     if symbol:
         try:
             daily = await get_daily(symbol)
-            directory = await get_directory()
+            directory = await get_directory(max_age=3600)  # 名称容忍旧缓存，上下文构建不为目录刷新排队
             name = directory.get(symbol, {}).get("name", "")
             lines = [
                 f"{d['date']} 高{_num(d.get('high'))} 低{_num(d.get('low'))} "
