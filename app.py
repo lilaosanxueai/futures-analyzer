@@ -1027,6 +1027,47 @@ async def intraday(symbol: str):
 # ---------------------------------------------------------------- API：AI
 
 
+@app.get("/api/ai/health")
+async def ai_health():
+    """多服务商体检：逐一发极短请求探活，返回每家的状态与失败原因。
+    三源全挂时（用户实测过：deepseek Key 失效 + 智谱令牌过期 + coding plan 额度不足）
+    用它一眼看出该修哪家，而不是逐个猜。"""
+    cfg = load_config()
+    out = []
+    for cand in _llm_candidates(cfg):
+        import time as _t
+        t0 = _t.time()
+        item = {
+            "provider": cand["provider"],
+            "model": cand["model"],
+            "active": cand["provider"] == cfg["provider"],
+            "ok": False, "status": 0, "detail": "", "ms": 0,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    f"{cand['base_url']}/chat/completions",
+                    headers={"Authorization": f"Bearer {cand['api_key']}"},
+                    json={"model": cand["model"],
+                          "messages": [{"role": "user", "content": "回复：OK"}],
+                          "max_tokens": 256},
+                )
+            item["status"] = resp.status_code
+            item["ok"] = resp.status_code == 200
+            if resp.status_code == 200:
+                item["detail"] = "正常"
+                _note_provider_ok(cand["provider"])
+            else:
+                item["detail"] = _resp_reason(resp) or f"HTTP {resp.status_code}"
+                if _is_provider_hard_error(resp):
+                    _note_provider_fail(cand["provider"])
+        except Exception as e:
+            item["detail"] = f"{type(e).__name__}: {str(e)[:90]}"
+        item["ms"] = int((_t.time() - t0) * 1000)
+        out.append(item)
+    return {"ok": True, "items": out, "active": cfg["provider"]}
+
+
 @app.get("/api/ai/config")
 async def get_ai_config():
     cfg = load_config()
@@ -2022,19 +2063,29 @@ def _monitor_threshold(symbol: str, mult: float) -> float:
     return base * mult
 
 
+def _resp_reason(resp) -> str:
+    """上游错误原因（各平台都把关键信息放在 error.message，如"余额不足""Key 无效"）"""
+    try:
+        return str(resp.json().get("error", {}).get("message", ""))[:70]
+    except Exception:
+        return ""
+
+
 async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
-    """供盯盘等内部功能调用的轻量 AI 接口（主服务商硬错误时自动兜底）。
+    """供盯盘等内部功能调用的轻量 AI 接口（主服务商失败时自动兜底下一家）。
 
     注意：推理型模型（如 deepseek-v4-pro）会先消耗大量 token 生成思维链，
     max_tokens 给足才能保证正文（content）非空。
+    全部失败时抛出的错误包含**每家服务商的具体原因**——盯盘事件里会原样展示，
+    用户一眼看出该修哪个 Key（此前笼统的"调用失败"无法定位）。
     """
     import logging
     logger = logging.getLogger("uvicorn.error")
     cfg = load_config()
     candidates = _llm_candidates(cfg)
     if not candidates:
-        raise RuntimeError("未配置 API Key")
-    last_err: Exception = RuntimeError("AI 调用失败")
+        raise RuntimeError("未配置任何 API Key（⚙ 设置 → AI 服务配置）")
+    problems: list[str] = []
     for idx, cand in enumerate(candidates):
         try:
             async with httpx.AsyncClient(timeout=90) as client:
@@ -2049,23 +2100,25 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
                     },
                 )
         except httpx.HTTPError as e:
-            last_err = RuntimeError(f"无法连接 AI 服务：{e}")
+            problems.append(f"{cand['provider']} 网络异常({type(e).__name__})")
             continue
         if resp.status_code == 200:
-            content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+            try:
+                content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+            except Exception:
+                content = ""
             if content:
                 if idx > 0:
                     logger.info(f"[ai-simple] 主服务商不可用，由 {cand['provider']}/{cand['model']} 兜底")
                 _note_provider_ok(cand["provider"])
                 return content
-            last_err = RuntimeError("AI 返回空内容")
+            problems.append(f"{cand['provider']} 返回空内容")
             continue
-        if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
-            logger.info(f"[ai-simple] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
+        if _is_provider_hard_error(resp):
             _note_provider_fail(cand["provider"])
-            continue
-        resp.raise_for_status()
-    raise last_err
+        reason = _resp_reason(resp)
+        problems.append(f"{cand['provider']} {resp.status_code}{('：' + reason) if reason else ''}")
+    raise RuntimeError("AI 服务全部不可用 → " + "；".join(problems))
 
 
 async def _ai_comment_for_event(event: dict):
@@ -2088,8 +2141,9 @@ async def _ai_comment_for_event(event: dict):
     try:
         reply = await _call_ai_simple([{"role": "user", "content": prompt}])
         event["ai"] = reply or "（AI 未返回有效解读，可稍后重试）"
-    except Exception:
-        event["ai"] = "（AI 解读不可用：未配置 Key 或调用失败）"
+    except Exception as e:
+        # 展示具体原因（哪家 Key 失效/哪家限流），而不是笼统的"调用失败"
+        event["ai"] = f"（AI 解读失败：{str(e)[:220]}）"
     # 推送飞书群（配置了 webhook 时；上游整合）
     c15 = event.get("chg15")
     await _feishu_push(

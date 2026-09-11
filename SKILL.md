@@ -155,6 +155,20 @@ cd C:\Users\10166\.agents\skills\futures-analyzer
 5. **皮肤 +2**（上游 d60ece1 借鉴）：玻璃·夜（毛玻璃 backdrop-filter + 渐变光斑）与极光（流动极光动画，respect prefers-reduced-motion），共 6 套。
 6. **AI 调用自动重试**：`_llm_text_retry`（502/429 时空响应自动重试一次），实时解读与语义筛选已接入。
 
+## AI 故障可诊断（v0826o，用户报"AI 解读不可用"）
+
+用户盯盘异动只看到笼统的"（AI 解读不可用：未配置 Key 或调用失败）"，无法定位该修什么。实测三个服务商同时不可用但**原因各不相同**：deepseek 401（Key ****cc1b 失效）、智谱 401（令牌过期）、coding plan 429（额度不足）——兜底链逐个试完全部失败。
+
+1. **错误信息具体化**：`_call_ai_simple` 重构为收集每家失败原因（上游 `error.message` 原样带上），最终抛 `AI 服务全部不可用 → deepseek 401：xxx；zhipu 401：xxx；custom 429：xxx`；盯盘事件 `_ai_comment_for_event` 原样展示（截 220 字）。此前无论什么原因都显示同一句笼统提示。
+2. **`GET /api/ai/health`**：逐一探活每家（极短请求 max_tokens=256），返回 provider/model/ok/status/detail/ms/active。**设置页新增「🩺 服务商体检」按钮**，结果带 ✅/⛔ 与具体原因，全挂时给出"按提示修复"的横幅。
+3. 实测输出示例：
+   ```
+   ⛔ deepseek deepseek-flash 401  Authentication Fails, Your api key: ****cc1b is invalid（当前）
+   ⛔ zhipu    glm-4-flash    401  令牌已过期或验证不正确
+   ⛔ custom   glm-5          429  余额不足或无可用资源包,请充值。
+   ```
+4. 坑：新增 except 分支时若用 `e` 必须写成 `except Exception as e:`（漏了会 NameError，实测踩到）。
+
 ## 主力合约口径修正（v0826n，用户质疑甲醇"数据不准"）
 
 用户指出"甲醇 MA2619 明明是 3467"。核查后确认**用户是对的**：新浪 `nf_MA0` 连续按**持仓量**映射到 MA2701(3049)，而 **MA2610 成交量大 5.6 倍**（近 5 日日均 319 万 vs 62 万手，价 3455-3467）——交易者看的是活跃合约，两者背离 400 点。

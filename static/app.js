@@ -2880,6 +2880,30 @@ $("btnSaveSettings").addEventListener("click", async () => {
   }
 });
 
+$("btnAiHealth").addEventListener("click", async () => {
+  const box = $("aiHealthBox");
+  const btn = $("btnAiHealth");
+  btn.disabled = true;
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="muted small">正在依次检测各服务商（每家一次极短请求）…</div>`;
+  try {
+    const d = await api("/api/ai/health");
+    const rows = (d.items || []).map((it) => {
+      const mark = it.ok ? "✅" : "⛔";
+      const act = it.active ? '<span class="muted small">（当前使用）</span>' : "";
+      return `<div class="ai-health-row">${mark} <b>${esc(it.provider)}</b> ${esc(it.model)} ${act}
+        <span class="muted small">${it.status || "-"} · ${it.ms}ms</span>
+        <div class="muted small">${esc(it.detail || "")}</div></div>`;
+    }).join("");
+    const anyOk = (d.items || []).some((x) => x.ok);
+    box.innerHTML = (anyOk ? "" : `<div class="muted small" style="margin-bottom:6px">⚠ 没有可用服务商——按上面提示修复（Key 失效→重新生成；额度不足→充值或换一家）</div>`) + rows;
+  } catch (e) {
+    box.innerHTML = `<div class="muted small">体检失败：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 $("btnPushTest").addEventListener("click", async () => {
   try {
     await api("/api/feishu/push-test", { method: "POST" });

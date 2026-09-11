@@ -11,7 +11,7 @@
     if (t && t !== "dark") document.documentElement.setAttribute("data-theme", t);
   })();
 </script>
-<link rel="stylesheet" href="/static/style.css?v=0826n">
+<link rel="stylesheet" href="/static/style.css?v=0826o">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
   </div>
   <div class="top-right">
     <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0826n</span>
+    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0826o</span>
     <div style="position:relative">
       <button id="btnTheme" class="btn ghost" title="切换皮肤">🎨</button>
       <div id="themePop" class="theme-pop hidden"></div>
@@ -340,7 +340,9 @@
       API Key 按服务商独立保存（切换不丢失），存于本机 config.json，不会上传。
       智谱 glm-4-flash 免费；旗舰模型与 DeepSeek 按量计费。
     </p>
+    <div id="aiHealthBox" class="ai-health hidden"></div>
     <div class="modal-actions">
+      <button id="btnAiHealth" class="btn small-btn" title="依次检测每个已存 Key 的服务商是否可用">🩺 服务商体检</button>
       <button id="btnClearKey" class="btn ghost">清除已存 Key</button>
       <span id="cfgStatus" class="muted small"></span>
       <button id="btnSaveSettings" class="btn primary">保存</button>
@@ -413,6 +415,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/static/app.js?v=0826n"></script>
+<script src="/static/app.js?v=0826o"></script>
 </body>
 </html>
