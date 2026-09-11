@@ -1198,6 +1198,17 @@ async def ai_chat(body: ChatIn):
     candidates = _llm_candidates(cfg)
 
     context = "" if body.light else await _build_market_context(body.symbol)
+    # 多品种识别：问题里提到的其它品种（非当前选中）注入紧凑快照——
+    # 否则问"SA/FG 怎么样"而选中的是别的品种时，AI 缺全部判据
+    if not body.light:
+        last_q = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
+        for s in _detect_question_symbols(last_q, exclude=body.symbol):
+            try:
+                blk = await _symbol_snapshot_block(s)
+                if blk:
+                    context += (f"\n\n" if context else "") + f"【{s} 快照（问题提及品种，与当前选中对比分析用）】\n{blk}"
+            except Exception:
+                pass
     system = SYSTEM_PROMPT + ("\n\n" + context if context else "")
 
     messages = _build_api_messages(body.messages, system)
@@ -1638,6 +1649,112 @@ async def _variety_fundamentals(symbol: str) -> str:
     text = "\n".join(lines)
     _fund_cache[key] = (loop_now, text, FUND_TTL if text else FUND_EMPTY_TTL)
     return text
+
+
+# ---------------------------------------------------------------- 多品种识别：问题提到谁，就把谁的数据带上
+
+_INTL_CN = {"WTI": "WTI", "布伦特": "BRENT", "黄金": "GOLD", "美元指数": "DXY"}
+# 静态品种名映射（前缀→中文常用名）——识别不依赖目录网络（新浪限流时目录为空，
+# 此前问"纯碱/玻璃"识别不到的根因）；名称取日常叫法，匹配"包含"即可
+_PREFIX_CN = {
+    "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "J": "焦炭", "JM": "焦煤",
+    "CU": "铜", "AL": "铝", "ZN": "锌", "PB": "铅", "NI": "镍", "SN": "锡", "SS": "不锈钢",
+    "AU": "黄金", "AG": "白银", "SC": "原油", "FU": "燃油", "LU": "低硫燃油", "BU": "沥青", "RU": "橡胶", "NR": "20号胶", "SP": "纸浆",
+    "M": "豆粕", "RM": "菜粕", "Y": "豆油", "P": "棕榈油", "OI": "菜油", "A": "豆一", "B": "豆二",
+    "TA": "PTA", "MA": "甲醇", "EG": "乙二醇", "EB": "苯乙烯", "PP": "聚丙烯", "L": "塑料", "V": "PVC", "PG": "液化气",
+    "FG": "玻璃", "SA": "纯碱", "UR": "尿素", "C": "玉米", "CS": "淀粉", "CF": "棉花", "SR": "白糖",
+    "JD": "鸡蛋", "LH": "生猪", "LC": "碳酸锂", "SI": "工业硅", "EC": "集运欧线",
+    "IF": "沪深300", "IH": "上证50", "IC": "中证500", "IM": "中证1000", "T": "国债",
+}
+_Q_CODE_NOISE = {"AI", "OK", "VS", "PS", "PM", "AM"}
+
+
+def _detect_question_symbols(text: str, exclude: Optional[str] = None, limit: int = 3) -> list[str]:
+    """从问题文本识别提及的品种（合约代码 SA0/FG 或中文名 纯碱/玻璃/黄金…），
+    返回主力合约符号列表（排除 exclude，最多 limit 个）。
+    数字位 1-2 位的跳过（MA5/MA20 等指标词与合约前缀 MA 冲突）。"""
+    raw = text or ""
+    t = raw.upper()
+    found: list[str] = []
+
+    def _add(sym: str):
+        sym = sym.upper()
+        if sym and sym != (exclude or "").upper() and sym not in found:
+            found.append(sym)
+
+    for m in re.finditer(r"\b([A-Z]{1,2})(\d{0,4})\b", t):
+        pfx, digits = m.group(1), m.group(2)
+        if pfx in _Q_CODE_NOISE:
+            continue
+        if pfx == "MA" and digits in ("5", "10", "20", "30", "60", "120", "250"):
+            continue  # MA5/MA20 均线指标 ≠ 甲醇 MA0/MA605 合约
+        if pfx in _PREFIX_CN:
+            _add(f"{pfx}0")
+        elif m.group(0) in _dir_cache.get("data", {}):
+            _add(m.group(0))
+    for cn, sym in _INTL_CN.items():
+        if cn in raw or cn in t:
+            _add(sym)
+    for pfx, cn in _PREFIX_CN.items():
+        if cn and cn in raw:
+            _add(f"{pfx}0")
+    return found[:limit]
+
+
+async def _symbol_snapshot_block(symbol: str) -> str:
+    """多品种问题的紧凑快照（每品种约 300 字）：最新价/涨跌、持仓量与增减仓方向、
+    日内结构（含高低点出现时间）、资金情绪评分、库存/现货/基差、技术指标要点。
+    任一段失败静默跳过——把"空头主动打压还是多头踩踏、情绪还是现舱在塌"
+    这类问题的判据全部交给 AI。"""
+    lines = []
+    try:
+        q = await fetch_quote(symbol)
+        if q and q.get("last") is not None:
+            pct = f"{q['change_pct']:+.2f}%" if q.get("change_pct") is not None else "--"
+            oi_txt = f"，持仓 {q.get('position')}" if q.get("position") is not None else ""
+            try:
+                daily = await get_daily(symbol)
+                holds = [_num(d.get("hold")) for d in daily[-2:]]
+                if holds[0] and holds[1]:
+                    dif = holds[1] - holds[0]
+                    oi_txt = (f"，持仓 {q.get('position')}（昨日 {holds[0]:.0f}，"
+                              f"{'增仓' if dif >= 0 else '减仓'} {abs(dif):.0f}——"
+                              f"{'空头主动进场或多头反手打压' if dif >= 0 else '多头离场或空头回补'}需结合价格方向判读）")
+            except Exception:
+                pass
+            lines.append(f"- 最新 {q['last']}（{pct}）{oi_txt}")
+    except Exception:
+        pass
+    try:
+        intra = await _intraday_summary(symbol)
+        if intra:
+            lines.append(f"- 日内：{intra}")
+    except Exception:
+        pass
+    try:
+        fs = fund_sentiment(symbol, await get_daily(symbol))
+        if fs:
+            lines.append(f"- 资金情绪：{_fund_text(fs)}")
+    except Exception:
+        pass
+    try:
+        fund_txt = await _variety_fundamentals(symbol)
+        if fund_txt:
+            lines.append("- 基本面：" + fund_txt.replace("\n", "；"))
+    except Exception:
+        pass
+    try:
+        ind = await get_indicators(symbol)
+        v = ind["values"]
+        sigs = "、".join(s["name"] for s in ind["signals"][:3]) or "无"
+        lines.append(
+            f"- 指标：收 {v.get('close')}，MA5 {v.get('ma5')}/MA20 {v.get('ma20')}，"
+            f"MACD 柱 {v.get('macd_hist')}，RSI6 {v.get('rsi6')}，KDJ {v.get('k')}/{v.get('d')}/{v.get('j')}，"
+            f"BOLL {v.get('boll_low')}~{v.get('boll_up')}；信号：{sigs}"
+        )
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- 国际盘监控（WTI/布伦特/黄金/美元指数）
