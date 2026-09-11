@@ -2727,7 +2727,7 @@ async function sendChat(text, opts = {}) {
   const typing = document.createElement("div");
   typing.className = "msg assistant";
   typing.innerHTML = `AI 分析中<span class="typing-dots"><span></span><span></span><span></span></span><span class="typing-timer"></span>
-    <div class="muted small" style="margin-top:4px">已附带实时行情、技术指标与信号上下文${images.length ? `及 ${images.length} 张图片（视觉模型）` : ""}。推理型模型可能需要 1~2 分钟，计时在走即正常等待中。</div>`;
+    <div class="muted small" style="margin-top:4px">已附带实时行情、技术指标与信号上下文${images.length ? `及 ${images.length} 张图片（视觉模型）` : ""}。思维链模型完整分析约需 1~3 分钟，计时在走即正常等待中。</div>`;
   $("chatBox").appendChild(typing);
   $("chatBox").scrollTop = $("chatBox").scrollHeight;
 
@@ -2741,7 +2741,7 @@ async function sendChat(text, opts = {}) {
   let abortTimer = null;
   try {
     const ctrl = new AbortController();
-    abortTimer = setTimeout(() => ctrl.abort(), 120000);
+    abortTimer = setTimeout(() => ctrl.abort(), 300000);  // 思维链模型长分析实测 2~3 分钟，须盖过后端 180s+续写轮次
     // token 优化：历史裁剪——最近 4 条完整，更早的截到 120 字；窗口 14 条
     const allMsgs = state.chat.filter((m) => m.role === "user" || m.role === "assistant");
     const msgs = allMsgs.slice(-14).map((m, i, arr) => {
@@ -2770,7 +2770,7 @@ async function sendChat(text, opts = {}) {
     clearInterval(tick);
     typing.remove();
     const msg = e.name === "AbortError"
-      ? "等待超时（超过 2 分钟），请稍后重试或换个更快的模型"
+        ? "等待超时（超过 5 分钟），请稍后重试或换个更快的模型"
       : `${e.message}\n请检查 AI 设置中的 API Key 是否正确、是否有余额。`;
     pushMsg("error", `调用失败：${msg}`, "error");  // error 角色：不进存档/复盘语料/AI 上下文
   }
