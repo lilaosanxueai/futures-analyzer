@@ -585,6 +585,13 @@ async def fetch_quote(symbol: str) -> dict:
         df = await call_ak(ak.futures_zh_spot, symbol=symbol, market=market_of(symbol), adjust="0")
         row = df.iloc[0].to_dict()
     except Exception as e:
+        # 数据源全挂时回退最近一次成功缓存（标注 stale），绝不无声显示旧数冒充实时
+        stale = _quote_cache.get(symbol)
+        if stale and stale[1].get("last") is not None:
+            q = dict(stale[1])
+            q["stale"] = True
+            q["time"] = (q.get("time") or "") + "（延迟）"
+            return q
         return {"symbol": symbol, "error": f"行情获取失败：{e}"}
 
     directory = await get_directory(max_age=3600)  # 名称映射容忍 1h 旧缓存，行情不为目录刷新排队
