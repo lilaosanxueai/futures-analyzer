@@ -451,7 +451,7 @@ function renderQuoteArea() {
   }
   box.innerHTML = `
     <div class="detail-top">
-      <span class="detail-name">${sym}<span class="exch">${q.exchange || ""}${name ? " · " + name : ""}</span></span>
+      <span class="detail-name">${sym}<span class="exch">${q.exchange || ""}${name ? " · " + name : ""}${q.contract && q.contract !== sym ? ` · 跟踪 ${esc(q.contract)}` : ""}</span></span>
       <span id="detailLast" class="detail-last ${cls}">${fmt(q.last, dg2)}</span>
       <span class="detail-chg ${cls}">${sign}${fmt(q.change, dg2)}（${sign}${fmt(q.change_pct, 2)}%）</span>
     </div>

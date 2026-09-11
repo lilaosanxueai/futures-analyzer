@@ -431,7 +431,9 @@ async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
         _daily_cache[symbol] = (loop_now, records, DAILY_TTL_CLOSED)
         return records
 
-    df = await call_ak(ak.futures_zh_daily_sina, symbol=symbol)
+    # 主连：用成交量主力合约的日线，与 fetch_quote 同源（否则行情与指标基于不同合约）
+    dom = await _dominant_contract(symbol)
+    df = await call_ak(ak.futures_zh_daily_sina, symbol=dom or symbol)
     records = df.to_dict("records")
     # 最后交易日早于今天 → 已收盘，数据不再变化，用长缓存减少对数据源的反复请求
     today = datetime.now().strftime("%Y-%m-%d")
@@ -511,10 +513,14 @@ async def _hq_quote(symbol: str) -> Optional[dict]:
     if last is None:
         return None
     info = _dir_cache.get("data", {}).get(symbol, {})  # 名称用现有缓存，不为它联网
+    # 具体月份合约（MA2610）不在目录里：用 hq 字段 15 的品种简称，再退静态映射
+    name = info.get("name", "") or (str(f[15]).strip() if len(f) > 15 else "")
+    if not name:
+        name = _PREFIX_CN.get(re.match(r"^([A-Za-z]{1,2})", symbol).group(1).upper(), "") if re.match(r"^([A-Za-z]{1,2})", symbol) else ""
     change = round(last - prev_settle, 2) if prev_settle else None
     return {
         "symbol": symbol,
-        "name": info.get("name", ""),
+        "name": name,
         "exchange": info.get("exchange", ""),
         "time": _fmt_time(f[1]),
         "last": last,
@@ -532,6 +538,70 @@ async def _hq_quote(symbol: str) -> Optional[dict]:
         "ask_vol": n(12),
         "digits": 1,
     }
+
+
+# 主力合约解析：新浪连续（nf_XXX0）按**持仓量**映射，近月逼仓时与市场活跃合约
+# 背离（实测甲醇 2026-09：nf_MA0→MA2701(3049)，而 MA2610 成交量大 5.6 倍(3455)）。
+# 交易者看的是活跃合约，故按**成交量**重新判定，缓存 30 分钟。
+_DOM_TTL = 1800.0
+_dom_cache: dict[str, tuple[float, str]] = {}  # 品种前缀 -> (loop_ts, 具体合约代码)
+_CFFEX_PREFIX = {"IF", "IH", "IC", "IM", "T", "TF", "TS", "TL"}
+
+
+def _candidate_months(n: int = 12) -> list[str]:
+    """候选月份合约 YYMM：当月起 n 个月"""
+    d = datetime.now()
+    y, m = d.year, d.month
+    out = []
+    for _ in range(n):
+        out.append(f"{y % 100:02d}{m:02d}")
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
+
+
+async def _dominant_contract(symbol: str) -> Optional[str]:
+    """主连代码（MA0）→ 按成交量判定的主力月份合约（MA2610）。
+    非主连/中金所/查询失败返回 None（调用方维持原 symbol）。"""
+    m = re.fullmatch(r"([A-Za-z]{1,2})0", symbol or "")
+    if not m:
+        return None
+    pfx = m.group(1).upper()
+    if pfx in _CFFEX_PREFIX:
+        return None
+    loop_now = asyncio.get_event_loop().time()
+    cached = _dom_cache.get(pfx)
+    if cached and loop_now - cached[0] < _DOM_TTL:
+        return cached[1]
+    # 原始 URL（逗号不可 URL 编码，params 方式会被新浪拒）
+    url = "https://hq.sinajs.cn/list=" + ",".join(f"nf_{pfx}{mo}" for mo in _candidate_months())
+    global _HQ_CLIENT
+    try:
+        if _HQ_CLIENT is None:
+            _HQ_CLIENT = httpx.AsyncClient(timeout=6)
+        r = await _HQ_CLIENT.get(url, headers={"Referer": "https://finance.sina.com.cn"})
+        txt = r.content.decode("gbk", errors="replace")
+    except Exception:
+        return cached[1] if cached else None
+    best, best_vol = None, 0.0
+    for line in txt.strip().split("\n"):
+        mm = re.search(r'hq_str_nf_(\w+)="([^"]*)"', line)
+        if not mm or not mm.group(2):
+            continue
+        f = mm.group(2).split(",")
+        if len(f) < 15:
+            continue
+        try:
+            vol = float(f[14])
+        except ValueError:
+            continue
+        if vol > best_vol:
+            best, best_vol = mm.group(1), vol
+    if best and best_vol > 0:
+        _dom_cache[pfx] = (loop_now, best)
+        return best
+    return cached[1] if cached else None
 
 
 async def fetch_quote(symbol: str) -> dict:
@@ -574,8 +644,13 @@ async def fetch_quote(symbol: str) -> dict:
     # 国内商品期货：优先走新浪 hq 快路径（~0.2s、不占 V8 线程），失败退回 akshare
     if market_of(symbol) != "CFFEX":
         try:
-            hq = await _hq_quote(symbol)
+            # 主连代码按成交量解析真实活跃合约（新浪连续按持仓量，近月逼仓时会背离）
+            dom = await _dominant_contract(symbol)
+            hq = await _hq_quote(dom or symbol)
             if hq:
+                if dom and dom != symbol:
+                    hq["symbol"] = symbol      # 对外仍用主连代码，与自选/列表一致
+                    hq["contract"] = dom       # 标注实际跟踪的合约（前端可显示）
                 _quote_cache[symbol] = (loop_now, hq)
                 return hq
         except Exception:
