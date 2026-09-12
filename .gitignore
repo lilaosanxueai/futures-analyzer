@@ -1,8 +1,11 @@
 config.json
 morning_report.json
 notes.json
+discipline_log.json
 __pycache__/
 *.pyc
 server.log
 trader_profile.json
 trades.json
+.venv/
+server.log
