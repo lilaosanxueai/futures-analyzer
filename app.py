@@ -2378,20 +2378,8 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
     raise RuntimeError("AI 服务全部不可用 → " + "；".join(problems))
 
 async def _call_ai_with_fallback(messages: list[dict], max_tokens: int = 4096) -> str:
-    """主模型优先；返回空或失败时自动切换到另一家已配置的服务商重试"""
-    cfg = load_config()
-    errors = []
-    for p in [cfg["provider"]] + [x for x in PROVIDERS if x != cfg["provider"]]:
-        if not cfg["api_keys"].get(p):
-            continue
-        try:
-            out = await _call_ai_simple(messages, max_tokens=max_tokens, provider=p)
-            if out:
-                return out
-            errors.append(f"{p}: 空输出")
-        except Exception as e:
-            errors.append(f"{p}: {type(e).__name__}")
-    raise RuntimeError("AI 无有效输出（" + "；".join(errors) + "）")
+    """兼容适配：enhanced 版 _call_ai_simple 已内置多服务商候选与兜底，直接委托"""
+    return await _call_ai_simple(messages, max_tokens=max_tokens)
 
 
 async def _ai_comment_for_event(event: dict):
@@ -6076,6 +6064,39 @@ async def correlation(symbols: str, days: int = 60):
 
 
 # ---------------------------------------------------------------- 交易心得
+
+
+
+
+# ---------------- enhanced 辅助函数（合并补齐：AI 调用链依赖）
+def _resp_reason(resp) -> str:
+    """上游错误原因（各平台都把关键信息放在 error.message，如"余额不足""Key 无效"）"""
+    try:
+        return str(resp.json().get("error", {}).get("message", ""))[:70]
+    except Exception:
+        return ""
+
+
+def _build_api_messages(chat_messages: list[ChatMessage], system: str) -> list[dict]:
+    """构造 API 消息：带图消息转 OpenAI 多模态 content 数组（视觉模型）。
+    仅保留最后一条带图消息的图片，历史消息图片剥除为纯文本，
+    避免图片 token 反复计入上下文撑爆窗口。"""
+    last_img_idx = -1
+    for i, m in enumerate(chat_messages):
+        if m.role == "user" and m.images:
+            last_img_idx = i
+    out = [{"role": "system", "content": system}]
+    for i, m in enumerate(chat_messages):
+        if i == last_img_idx:
+            content: list[dict] = [
+                {"type": "text", "text": m.content or "（请结合图片分析）"}
+            ]
+            for url in m.images[:4]:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            out.append({"role": m.role, "content": content})
+        else:
+            out.append({"role": m.role, "content": m.content})
+    return out
 
 
 if __name__ == "__main__":
