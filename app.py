@@ -1301,7 +1301,7 @@ async def _build_market_context(symbol: Optional[str]) -> str:
         parts.append(f"【{symbol} 产业·供需聚焦（东财专业新闻，近期待闻）】\n" + "\n".join(lines))
     if shm:
         lines = [f"- [{it['time']}] {it['title']}" for it in shm]
-        parts.append(f"【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
+        parts.append("【金属行情快讯（上海有色网 SHMET，实时）】\n" + "\n".join(lines))
     vnews = _variety_news(symbol)
     if vnews:
         lines = [f"- [{it['time'][5:16]}] {it['title'][:60]}" for it in vnews]
@@ -1442,7 +1442,7 @@ async def ai_chat(body: ChatIn):
             try:
                 blk = await _symbol_snapshot_block(s)
                 if blk:
-                    context += (f"\n\n" if context else "") + f"【{s} 快照（问题提及品种，与当前选中对比分析用）】\n{blk}"
+                    context += ("\n\n" if context else "") + f"【{s} 快照（问题提及品种，与当前选中对比分析用）】\n{blk}"
             except Exception:
                 pass
     profile = _profile_context()
@@ -1607,7 +1607,7 @@ async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
                 pass
             last = {"code": resp.status_code if resp.status_code in (401, 429) else 502,
                     "detail": f"AI 服务限流或额度不足：{detail}" if resp.status_code == 429 else
-                              (f"API Key 无效" if resp.status_code == 401 else f"AI 服务返回 {resp.status_code}：{detail or '未知错误'}")}
+                              ("API Key 无效" if resp.status_code == 401 else f"AI 服务返回 {resp.status_code}：{detail or '未知错误'}")}
         if resp.status_code not in (200,) and not (_is_provider_hard_error(resp) and idx < len(candidates) - 1):
             break  # 非可兜底错误（如 502 解析问题）不再尝试后续
     raise HTTPException(status_code=last["code"], detail=last["detail"])
@@ -2406,7 +2406,6 @@ async def _ai_comment_for_event(event: dict):
         # 展示具体原因（哪家 Key 失效/哪家限流），而不是笼统的"调用失败"
         event["ai"] = f"（AI 解读失败：{str(e)[:220]}）"
     # 推送飞书群（配置了 webhook 时；上游整合）
-    c15 = event.get("chg15")
     await _feishu_push(
         f"🤖 盯盘异动\n"
         f"{event['symbol']}（{name}）5分钟{'急涨' if event['dir'] == 'up' else '跳水'} {event['chg5']:+.2f}%，"
@@ -5493,7 +5492,6 @@ async def _scalp_snapshot(symbol: str) -> dict:
     noise = round(sum(amps) / len(amps), 3) if amps else None
 
     # 可交易性评分（0-100）：量能活跃 + 短时波动足够 + 噪音适中
-    prefix = _variety_prefix(symbol)
     threshold = _monitor_threshold(symbol, 1.0)
     s_vol = min(1.0, (vol_ratio or 0.5) / 1.5) * 40
     s_move = min(1.0, abs(chg15 or 0) / (threshold * 1.5)) * 35
@@ -5509,7 +5507,6 @@ async def _scalp_snapshot(symbol: str) -> dict:
     if vwap_dev is not None:
         pts.append(f"现价处于日内区间 {pos_pct:.0f}% 分位（{pos_word}），VWAP {'上方' if vwap_dev > 0 else '下方'} {abs(vwap_dev):.2f}%")
     if chg5 is not None:
-        arrow = "↑" if chg5 > 0 else "↓"
         pts.append(f"短时动能：5分 {chg5:+.2f}% / 15分 {chg15:+.2f}% / 30分 {chg30:+.2f}%，连续{abs(streak)}根{'阳' if streak > 0 else '阴'}线" if streak else f"短时动能：5分 {chg5:+.2f}% / 15分 {chg15:+.2f}%")
     if vol_ratio is not None:
         pts.append(f"量能：近15分钟 {'放量' if vol_ratio >= 1.3 else ('缩量' if vol_ratio <= 0.7 else '持平')}（{vol_ratio}×日均）" + (f"，持仓15分{'+' if pos15 > 0 else ''}{pos15:.0f} → {flow}" if pos15 is not None and flow else ""))
@@ -5640,152 +5637,10 @@ def _trail_state(t: dict, price: float) -> list[dict]:
     return events
 
 
-TRAIL_TEXT = {
-    "arm": "🎯 {sym} {d}浮盈 +{pnl:.0f} 点，移动止盈激活：峰值 {peak} 回撤 {points:.0f} 点即离场（当前追踪线 {line}）",
-    "partial": "📍 {sym} {d}浮盈 +{pnl:.0f} 点已达目标位：建议减仓 1/2，剩余改用移动止盈（追踪线 {line}）",
-    "trigger": "✅ {sym} {d}移动止盈触发：{verb}追踪线 {line}，建议离场锁盈（当前浮盈 {pnl:+.0f} 点）",
-}
-
-
-async def trail_loop():
-    """动态止盈巡检：对交易日志中的持仓单每 30 秒更新追踪止盈状态，触发提示进异动流 + 飞书"""
-    await asyncio.sleep(25)
-    while True:
-        try:
-            now = datetime.now()
-            if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
-                trades = _load_trades()
-                open_trades = [t for t in trades if t.get("status") == "open" and t.get("trail")]
-                if open_trades:
-                    loop_now = asyncio.get_event_loop().time()
-                    prices: dict[str, float] = {}
-                    for sym in {t["symbol"] for t in open_trades}:
-                        ts, q = _quote_cache.get(sym, (0, {}))
-                        price = (q or {}).get("last")
-                        if not price or loop_now - ts > 10:
-                            try:
-                                price = (await fetch_quote(sym)).get("last")
-                            except Exception:
-                                price = None
-                        if price:
-                            prices[sym] = price
-                    changed = False
-                    for t in open_trades:
-                        price = prices.get(t["symbol"])
-                        if not price:
-                            continue
-                        events = _trail_state(t, price)
-                        if events:
-                            changed = True
-                            d = "多" if t["direction"] == "long" else "空"
-                            for ev in events:
-                                text = TRAIL_TEXT[ev["etype"]].format(
-                                    sym=t["symbol"], d=d, pnl=ev["pnl"],
-                                    peak=round(t["trail"]["peak"], 1), points=t["trail"]["points"],
-                                    line=ev["line"], verb="跌破" if t["direction"] == "long" else "升破",
-                                )
-                                _MONITOR["events"].append({
-                                    "id": f"{t['symbol']}-trail-{ev['etype']}-{t['id']}",
-                                    "ts": int(datetime.now().timestamp() * 1000),
-                                    "kind": "trail", "etype": ev["etype"],
-                                    "symbol": t["symbol"], "dir": "up" if t["direction"] == "long" else "down",
-                                    "price": price, "line": ev["line"], "pnl": ev["pnl"],
-                                    "text": text,
-                                    # 兼容字段：旧版前端按普通异动事件渲染时不显示 undefined
-                                    "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": True, "ai": "",
-                                })
-                                asyncio.create_task(_feishu_push(text))
-                    if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
-                        _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
-                    if changed:
-                        _save_trades(trades)
-        except Exception:
-            pass
-        await asyncio.sleep(30)
-
-
 _radar_prev: dict[str, dict] = {}   # 上轮快照关键字段（sym -> {score, grade, ir_state, flow}）
 
 
 _radar_cool: dict[tuple, float] = {}  # (sym, 变化类型) -> loop time，10 分钟冷却
-
-
-def _grade_of(score: int) -> str:
-    return "活跃" if score >= 65 else ("一般" if score >= 40 else "清淡")
-
-
-async def _radar_check(sym: str) -> None:
-    """单品种雷达异变检测：评分跨档 / IR 突破 / 量价定性翻转 → 作战流（IR 突破加推飞书）"""
-    try:
-        snap = await _scalp_snapshot(sym)
-    except Exception:
-        return
-    cur = {
-        "score": snap["score"], "grade": snap["grade"],
-        "ir_state": snap["ir_state"], "flow": snap["flow"] or "",
-    }
-    prev = _radar_prev.get(sym)
-    _radar_prev[sym] = cur
-    if not prev:
-        return  # 首轮建档
-    loop_now = asyncio.get_event_loop().time()
-    name = snap.get("name") or sym
-
-    def _emit(ctype: str, text: str, feishu: bool = False, level: str = "info"):
-        key = (sym, ctype)
-        if loop_now - _radar_cool.get(key, -1e9) < 600:
-            return
-        _radar_cool[key] = loop_now
-        _MONITOR["events"].append({
-            "id": f"radar-{sym}-{ctype}-{int(loop_now)}",
-            "ts": int(datetime.now().timestamp() * 1000),
-            "kind": "radar", "etype": ctype, "level": level,
-            "symbol": sym, "name": name, "dir": "up",
-            "price": snap["last"], "text": text,
-            # 兼容字段：旧版前端按普通异动事件渲染时不显示 undefined
-            "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": True, "ai": "",
-        })
-        if len(_MONITOR["events"]) > MONITOR_MAX_EVENTS:
-            _MONITOR["events"] = _MONITOR["events"][-MONITOR_MAX_EVENTS:]
-        if feishu:
-            asyncio.create_task(_feishu_push(f"📡 超短雷达 · {sym}（{name}）\n{text}\n现价 {snap['last']}"))
-
-    # IR 突破/跌回（超短关键结构事件）
-    if prev["ir_state"] != cur["ir_state"]:
-        if "上破" in cur["ir_state"]:
-            _emit("ir", f"{sym} 上破开盘区间（IR {snap['ir_low']:g}~{snap['ir_high']:g}），现价 {snap['last']}——真突破跟进或防假突破回抽", feishu=True, level="warn")
-        elif "跌破" in cur["ir_state"]:
-            _emit("ir", f"{sym} 跌破开盘区间（IR {snap['ir_low']:g}~{snap['ir_high']:g}），现价 {snap['last']}——日内转弱信号", feishu=True, level="warn")
-
-    # 可交易性跨档（清淡↔一般↔活跃）
-    if prev["grade"] != cur["grade"]:
-        arrow = "↑" if cur["score"] > prev["score"] else "↓"
-        _emit("grade", f"{sym} 可交易性 {prev['grade']}→{cur['grade']}（{prev['score']}→{cur['score']}{arrow}）"
-              + ("，波动启动可关注" if cur["score"] > prev["score"] else "，波动衰减建议观望"))
-
-    # 量价定性翻转
-    if prev["flow"] and cur["flow"] and prev["flow"] != cur["flow"]:
-        _emit("flow", f"{sym} 量价定性翻转：{prev['flow'].split('（')[0]} → {cur['flow'].split('（')[0]}")
-
-
-async def radar_loop():
-    """超短雷达异变监控：盯盘品种（自选+持仓+画像）每 60 秒对比快照，关键变化进作战流"""
-    await asyncio.sleep(45)
-    while True:
-        try:
-            now = datetime.now()
-            if is_trading_time(now) or (now.weekday() < 5 and 20 <= now.hour < 24):
-                syms = ({s.upper() for s in _MONITOR["watch"]}
-                        | {t["symbol"] for t in _load_trades() if t.get("status") == "open"}
-                        | set(_load_profile().get("symbols") or []))
-                for sym in sorted(syms)[:8]:
-                    await _radar_check(sym)
-        except Exception:
-            pass
-        await asyncio.sleep(60)
-
-
-# ---------------------------------------------------------------- AI 记忆画像
 
 
 CAL_TTL = 600.0
@@ -5797,7 +5652,6 @@ _calendar_cache: dict = {"date": "", "ts": 0.0, "items": []}
 async def get_calendar(date: str = "") -> list[dict]:
     """当日宏观事件日历（百度财经，含公布/预期/前值/重要性）"""
     date = date or datetime.now().strftime("%Y%m%d")
-    today = datetime.now().strftime("%Y%m%d")
     loop_now = asyncio.get_event_loop().time()
     if (_calendar_cache["date"] == date and loop_now - _calendar_cache["ts"] < CAL_TTL):
         return _calendar_cache["items"]
