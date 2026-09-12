@@ -8,4 +8,4 @@ server.log
 trader_profile.json
 trades.json
 .venv/
-server.log
+server.log_fix.py
