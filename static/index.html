@@ -1,420 +1,311 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>期货实时分析助手</title>
-<link rel="stylesheet" href="/static/style.css?v=0908m"></head>
+<title>期货心理博弈分析</title>
+<link rel="stylesheet" href="/static/style.css?v=20260914">
+</head>
 <body>
 
 <header class="topbar">
   <div class="brand">
-    <span class="logo">📡</span>
-    <span>期货实时分析助手</span>
-    <span class="sub">AkShare · 准实时行情 + AI 分析</span>
+    <span class="logo">♜</span>
+    <div>
+      <h1>期货心理博弈分析</h1>
+      <span class="sub">四方资金 · 散户心理 · 反幻想</span>
+    </div>
+  </div>
+  <div class="top-center">
+    <span id="marketStatus" class="chip">—</span>
+    <span id="clock" class="clock">--:--:--</span>
   </div>
   <div class="top-right">
-    <span id="marketStatus" class="market-status">加载中…</span>
-    <span class="muted small" title="如功能异常请 Ctrl+F5 强制刷新页面">v0908m</span>
-    <a href="/enhanced" target="_blank" title="深度增强版：AI 纪律引擎 / 资金情绪 / TradingView / 复盘" style="text-decoration:none"><button class="btn ghost">🛡 增强版</button></a>
-    <button id="btnReport" class="btn ghost">📋 晨报</button>
-    <span id="healthBadge" class="health-badge" title="系统自检状态（点击查看明细）">🩺…</span>
-    <button id="btnPause" class="btn ghost" title="暂停/恢复行情轮询">⏸</button>
-    <button id="btnSkin" class="btn ghost" title="切换皮肤">🎨</button>
-    <button id="btnSettings" class="btn ghost">⚙ 设置</button>
+    <button class="btn ghost" id="btnProfile" title="交易者画像（AI 记忆）">👤 画像</button>
+    <button class="btn ghost" id="btnSelfcheck" title="系统自检">🩺 自检</button>
+    <button class="btn ghost" id="btnReport" title="晨/夜报">📋 简报</button>
+    <button class="btn primary" id="btnSettings">⚙ 设置</button>
   </div>
 </header>
 
-<nav class="view-nav">
-  <button class="view-tab active" data-view="work">📊 工作台</button>
-  <button class="view-tab" data-view="detail">📈 合约详情</button>
-  <button class="view-tab" data-view="news">📰 国际盘监控</button>
-  <button class="view-tab" data-view="discipline">🛡 交易纪律</button>
-  <button class="view-tab" data-view="notes">📝 交易心得</button>
-  <button class="view-tab" data-view="trades">📒 交易日志</button>
-  <button class="view-tab" data-view="heat">🔥 热力图</button>
+<nav class="tabs">
+  <button class="tab active" data-view="work">工作台</button>
+  <button class="tab" data-view="psych">品种博弈</button>
+  <button class="tab" data-view="trades">交易诊断</button>
+  <button class="tab" data-view="notes">交易心得</button>
 </nav>
 
-<main class="views">
+<main id="main">
 
-  <!-- 视图 1：工作台（三栏：列表+盯盘 / 合约详情 / AI 对话） -->
-  <section class="view" data-view="work">
-    <div class="layout">
-
-      <section class="panel watch-panel">
-        <div class="panel-head">
-          <h2>自选行情</h2>
-          <span id="lastUpdate" class="muted small"></span>
-        </div>
-        <div class="add-row">
-          <div class="search-box">
-            <input id="symbolInput" placeholder="代码 / 名称 / 拼音，如 lw" autocomplete="off">
-            <div id="searchDrop" class="search-drop hidden"></div>
+  <!-- ============ 工作台 ============ -->
+  <section class="view active" id="view-work">
+    <div class="work-grid">
+      <div class="work-left">
+        <div class="card" id="watchCard">
+          <div class="card-head">
+            <h2>自选博弈看板</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnAddSymbol">＋ 添加</button>
+            </div>
           </div>
-          <button id="btnAdd" class="btn primary">添加</button>
-        </div>
-        <div class="intl-bar" id="intlBar">
-          <span class="intl-title muted small">🌍 外盘</span>
-          <span class="muted small">加载中…</span>
-        </div>
-        <div class="table-wrap">
-          <table class="quote-table">
+          <div class="symbol-search hidden" id="symbolSearch">
+            <input id="symbolSearchInput" placeholder="搜品种名/代码/拼音首字母，回车添加" autocomplete="off">
+            <div class="search-results" id="searchResults"></div>
+          </div>
+          <table class="table watch-table">
             <thead>
-              <tr>
-                <th class="sortable" data-key="symbol">合约<span class="arrow" data-arrow="symbol"></span></th>
-                <th class="sortable num" data-key="last">最新价<span class="arrow" data-arrow="last"></span></th>
-                <th class="sortable num" data-key="change_pct">涨跌幅<span class="arrow" data-arrow="change_pct"></span></th>
-                <th style="width:48px">趋势</th>
-                <th></th>
-              </tr>
+              <tr><th>品种</th><th class="r">最新</th><th class="r">涨跌%</th><th class="r">持仓变化</th><th>资金方向</th><th>散户陷阱</th></tr>
             </thead>
-            <tbody id="quoteBody">
-              <tr><td colspan="5" class="muted center pad">加载中…</td></tr>
-            </tbody>
+            <tbody id="watchBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          </table>
+          <div class="hint">点击行进入品种博弈分析 · 持仓变化 = 今日实时 vs 昨收盘</div>
+        </div>
+
+        <div class="card" id="intlCard">
+          <div class="card-head"><h2>外盘大势锚</h2></div>
+          <div class="intl-row" id="intlRow"><span class="empty">加载中…</span></div>
+        </div>
+
+        <div class="card" id="eventCard">
+          <div class="card-head">
+            <h2>预警事件流</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnMonitorCfg">盯盘设置</button>
+              <button class="btn ghost sm" id="btnMonitorTest">测试</button>
+            </div>
+          </div>
+          <div class="events" id="eventList"><div class="empty">暂无事件</div></div>
+        </div>
+      </div>
+
+      <div class="work-right">
+        <div class="card chat-card" id="chatCard">
+          <div class="card-head">
+            <h2>AI 反幻想教练</h2>
+            <select id="chatSymbol" class="select sm" title="关联品种（对话上下文）"><option value="">不关联品种</option></select>
+          </div>
+          <div class="chat-log" id="chatLog">
+            <div class="chat-welcome">
+              <p>我是反幻想教练。别问我"支撑位在哪"——我只回答：</p>
+              <p>· 四方资金（产业/主力/投机/散户）此刻在做什么<br>· 散户在想什么、会怎么送钱<br>· 主力的收割剧本是什么<br>· 你该顺应什么、避开什么</p>
+            </div>
+          </div>
+          <div class="chat-quick">
+            <button class="qk" data-q="散户现在在想什么？最可能怎么操作？">散户在想什么</button>
+            <button class="qk" data-q="主力现在在做什么？是在吸筹还是出货？">主力在做什么</button>
+            <button class="qk" data-q="我现在能进场吗？最危险的散户行为是什么？">现在能进场吗</button>
+            <button class="qk" data-q="拆穿一下我此刻最可能有的幻想">拆穿我的幻想</button>
+          </div>
+          <div class="chat-input-row">
+            <textarea id="chatInput" rows="2" placeholder="问点真问题（Ctrl+Enter 发送）"></textarea>
+            <button class="btn primary" id="btnChatSend">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 品种博弈 ============ -->
+  <section class="view" id="view-psych">
+    <div class="card psych-top">
+      <div class="psych-header">
+        <div class="psych-title">
+          <select id="psychSymbol" class="select"><option value="">选择品种…</option></select>
+          <span id="psychPrice" class="psych-price"></span>
+          <span id="psychChg" class="psych-chg"></span>
+          <span id="psychInfo" class="psych-info"></span>
+        </div>
+        <div class="head-actions">
+          <button class="btn ghost sm" id="btnPsychRefresh">↻ 刷新</button>
+          <button class="btn primary sm" id="btnPsychAI">AI 深度解读</button>
+          <button class="btn ghost sm" id="btnRealtime">⚡ 盘中快评</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="psychBody"><div class="empty pad">从工作台点击品种，或在此选择品种开始分析</div></div>
+  </section>
+
+  <!-- ============ 交易诊断 ============ -->
+  <section class="view" id="view-trades">
+    <div class="trades-grid">
+      <div class="trades-left">
+        <div class="card">
+          <div class="card-head">
+            <h2>🚨 问题预警</h2>
+            <div class="head-actions"><button class="btn ghost sm" id="btnDiagRefresh">↻ 重新诊断</button></div>
+          </div>
+          <div id="diagBody"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>📊 行为统计</h2></div>
+          <div id="statsBody" class="stats-body"><div class="empty">加载中…</div></div>
+        </div>
+      </div>
+
+      <div class="trades-right">
+        <div class="card">
+          <div class="card-head"><h2>＋ 记一笔（开仓即检，问题当场暴露）</h2></div>
+          <form id="tradeForm" class="trade-form">
+            <div class="form-row">
+              <select id="tfSymbol" class="select" required><option value="">品种</option></select>
+              <select id="tfDir" class="select" required>
+                <option value="long">做多</option>
+                <option value="short">做空</option>
+              </select>
+            </div>
+            <div class="form-row four">
+              <input id="tfEntry" type="number" step="any" placeholder="开仓价" required>
+              <input id="tfStop" type="number" step="any" placeholder="止损点数（必填）" required>
+              <input id="tfTarget" type="number" step="any" placeholder="目标点数">
+              <input id="tfLots" type="number" step="any" placeholder="手数" value="1">
+            </div>
+            <div class="form-row">
+              <input id="tfNote" placeholder="开仓理由（写给诊断引擎和未来的自己）">
+              <button type="submit" class="btn primary">记入日志</button>
+            </div>
+          </form>
+          <div id="tradeWarnings" class="trade-warnings hidden"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>📒 交易日志</h2></div>
+          <table class="table trades-table">
+            <thead><tr><th>日期</th><th>品种</th><th>方向</th><th class="r">开仓价</th><th class="r">止损</th><th class="r">目标</th><th class="r">浮动/结果</th><th>操作</th></tr></thead>
+            <tbody id="tradesBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
           </table>
         </div>
-        <div class="monitor-panel">
-          <div class="monitor-head">
-            <span>🤖 AI 盯盘</span>
-            <span id="monitorStatus" class="muted small">启动中…</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 交易心得 ============ -->
+  <section class="view" id="view-notes">
+    <div class="notes-grid">
+      <div class="notes-left">
+        <div class="card">
+          <div class="card-head"><h2>✍️ 新心得</h2></div>
+          <form id="noteForm" class="note-form">
+            <div class="form-row">
+              <input id="nfTitle" placeholder="标题（可空）">
+              <input id="nfSymbol" placeholder="品种 如 SA0（可空）" style="max-width:150px">
+            </div>
+            <textarea id="nfContent" rows="3" placeholder="今天踩了什么坑 / 看透了什么" required></textarea>
+            <div class="form-row">
+              <input id="nfTags" placeholder="标签（可空）">
+              <button type="submit" class="btn primary">保存</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>📖 心得列表</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnNoteSync">同步飞书</button>
+              <button class="btn ghost sm" id="btnAiReview">AI 复盘</button>
+              <button class="btn ghost sm" id="btnReviewSave" style="display:none">存入飞书</button>
+            </div>
           </div>
-          <div id="monitorList" class="monitor-list">
-            <div class="muted small monitor-hint">24H 监控：WTI 原油、布伦特原油、COMEX 黄金、美元指数；国内品种按各自时段（SC/AU/AG 至凌晨 2:30，金属至 1:00，多数至 23:00）。急涨急跌时此处提示并推送声音/横幅/标题提醒，AI 自动给出解读。</div>
-          </div>
+          <div id="notesList" class="notes-list"><div class="empty">加载中…</div></div>
         </div>
-        <div class="hint">量仓等完整数据见中间详情栏 · 每 5 秒刷新 · 不构成投资建议</div>
-      </section>
-
-      <div class="splitter splitter-v sp-list" data-target="list" title="拖拽调节列表宽度"></div>
-
-      <section class="panel chat-panel">
-        <div class="panel-head">
-          <h2>AI 分析对话</h2>
-          <span id="aiBadge" class="ai-badge">未配置</span>
-        </div>
-        <div class="rt-head">
-          <button id="btnRealtime" class="btn accent small-btn" title="把此刻最新行情（盘口/分时/分钟线/指标/要闻/持仓）打包给 AI 生成盘中快评">⚡ 实时解读</button>
-          <label class="chk muted small" title="每 15 分钟自动按选中合约刷新解读"><input id="rtAuto" type="checkbox"> 自动·15m</label>
-          <span id="rtSym" class="muted small"></span>
-        </div>
-        <div id="rtBox" class="rt-box hidden"></div>
-        <div id="chatBox" class="chat-box">
-          <div class="chat-welcome">
-            <p>👋 我是你的期货分析助手，可以结合左侧实时行情回答问题。</p>
-            <p class="muted">例如：「螺纹钢现在的盘面怎么看？」「帮我对比一下豆粕和菜粕」「沪铜最近趋势如何」</p>
-            <p class="muted small">AI 输出仅代表模型观点，不构成投资建议，请自主决策、注意风控。</p>
-          </div>
-        </div>
-        <div id="imgPreviews" class="img-previews hidden"></div>
-        <div class="chat-input-row" id="chatInputRow">
-          <button id="btnAnalyze" class="btn accent" title="让 AI 结合实时行情分析当前选中合约">📊 分析当前合约</button>
-          <input id="chatInput" placeholder="向 AI 提问…（可贴图：Ctrl+V 粘贴截图 / 拖拽图片）" autocomplete="off">
-          <button id="btnSend" class="btn primary">发送</button>
-        </div>
-      </section>
-
-    </div>
-  </section>
-
-  <!-- 视图 2：合约详情（全宽独立页） -->
-  <section class="view hidden" data-view="detail">
-    <div class="panel view-panel">
-      <div class="panel-head detail-toolbar">
-        <div class="detail-sym-picker">
-          <label class="muted small">合约</label>
-          <select id="detailSym" title="选择要查看的合约"></select>
-          <span class="muted small" style="margin-left:4px">双击工作台列表行可直达</span>
-        </div>
-        <span id="detailTime" class="muted small"></span>
       </div>
-      <div class="detail-scroll">
-        <div id="detailBody" class="detail-body">
-          <div class="muted center pad">选择上方合约或在工作台列表中双击查看详情</div>
-        </div>
-        <div id="scalpArea"></div>
-        <div id="chartArea"></div>
-        <div id="sigArea"></div>
-        <div class="alarm-row" id="alarmRow">
-          <label>🔔 价格预警</label>
-          <span class="muted small">上破</span><input id="alarmUp" type="number" step="any" placeholder="如 3200">
-          <span class="muted small">下破</span><input id="alarmDown" type="number" step="any" placeholder="如 2900">
-          <button id="btnAlarmSave" class="btn accent small-btn">设置</button>
-          <button id="btnAlarmClear" class="btn ghost small-btn">清除</button>
-          <span class="muted small">触发后界面+声音提醒，该阈值自动撤销</span>
-        </div>
-        <div class="trade-eval" id="tradeEval">
-          <div class="te-head">🎯 开仓风险评估 <span class="muted small">（日内短线 · 基于实时数据）</span></div>
-          <div class="te-form">
-            <select id="teDir" title="交易方向">
-              <option value="long">📈 做多</option>
-              <option value="short">📉 做空</option>
-            </select>
-            <label>开仓价<input id="teEntry" type="number" step="any" placeholder="现价"></label>
-            <label>止损(点)<input id="teStop" type="number" step="any" placeholder="如 20"></label>
-            <label>止盈(点)<input id="teTarget" type="number" step="any" placeholder="如 40"></label>
-            <label>手数<input id="teLots" type="number" step="any" value="1" style="width:56px"></label>
-            <button id="btnTradeEval" class="btn primary small-btn">🤖 AI 评估</button>
-            <button id="btnTradeLog" class="btn accent small-btn" title="把该计划（含 AI 评级）存入交易日志，事后了结统计">📥 记入日志</button>
-          </div>
-          <div id="teCalc" class="te-calc"></div>
-          <div id="teResult" class="te-result"></div>
+      <div class="notes-right">
+        <div class="card" id="reviewCard" style="display:none">
+          <div class="card-head"><h2>🧠 AI 复盘报告</h2></div>
+          <div id="reviewBody" class="markdown-body"></div>
         </div>
       </div>
     </div>
   </section>
-
-  <!-- 视图 3：国际盘监控（全宽列表 + 主题过滤） -->
-  <section class="view hidden" data-view="news">
-    <div class="panel view-panel">
-      <div class="panel-head">
-        <h2>🌍 国际盘监控</h2>
-        <span id="intlTime" class="muted small"></span>
-      </div>
-      <div id="intlCards" class="intl-cards"></div>
-      <div class="intl-news-head muted small">宏观要闻 · 仅特朗普发言 / 中东重大动向</div>
-      <div id="newsList" class="news-view-list">
-        <div class="muted small monitor-hint">加载要闻中…</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 视图 4：交易纪律（开仓前检查 + 规则引擎 + 交易日志） -->
-  <section class="view hidden" data-view="discipline">
-    <div class="panel view-panel">
-      <div class="panel-head">
-        <h2>📰 资讯要闻</h2>
-        <div class="news-filter">
-          <span id="aiFilterBadge" class="ai-filter-badge">🤖 AI 筛选中…</span>
-          <button class="filter-chip active" data-filter="all">全部</button>
-          <button class="filter-chip" data-filter="oilgold">🛢 原油/黄金</button>
-          <button class="filter-chip" data-filter="usiran">⚔️ 美伊冲突</button>
-          <button class="filter-chip" data-filter="trump">🇺🇸 特朗普</button>
-          <button class="filter-chip" data-filter="watchlist">⭐ 我的关注</button>
-        </div>
-      </div>
-      <div id="calStrip" class="cal-strip">
-        <span class="muted small">📅 今日宏观日历加载中…</span>
-      </div>
-      <div id="newsList" class="news-view-list">
-        <div class="muted small monitor-hint">加载要闻中…</div>      </div>
-    </div>
-  </section>
-
-  <!-- 视图 4：交易心得（全宽） -->
-  <section class="view hidden" data-view="notes">
-    <div class="panel view-panel notes-view-panel">
-      <div class="panel-head">
-        <h2>📝 交易心得</h2>
-        <div style="display:flex;gap:8px;align-items:center">
-          <button id="btnChatHistory" class="btn ghost small-btn">💬 对话历史</button>
-          <span id="feishuHint" class="muted small">☁ 飞书云文档同步</span>
-          <button id="btnAiReview" class="btn small-btn" title="按时间段/品种把 AI 对话与心得交给 AI 复盘分析">🧠 AI 复盘</button>
-          <button id="btnChatHist" class="btn small-btn" title="查看/导出 AI 对话历史（本地自动存档）">💬 对话历史</button>
-          <button id="btnNoteSync" class="btn accent small-btn">☁ 同步到飞书</button>
-        </div>
-      </div>
-      <div id="chatHistoryBox" class="chat-hist hidden"></div>
-      <div class="notes-full">
-        <div id="chatHistoryBox" class="hidden news-view-list" style="padding:8px 12px">
-          <div class="muted small monitor-hint">暂无对话历史。工作台的 AI 对话会自动存档到本地，也可导出飞书。</div>
-        </div>
-        <div id="notesList" class="news-view-list">
-          <div class="muted small monitor-hint">暂无心得。盘中闪念、复盘结论、错误教训——记下来才会复利。</div>
-        </div>
-        <div class="note-form">
-          <div class="note-row">
-            <input id="noteTitle" placeholder="标题（留空自动取内容摘要）" autocomplete="off">
-            <input id="noteDate" type="date" title="交易日期">
-            <input id="noteSymbol" list="noteSymbolList" placeholder="品种" autocomplete="off" style="width:110px;flex:none">
-            <datalist id="noteSymbolList"></datalist>
-            <input id="noteTags" placeholder="#标签" autocomplete="off" style="width:90px;flex:none">
-          </div>
-          <div class="note-row">
-            <input id="noteContent" placeholder="心得正文…（回车保存，Shift+Enter 换行）" autocomplete="off">
-            <button id="btnNoteAdd" class="btn primary small-btn">保存</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 视图：热力图（全宽） -->
-  <section class="view hidden" data-view="heat">
-    <div class="panel view-panel">
-      <div class="panel-head">
-        <h2>🔥 涨跌热力图</h2>
-        <span id="heatStats" class="muted small"></span>
-      </div>
-      <div class="heat-view">
-        <div id="heatDomestic" class="heat-group"></div>
-        <div id="heatIntl" class="heat-group"></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 视图 5：交易日志与复盘统计（全宽） -->
-  <section class="view hidden" data-view="trades">
-    <div class="panel view-panel">
-      <div class="panel-head">
-        <h2>📒 交易日志</h2>
-        <div style="display:flex;gap:8px;align-items:center">
-          <span class="muted small">开仓评估中「📥 记入日志」，事后了结统计</span>
-          <button id="btnTradesCsv" class="btn ghost small-btn">⬇ CSV</button>
-        </div>
-      </div>
-      <div id="tradeStats" class="cmp-stats" style="padding:12px 14px 0;"></div>
-      <div id="tradesList" class="news-view-list" style="padding-top:8px;">
-        <div class="muted small monitor-hint">暂无交易记录。做开仓评估后点「📥 记入日志」，事后在此了结并统计。</div>
-      </div>
-    </div>
-  </section>
-
 </main>
 
-<!-- AI 设置弹窗 -->
-<div id="settingsModal" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-head">
-      <h2>AI 服务配置</h2>
-      <button id="btnCloseSettings" class="btn ghost small-btn">✕</button>
-    </div>
-    <div class="form-row">
-      <label>AI 盯盘</label>
-      <select id="cfgMonitor">
-        <option value="on">开启（自选 + 原油/黄金重点）</option>
-        <option value="off">关闭</option>
-      </select>
-      <select id="cfgSens" title="灵敏度越高越容易触发提醒">
-        <option value="0.5">灵敏（半阈值）</option>
-        <option value="1">标准</option>
-        <option value="2">迟钝（双阈值）</option>
-      </select>
-    </div>
-    <div class="form-row">
-      <label>服务商</label>
-      <select id="cfgProvider">
-        <option value="zhipu">智谱 GLM（open.bigmodel.cn）</option>
-        <option value="deepseek">DeepSeek（platform.deepseek.com）</option>
-        <option value="custom">自定义 / Coding Plan（Z.ai 等）</option>
-      </select>
-    </div>
-    <div class="form-row hidden" id="rowBaseUrl">
-      <label>接口地址</label>
-      <input id="cfgBaseUrl" type="text" placeholder="OpenAI 兼容端点，如 https://api.z.ai/api/paas/v4" autocomplete="off">
-    </div>
-    <div class="form-row">
-      <label>API Key</label>
-      <input id="cfgApiKey" type="password" placeholder="留空则保留已保存的 Key">
-    </div>
-    <div class="form-row">
-      <label>模型</label>
-      <input id="cfgModel" type="text" list="modelList" placeholder="如 glm-5.3-flash / deepseek-flash">
-      <datalist id="modelList">
-        <option value="glm-5.3-flash">GLM-5.3 Flash（Coding Plan）</option>
-        <option value="glm-5">GLM-5（Coding Plan）</option>
-        <option value="glm-4.6">GLM-4.6（Coding Plan）</option>
-        <option value="deepseek-flash">DeepSeek Flash（文本·快）</option>
-        <option value="deepseek-v4-pro">DeepSeek V4 Pro（旗舰）</option>
-        <option value="glm-4-flash">智谱 免费文本</option>
-        <option value="glm-4v-flash">智谱 视觉（支持图片）</option>
-      </datalist>
-    </div>
-    <div class="form-row">
-      <label>飞书同步</label>
-      <input id="cfgFeishuId" type="text" placeholder="App ID（留空保留已存）">
-      <input id="cfgFeishuSecret" type="password" placeholder="App Secret（留空保留）">
-      <input id="cfgFeishuTitle" type="text" placeholder="文档标题：期货交易心得">
-    </div>
-    <div class="form-row">
-      <label>群推送</label>
-      <input id="cfgWebhook" type="text" placeholder="飞书群机器人 Webhook 地址（盯盘异动/晨报推送）">
-      <button id="btnWebhookTest" class="btn ghost small-btn" style="flex:none">测试</button>
-    </div>
-    <div class="form-row" style="align-items:flex-start;flex-direction:column;gap:6px">
-      <label>交易画像</label>
-      <div style="display:flex;gap:6px;width:100%;flex-wrap:wrap">
-        <input id="cfgStyle" type="text" placeholder="交易风格（如：日内短线，偏好黑色系）" style="flex:1;min-width:140px">
-        <select id="cfgRisk" style="width:80px">
-          <option value="">风险</option>
-          <option value="保守">保守</option>
-          <option value="中等">中等</option>
-          <option value="激进">激进</option>
-        </select>
+<!-- 设置弹窗 -->
+<div class="modal-mask hidden" id="settingsModal">
+  <div class="modal">
+    <div class="modal-head"><h2>⚙ 设置</h2><button class="btn ghost sm" data-close="settingsModal">✕</button></div>
+    <div class="modal-body">
+      <div class="set-group">
+        <h3>AI 服务</h3>
+        <div class="form-row">
+          <select id="setProvider" class="select"></select>
+          <input id="setModel" placeholder="模型名（留空用默认）">
+        </div>
+        <div class="form-row"><input id="setKey" type="password" placeholder="API Key（留空保持不变）"></div>
+        <div class="form-row" id="customUrlRow" style="display:none"><input id="setCustomUrl" placeholder="自定义端点 URL"></div>
+        <div class="form-row">
+          <button class="btn ghost sm" id="btnAiHealth">服务商体检</button>
+          <span id="aiHealthResult" class="mini-note"></span>
+        </div>
+        <div id="aiHealthDetail" class="health-detail hidden"></div>
       </div>
-      <div id="profileLessons" style="width:100%;display:flex;flex-direction:column;gap:4px"></div>
-      <div style="display:flex;gap:6px;width:100%">
-        <input id="cfgNewLesson" type="text" placeholder="新教训（如：不追第一根大阳线）" style="flex:1">
-        <button id="btnAddLesson" class="btn ghost small-btn" style="flex:none">+</button>      </div>
-    </div>
-    <p class="form-tip">
-      <span id="keyStatus"></span><br>
-      <span id="feishuStatus"></span><br>
-      API Key 按服务商独立保存（切换不丢失），存于本机 config.json，不会上传。
-      智谱 glm-4-flash 免费；旗舰模型与 DeepSeek 按量计费。
-    </p>
-    <div id="aiHealthBox" class="ai-health hidden"></div>
-    <div class="modal-actions">
-      <button id="btnAiHealth" class="btn small-btn" title="依次检测每个已存 Key 的服务商是否可用">🩺 服务商体检</button>
-      <button id="btnClearKey" class="btn ghost">清除已存 Key</button>
-      <span id="cfgStatus" class="muted small"></span>
-      <button id="btnSaveSettings" class="btn primary">保存</button>
-    </div>
-  </div>
-</div>
-
-<!-- AI 晨报弹窗 -->
-<div id="reportModal" class="modal hidden">
-  <div class="modal-card report-card">
-    <div class="modal-head">
-      <h2>📋 AI 交易简报</h2>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span id="reportTime" class="muted small"></span>
-        <button id="btnReportRegen" class="btn ghost small-btn">重新生成</button>
-        <button id="btnCloseReport" class="btn ghost small-btn">✕</button>
+      <div class="set-group">
+        <h3>风控参数（诊断预警阈值）</h3>
+        <div class="form-row">
+          <input id="setAccount" type="number" step="any" placeholder="账户权益（元，0=跳过金额类检查）">
+          <input id="setRisk" type="number" step="any" placeholder="单笔风险%（默认1）">
+        </div>
+        <div class="form-row three">
+          <input id="setDailyStop" type="number" step="any" placeholder="日止损线%（默认3）">
+          <input id="setDailyMax" type="number" step="any" placeholder="日开仓上限（默认3）">
+          <input id="setCooling" type="number" step="any" placeholder="亏损冷静期分（默认30）">
+        </div>
+      </div>
+      <div class="set-group">
+        <h3>飞书推送</h3>
+        <div class="form-row">
+          <input id="setFsAppId" placeholder="App ID">
+          <input id="setFsSecret" type="password" placeholder="App Secret（留空不变）">
+        </div>
+        <div class="form-row">
+          <input id="setFsWebhook" placeholder="群机器人 Webhook URL">
+          <button class="btn ghost sm" id="btnFsSave">保存飞书配置</button>
+          <button class="btn ghost sm" id="btnFsTest">推送测试</button>
+        </div>
       </div>
     </div>
-    <div id="reportBody" class="report-body"></div>
-  </div>
-</div>
-
-<!-- 自检明细弹层 -->
-<div id="healthPop" class="skin-pop health-pop hidden">
-  <div class="skin-pop-title">🩺 系统自检 <span id="healthTime" class="muted small"></span></div>
-  <div id="healthList" class="health-list"><div class="muted small">尚未运行自检</div></div>
-  <button id="btnHealthRun" class="btn primary small-btn" style="width:100%;margin-top:8px">🔄 立即重新自检</button>
-</div>
-
-<!-- 快捷键速查表 -->
-<div id="shortcutModal" class="modal hidden">
-  <div class="modal-card" style="width:min(460px,92vw)">
-    <div class="modal-head">
-      <h2>⌨️ 快捷键</h2>
-      <button class="btn ghost small-btn" onclick="toggleShortcuts(false)">✕</button>
+    <div class="modal-foot">
+      <button class="btn primary" id="btnSaveSettings">保存 AI 配置</button>
     </div>
-    <div id="shortcutList"></div>
   </div>
 </div>
 
-<!-- 皮肤选择弹层 -->
-<div id="skinPop" class="skin-pop hidden">
-  <div class="skin-pop-title">🎨 皮肤风格 <span class="muted small">点击即切换</span></div>
-  <div id="skinList" class="skin-list"></div>
-</div>
-
-<!-- 命令面板 Ctrl+K -->
-<div id="cmdk" class="cmdk hidden">
-  <div class="cmdk-card">
-    <input id="cmdkInput" placeholder="合约代码/拼音，或命令（如：晨报、皮肤、心得）…" autocomplete="off">    <div id="cmdkList" class="cmdk-list"></div>
-    <div class="cmdk-hint muted small">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
+<!-- 简报弹窗 -->
+<div class="modal-mask hidden" id="reportModal">
+  <div class="modal wide">
+    <div class="modal-head"><h2>📋 心理博弈简报</h2><button class="btn ghost sm" data-close="reportModal">✕</button></div>
+    <div class="modal-body"><div id="reportBody" class="markdown-body">生成中…</div></div>
   </div>
 </div>
 
-<div id="toast" class="toast hidden"></div>
+<!-- 自检弹窗 -->
+<div class="modal-mask hidden" id="selfcheckModal">
+  <div class="modal">
+    <div class="modal-head"><h2>🩺 系统自检</h2><button class="btn ghost sm" data-close="selfcheckModal">✕</button></div>
+    <div class="modal-body"><div id="selfcheckBody">检查中…</div></div>
+  </div>
+</div>
 
-<script src="/static/js/m1_base.js?v=0908m"></script>
-<script src="/static/js/m2_charts.js?v=0908m"></script>
-<script src="/static/js/m3_panels.js?v=0908m"></script>
-<script src="/static/js/m4_monitor.js?v=0908m"></script>
-<script src="/static/js/m5_views.js?v=0908m"></script>
-<script src="/static/js/m6_boot.js?v=0908m"></script></body>
+<!-- 画像弹窗 -->
+<div class="modal-mask hidden" id="profileModal">
+  <div class="modal">
+    <div class="modal-head"><h2>👤 交易者画像（AI 记忆）</h2><button class="btn ghost sm" data-close="profileModal">✕</button></div>
+    <div class="modal-body">
+      <div class="set-group">
+        <div class="form-row"><input id="pfStyle" placeholder="交易风格"></div>
+        <div class="form-row"><input id="pfRisk" placeholder="风险偏好"></div>
+        <div class="form-row">
+          <input id="pfLesson" placeholder="新教训">
+          <button class="btn ghost sm" id="btnPfAddLesson">添加</button>
+        </div>
+        <div id="pfLessons" class="lessons"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/base.js?v=20260914"></script>
+<script src="/static/js/views.js?v=20260914"></script>
+<script src="/static/js/chat.js?v=20260914"></script>
+</body>
 </html>

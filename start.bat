@@ -15,7 +15,10 @@ echo ============================================
 echo   futures-analyzer starting...
 echo   console window = service, close it to STOP
 echo ============================================
-start "futures-analyzer" /min ".venv\Scripts\python.exe" app.py
+rem ---- pick interpreter: .venv if present, else system Python312 (same as guardian.bat) ----
+set "PY=.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=C:\Users\weimin8\AppData\Local\Programs\Python\Python312\python.exe"
+start "futures-analyzer" /min "%PY%" app.py
 
 set /a tries=0
 :wait
