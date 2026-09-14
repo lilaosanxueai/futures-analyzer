@@ -77,10 +77,15 @@
     if (isRetail) {
       const think = (p.thinking || []).map((t) => "<li>" + esc(t) + "</li>").join("");
       const act = (p.actions || []).map((t) => "<li>" + esc(t) + "</li>").join("");
+      const natureHtml = (p.nature || []).map((n) =>
+        '<span class="badge warn" style="margin:1px 3px 1px 0" title="' + esc(n.text) + '">' + esc(n.tag === "loss_aversion" ? "损失厌恶" :
+          n.tag === "disposition" ? "处置效应" : n.tag === "anchoring" ? "锚定" : n.tag === "recency" ? "近因外推" :
+          n.tag === "fomo" ? "踏空焦虑" : n.tag === "fair_world" ? "公平世界幻觉" : n.tag === "confirmation" ? "确认偏误" : "控制幻觉") + "</span>").join("");
       const trap = p.trap_risk != null
         ? '<div class="pc-row"><b>陷阱指数</b><span class="' + (p.trap_risk >= 70 ? "num-up" : p.trap_risk >= 45 ? "" : "num-down") + '" style="font-weight:700">' + p.trap_risk + "/100</span></div>"
         : "";
       inner = trap +
+        (natureHtml ? '<div class="pc-row"><b>人性定律</b><div>' + natureHtml + "</div></div>" : "") +
         '<div class="pc-row"><b>散户在想</b></div><ul>' + (think || "<li>--</li>") + "</ul>" +
         '<div class="pc-row" style="margin-top:6px"><b>可能操作</b></div><ul>' + (act || "<li>--</li>") + "</ul>";
     } else {
@@ -96,11 +101,15 @@
     const t = s.trend || {}, cap = s.capital || {}, intra = s.intraday || {}, r = s.parties.retail;
     const factors = (cap.factors || []).map((f) => '<div class="kv"><span class="k">·</span><span class="v" style="text-align:left">' + esc(f) + "</span></div>").join("");
     const warns = (s.warnings || []).map((w) => "<li>" + esc(w) + "</li>").join("");
+    const trapsHtml = (s.traps || []).length
+      ? (s.traps).map((t) =>
+          '<div class="trap-item"><div class="t-name">' + esc(t.name) + '</div><div class="t-evi">' + esc(t.evidence) + '</div><div class="t-note">→ ' + esc(t.note) + "</div></div>").join("")
+      : '<div class="empty">未检测到典型陷阱结构（扫损/假突破/双杀/关口扎堆均未触发）</div>';
 
     const html = `
       <div class="regime-banner">
         <div>
-          <div class="rb-label">${esc(s.regime.label)}</div>
+          <div class="rb-label">${esc(s.regime.label)} <span class="badge info" title="${esc((s.cycle || {}).desc || "")}">博弈周期：${esc((s.cycle || {}).stage || "--")}</span></div>
           <div class="rb-desc">${esc(s.regime.desc)}</div>
         </div>
         <div class="rb-conclusion">${esc(s.conclusion || "")}</div>
@@ -113,6 +122,11 @@
         ${partyCard("retail", "🐑 散户（群体心理）", r, true)}
       </div>
 
+      <div class="warning-box trap-box">
+        <h3>🪤 陷阱检测（结构 · 价位 · 时间）</h3>
+        ${trapsHtml}
+      </div>
+
       <div class="warning-box">
         <h3>⚠ 此刻对散户最危险的行为</h3>
         <ul>${warns || "<li>暂无特定警告</li>"}</ul>
@@ -121,7 +135,8 @@
       <div class="follow-box">
         <h3>🧭 反幻想 · 顺应结论</h3>
         <div class="fantasy">💎 要拆穿的幻想：${esc(s.playbook.fantasy)}</div>
-        <div class="fantasy">🎭 主力剧本：${esc(s.playbook.main_force)}</div>
+        <div class="fantasy">🎭 主力动机：${esc(s.playbook.force_motive || s.playbook.main_force)}</div>
+        ${s.playbook.harvest_chain ? '<div class="fantasy">⛓️ 收割链：' + esc(s.playbook.harvest_chain) + "</div>" : ""}
         <div class="follow">→ ${esc(s.follow)}</div>
       </div>
 
@@ -141,7 +156,7 @@
           <div class="kv-list">
             <div class="kv"><span class="k">日线八状态</span><span class="v">${esc(cap.state5 || "数据不足")}</span></div>
             <div class="kv"><span class="k">5日价/持仓</span><span class="v">${fmtPct(cap.price_chg5)} / ${fmtPct(cap.oi_chg5)}</span></div>
-            <div class="kv"><span class="k">20日持仓趋势</span><span class="v">${fmtPct(cap.oi_trend20)}</span></div>
+            <div class="kv"><span class="k">20日持仓趋势</span><span class="v">${fmtPct(cap.oi_trend20)}${cap.oi_pct != null ? "（拥挤度 " + cap.oi_pct + "% 分位" + (cap.oi_pct >= 80 ? "，拥挤" : "") + "）" : ""}</span></div>
             <div class="kv"><span class="k">量能（vs 60日均量）</span><span class="v">${cap.vol_ratio == null ? "--" : cap.vol_ratio + "×"}（资金评分 ${cap.score > 0 ? "+" : ""}${cap.score}，${esc(cap.bias)}）</span></div>
             <div class="kv"><span class="k">日内八状态</span><span class="v">${esc(intra.state || "数据不足")}${intra.pos_chg15 != null ? "（15分持仓 " + (intra.pos_chg15 > 0 ? "+" : "") + fmtNum(intra.pos_chg15, 0) + "）" : ""}</span></div>
             <div class="kv"><span class="k">日内区间分位</span><span class="v">${intra.pos_pct == null ? "--" : intra.pos_pct + "%"}（${fmtNum(intra.day_low)} ~ ${fmtNum(intra.day_high)}）</span></div>

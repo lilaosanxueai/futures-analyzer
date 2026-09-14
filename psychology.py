@@ -230,6 +230,79 @@ PLAYBOOKS = {
 REGIME_ORDER = list(PLAYBOOKS.keys())
 
 
+# ---------------------------------------------------------------- 主力动机与收割链
+# 博弈的底层是动机：每一方的利润从哪里来、谁在为他买单。
+# 主力的利润 = 对手盘的被迫行为（止损、追涨、爆仓）；没有对手盘的错误，就没有主力的利润。
+
+FORCE_MOTIVES = {
+    "高位加速": {
+        "motive": "兑现利润：急拉不是为了持有，是为了制造足够多的跟风买盘当对手",
+        "chain": "急拉引跟风 → 跟风盘接力抬轿 → 高位滞涨分批出货 → 跌破启动位后，跟风盘的止损单变成下跌燃料",
+    },
+    "高位滞涨": {
+        "motive": "维持「随时突破」的幻觉，让散户提前埋伏、接走筹码",
+        "chain": "横盘蓄势叙事 → 散户埋伏多单等突破 → 一次增仓下行破位 → 埋伏盘与突破追入盘同时被套，双杀",
+    },
+    "高位回落": {
+        "motive": "兑现已经开始，回抽是为了测试下方还有多少接货盘",
+        "chain": "回落 → 散户「跌多了」低接 → 缩量弱反弹（诱多回抽）→ 再破位 → 低接盘层层被套成新的抛压",
+    },
+    "趋势上行": {
+        "motive": "抬走散户筹码：洗盘吓走不坚定者，趋势本身逼空头缴械",
+        "chain": "震荡洗盘扫掉多单止损 → 散户下车 → 续涨 → 空头止损与追多盘共同助燃 → 直到跟风盘饱和",
+    },
+    "区间震荡": {
+        "motive": "双向收「保费」：区间边缘收割赌突破的和赌回归的两组止损",
+        "chain": "上沿假突破扫掉空单止损 → 回落 → 下沿假跌破扫掉多单止损 → 双向收割，直到持仓和量能决议方向",
+    },
+    "趋势下行": {
+        "motive": "逼多认输：每一次反弹都是加空和出货的位置",
+        "chain": "反弹给「企稳」希望 → 散户抄底 → 增仓下压 → 抄底盘止损引发连锁下跌，抄底者互为燃料",
+    },
+    "低位阴跌": {
+        "motive": "消耗多头耐心：不给像样的反弹，逼出带血筹码",
+        "chain": "阴跌磨人心 → 多头熬不住陆续割肉 → 持仓持续下降（多头出清）→ 筹码换手完成前，任何反弹都乏力",
+    },
+    "低位恐慌": {
+        "motive": "收筹：踩踏盘的止损单正是最廉价的买盘来源",
+        "chain": "巨量破位制造绝望 → 恐慌割肉集中释放 → 长下影收回（收筹完成）→ 空头开始回补，价格弹性剧增",
+    },
+    "低位企稳": {
+        "motive": "悄悄回补/建多：制造「还会再破一次位」的错觉，让散户把筹码交在低位",
+        "chain": "不再创新低 → 散户等「肯定有二次探底」 → 放量增仓启动 → 等回踩的人等不到，追在半山腰",
+    },
+}
+
+
+# ---------------------------------------------------------------- 人性定律（散户行为的根）
+# 散户买的不只是头寸，是心理舒适：抄底买「我是聪明人」的感觉，追涨买「不落后于人」的安全感，
+# 扛单回避「我错了」的痛苦，割肉在最痛处是为了结束煎熬。以下是不变的定律。
+
+HUMAN_NATURE = {
+    "loss_aversion": "损失厌恶：亏 1 块的痛 ≈ 赚 2 块的乐 → 亏损单扛得住、盈利单拿不住",
+    "disposition": "处置效应：急于卖盈（兑现「我对了」的快感）、拖延卖亏（回避「我错了」的痛）→ 盈亏比倒挂",
+    "anchoring": "锚定效应：锚定成本价（回本就卖）、锚定历史高低点（跌了 60% 就「便宜」）→ 位置感错乱",
+    "recency": "近因外推：三根阳线就相信牛市，三根阴线就看到崩盘 → 在情绪极值处做方向",
+    "fomo": "踏空焦虑：每天看着涨 = 每天都在亏钱的错觉 → 在最差盈亏比处追入",
+    "fair_world": "公平世界幻觉：「跌这么久总该涨了」——把市场当道德主体；市场没有欠任何人一个反弹",
+    "confirmation": "确认偏误：持仓后只找支持自己方向的证据，AI 和盘面都成了自我说服的工具",
+    "illusion_of_control": "控制幻觉：盈利归因于技术，亏损归因于运气 → 系统性错误从不被修正",
+}
+
+# 各行情阶段激活的人性定律（散户画像的心理学标签）
+NATURE_TAGS = {
+    "高位加速": ["fomo", "recency", "fair_world"],
+    "高位滞涨": ["confirmation", "anchoring"],
+    "高位回落": ["anchoring", "loss_aversion", "disposition"],
+    "趋势上行": ["illusion_of_control", "fair_world"],
+    "区间震荡": ["illusion_of_control", "recency"],
+    "趋势下行": ["fair_world", "anchoring"],
+    "低位阴跌": ["loss_aversion", "disposition"],
+    "低位恐慌": ["loss_aversion", "recency"],
+    "低位企稳": ["confirmation", "fomo"],
+}
+
+
 # ---------------------------------------------------------------- 基础统计
 
 def _ma(vals: list[float], n: int) -> Optional[float]:
@@ -243,6 +316,7 @@ def trend_stats(daily: list[dict]) -> dict:
     rows = [r for r in daily[-120:] if _f(r.get("close"))]
     closes = [float(r["close"]) for r in rows]
     out = {
+        "last": None,
         "pct60": None, "hi60": None, "lo60": None, "chg5": None, "chg20": None,
         "ma20": None, "ma20_prev": None, "ma20_rising": None,
         "above_ma20": None, "bias": "flat",
@@ -250,6 +324,7 @@ def trend_stats(daily: list[dict]) -> dict:
     if len(closes) < 25:
         return out
     last = closes[-1]
+    out["last"] = last
     win60 = closes[-60:] if len(closes) >= 60 else closes
     hi60, lo60 = max(win60), min(win60)
     out["pct60"] = round(sum(1 for c in win60 if c <= last) / len(win60) * 100, 1)
@@ -320,6 +395,9 @@ def capital_flow(daily: list[dict]) -> dict:
         out["factors"].append(f"（主力合约近期换月（连续段仅 {len(seg)} 日），持仓类统计暂停）")
         out["state5"] = None
         return out
+    # 持仓拥挤度：当前持仓在近 60 日的百分位（高位=拥挤，反转的燃料越充足）
+    if seg[-1] > 0:
+        out["oi_pct"] = round(sum(1 for h in hold_all if h <= seg[-1]) / len(hold_all) * 100, 1)
     win5 = seg[-5:]
     out["oi_chg5"] = round((win5[-1] - win5[0]) / win5[0] * 100, 2) if win5[0] else None
     if len(seg) >= 21 and seg[-21]:
@@ -484,6 +562,143 @@ def _regime(ts: dict, cap: dict) -> str:
     return "区间震荡"
 
 
+# ---------------------------------------------------------------- 博弈周期（吸筹→洗盘→主升→出货→出清）
+
+def cycle_stage(ts: dict, cap: dict) -> dict:
+    """用价格分位 × 持仓拥挤度 × 增减仓组合，定位当前处于博弈生命周期的哪一段"""
+    oi_pct = cap.get("oi_pct")
+    p = ts.get("pct60")
+    st = cap.get("state5")
+    chg20 = ts.get("chg20") or 0
+    if p is None or oi_pct is None or not st:
+        return {"stage": "观察期", "desc": "数据不足，周期定位待定"}
+    if p >= 65 and oi_pct >= 70 and st in ("减仓上行", "减仓下行"):
+        return {"stage": "出货退潮期", "desc": "价格高位 + 持仓从峰值回落：主力兑现进行中，趋势进入倒计时，每一次反弹都是撤退窗口"}
+    if p >= 60 and st == "增仓下行":
+        return {"stage": "高位转空期", "desc": "高位增仓下行：新空进场 + 高位多头踩踏，反转结构基本成立"}
+    if p >= 60 and st == "增仓上行":
+        return {"stage": "主升博弈期", "desc": "高位仍有新多进场：趋势未死，但接力棒正从主力传向情绪盘"}
+    if oi_pct >= 75 and abs(chg20) < 3:
+        return {"stage": "洗盘对峙期", "desc": "持仓高位横盘：多空主力对峙，谁先认输谁就当燃料；突破方向需持仓与量能共同表决"}
+    if p <= 35 and oi_pct <= 35:
+        if st == "增仓上行":
+            return {"stage": "启动吸筹期", "desc": "价格与关注度双低 + 新多开始进场：周期最早的启动信号，可信度取决于增仓的持续性"}
+        return {"stage": "冰点吸筹期", "desc": "价格与持仓双低：无人问津，恰是耐心资金建仓的温床（等持仓缓增确认）"}
+    if p <= 35 and st == "减仓下行":
+        return {"stage": "出清末期", "desc": "低位减仓下跌：多头陆续缴械，筹码在换手；反转要等新资金进场信号，不是「跌够了」"}
+    if p <= 35 and st == "增仓下行":
+        return {"stage": "空头压制期", "desc": "低位仍在增仓下行：空头还没吃饱，接多 = 挡在新空资金的路上"}
+    if st == "增仓上行" and p < 60:
+        return {"stage": "趋势展开期", "desc": "中低位增仓上行：新多进攻，趋势展开中，回踩是常态而非反转"}
+    return {"stage": "观察期", "desc": "各要素未形成典型周期结构，等资金表态"}
+
+
+# ---------------------------------------------------------------- 陷阱检测（可辨认的具体结构）
+
+TRAP_NAMES = {
+    "sweep_low": "🩸 下影扫损",
+    "sweep_high": "🩸 上影扫损",
+    "fake_break_up": "🎭 假突破（冲高跌回）",
+    "fake_break_down": "🎭 假跌破（打穿收回）",
+    "double_kill": "⚔️ 日内双杀",
+    "crowded": "🔥 持仓拥挤",
+    "tail_reversal": "⏰ 尾盘反向（两点半效应）",
+    "round_zone": "🎯 整数关口扫损区",
+}
+
+
+def detect_traps(minute: list, ts: dict, cap: dict, intra: dict, regime_key: str) -> list[dict]:
+    """用当日分钟线 + 持仓结构检测具体陷阱形态。返回 [{type, name, evidence, note}]"""
+    traps: list[dict] = []
+    rows = [r for r in minute if _f(r.get("close"))]
+
+    def _add(t, evidence, note):
+        traps.append({"type": t, "name": TRAP_NAMES[t], "evidence": evidence, "note": note})
+
+    last = ts.get("last")
+    if rows:
+        day = str(rows[-1].get("datetime", ""))[:10]
+        today = [r for r in rows if str(r.get("datetime", "")).startswith(day)]
+        if len(today) >= 30 and last:
+            now_t = str(today[-1].get("datetime", ""))[11:16]
+            closes = [float(r["close"]) for r in today]
+            # 陷阱判定统一用日内最新成交价（ts.last 是日线收盘，与分钟线口径不一致）
+            last = float(today[-1]["close"]) or last
+            day_high = max(float(r["high"] or r["close"]) for r in today)
+            day_low = min(float(r["low"] or r["close"]) for r in today)
+            hi_i = max(range(len(today)), key=lambda i: float(today[i]["high"] or today[i]["close"]))
+            lo_i = min(range(len(today)), key=lambda i: float(today[i]["low"] or today[i]["close"]))
+            hi_t = str(today[hi_i]["datetime"])[11:16]
+            lo_t = str(today[lo_i]["datetime"])[11:16]
+            opens = float(today[0]["open"] or today[0]["close"])
+            ir = today[:30]
+            ir_high = max(float(r["high"] or r["close"]) for r in ir)
+            ir_low = min(float(r["low"] or r["close"]) for r in ir)
+
+            def _vol_spike(idx, ratio=1.8):
+                vols = [float(today[j].get("volume") or 0) for j in range(max(0, idx - 5), idx)]
+                v_now = float(today[idx].get("volume") or 0)
+                return vols and v_now > (sum(vols) / len(vols)) * ratio
+
+            # T1 扫损：日内前低/前高被放量打穿后快速收回（止损被一笔收割）
+            if lo_t >= "10:00" and (last / day_low - 1) * 100 >= 0.35 and _vol_spike(lo_i):
+                _add("sweep_low",
+                     f"{lo_t} 放量打穿 {day_low:g} 后收回，现价 {last:g}（低点距开盘 -{(1 - day_low / opens) * 100:.2f}%）",
+                     "打穿关键低点又快速收回 = 大概率一笔大单扫掉了下方扎堆的止损，随后收回——追空的和割肉的同时被收割")
+            if hi_t >= "10:00" and (1 - last / day_high) * 100 >= 0.35 and _vol_spike(hi_i):
+                _add("sweep_high",
+                     f"{hi_t} 放量冲高 {day_high:g} 后回落，现价 {last:g}（高点距开盘 +{(day_high / opens - 1) * 100:.2f}%）",
+                     "冲高打穿上方止损/触发追涨后快速回落 = 典型上影扫损：追多盘被留在山顶")
+
+            # T2 假突破：突破开盘区间后明显跌回（无持仓配合的突破）
+            if day_high > ir_high and last < ir_high and (1 - last / day_high) * 100 > 0.35:
+                _add("fake_break_up",
+                     f"日内高点 {day_high:g} 曾上破开盘区间上沿 {ir_high:g}，现价已跌回区间内（{last:g}）",
+                     "冲高跌回 + 若持仓未同步大增 = 诱多：突破追入盘此刻被套，区间上沿是收割线而非支撑线")
+            if day_low < ir_low and last > ir_low and (last / day_low - 1) * 100 > 0.35:
+                _add("fake_break_down",
+                     f"日内低点 {day_low:g} 曾跌破开盘区间下沿 {ir_low:g}，现价已收回区间内（{last:g}）",
+                     "打穿收回 + 若伴随放量长下影 = 打掉割肉盘后收回：跌破追空者被反手收割，下方「支撑破了」是错觉")
+
+            # T3 双杀：日内高低点显著分离且都离开盘很远（双向收割日）
+            if (day_high / opens - 1) > 0.006 and (1 - day_low / opens) > 0.006 and abs(hi_i - lo_i) >= 30:
+                first, second = ("冲高", "跳水") if hi_i < lo_i else ("跳水", "拉升")
+                _add("double_kill",
+                     f"日内先{first}至{'高 ' + format(day_high, 'g') if hi_i < lo_i else '低 ' + format(day_low, 'g')}"
+                     f"，后{second}至{'低 ' + format(day_low, 'g') if hi_i < lo_i else '高 ' + format(day_high, 'g')}"
+                     f"（高低点相差 {abs(hi_i - lo_i)} 分钟）",
+                     "双向打穿 = 双杀日：先扫一侧止损再反手扫另一侧，追单者两边挨打；此日不宜恋战，只做确认后的第二波")
+
+            # T5 尾盘反向（用户验证过的「下午两点半效应」：趋势日尾盘常反向跳水）
+            if now_t >= "14:15" and len(today) >= 40:
+                tail = today[-30:]
+                tail_chg = (tail[-1]["close"] / tail[0]["close"] - 1) * 100 if tail[0]["close"] else 0
+                day_dir = 1 if last > opens else -1
+                if abs(tail_chg) > 0.3 and tail_chg * day_dir < 0:
+                    _add("tail_reversal",
+                         f"尾盘 30 分钟 {tail_chg:+.2f}%，与日内方向（{'涨' if day_dir > 0 else '跌'}）相反",
+                         "「两点半效应」：趋势日的尾盘反向急动高发——日内盈利单警惕尾盘回吐，勿在 14:30 后追加趋势单")
+
+    # T4 拥挤：持仓拥挤度高位 + 单边阶段 → 一致预期反转时无人接盘
+    oi_pct = cap.get("oi_pct")
+    if oi_pct is not None and oi_pct >= 80 and regime_key in ("趋势上行", "趋势下行", "高位加速", "低位恐慌"):
+        _add("crowded",
+             f"持仓量处近 60 日 {oi_pct:.0f}% 分位（拥挤）+「{PLAYBOOKS[regime_key]['label']}」",
+             "持仓拥挤 = 一致预期太满：方向延续时很爽，但反转时止损盘找不到对手盘，波动会被放大数倍——此时仓位纪律高于一切")
+
+    # T6 整数关口：现价贴近散户止损扎堆区
+    if last:
+        step = 10 ** max(1, len(str(int(last))) - 2)
+        nearest = round(last / step) * step
+        if nearest and abs(last - nearest) / nearest < 0.004:
+            side = "下方" if nearest < last else "上方"
+            _add("round_zone",
+                 f"现价 {last:g} 贴近整数关口 {nearest:g}",
+                 f"{side} {nearest:g} 一带是散户止损扎堆区：最易被一笔大单打穿后再收回（把止损放关口上的单子是在替人递刀）")
+
+    return traps[:5]
+
+
 # ---------------------------------------------------------------- 四方立场推断
 
 def _party_industry(ts: dict) -> dict:
@@ -568,8 +783,8 @@ def _party_speculator(ts: dict, intra: dict) -> dict:
             "intent": "常规短线进出，无极端情绪", "confidence": "low"}
 
 
-def _party_retail(play: dict, ts: dict, cap: dict, intra: dict) -> dict:
-    """散户：由行情阶段剧本 + 即时数据修正得出的群体心理画像"""
+def _party_retail(regime_key: str, play: dict, ts: dict, cap: dict, intra: dict) -> dict:
+    """散户：由行情阶段剧本 + 即时数据修正得出的群体心理画像（带人性定律标签）"""
     c15 = intra.get("chg15m") or 0
     thinking = list(play["retail_thinking"])
     actions = list(play["retail_actions"])
@@ -581,10 +796,16 @@ def _party_retail(play: dict, ts: dict, cap: dict, intra: dict) -> dict:
     trap = play["trap_risk"]
     if abs(c15) >= 0.5:
         trap = min(100, trap + 5)
+    nature = [
+        {"tag": t, "text": HUMAN_NATURE[t]}
+        for t in NATURE_TAGS.get(regime_key, [])
+        if t in HUMAN_NATURE
+    ]
     return {
         "stance": play["label"],
         "thinking": thinking,
         "actions": actions,
+        "nature": nature,
         "trap_risk": trap,
         "confidence": "medium",
     }
@@ -641,8 +862,12 @@ def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> d
         "industry": _party_industry(ts),
         "institution": _party_institution(ts, cap, intra),
         "speculator": _party_speculator(ts, intra),
-        "retail": _party_retail(play, ts, cap, intra),
+        "retail": _party_retail(regime_key, play, ts, cap, intra),
     }
+
+    fm = FORCE_MOTIVES.get(regime_key, {})
+    cyc = cycle_stage(ts, cap)
+    traps = detect_traps(minute, ts, cap, intra, regime_key)
 
     follow_map = {
         "增仓上行": "资金方向偏多——顺应多头，回调企稳做多",
@@ -651,6 +876,11 @@ def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> d
         "减仓下行": "跌势近尾声但未反转——空头锁利、多头等出清信号",
     }
     follow = follow_map.get(cap.get("state5"), "资金方向不明——降低频率，等持仓量表态")
+
+    # 警告分层：先具体陷阱（有价位有时间的），后阶段泛化警告
+    trap_warn_ids = {"sweep_low", "sweep_high", "fake_break_up", "fake_break_down", "double_kill", "tail_reversal", "crowded"}
+    trap_warnings = [f"{t['name']}：{t['evidence']}——{t['note']}" for t in traps if t["type"] in trap_warn_ids]
+    warnings = (trap_warnings + _warnings(regime_key, ts, cap, intra))[:5]
 
     snap = {
         "symbol": symbol,
@@ -662,18 +892,22 @@ def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> d
         "volume": _f(quote.get("volume")),
         "time": quote.get("time", ""),
         "regime": {"key": regime_key, "label": play["label"], "desc": play["desc"]},
+        "cycle": cyc,
+        "traps": traps,
         "trend": ts,
         "capital": cap,
         "intraday": intra,
         "parties": parties,
         "playbook": {
             "main_force": play["main_force"],
+            "force_motive": fm.get("motive", ""),
+            "harvest_chain": fm.get("chain", ""),
             "fantasy": play["fantasy"],
             "follow": play["follow"],
             "risk": play.get("desc", ""),
         },
         "follow": follow,
-        "warnings": _warnings(regime_key, ts, cap, intra),
+        "warnings": warnings,
         "ts": None,  # 由调用方填
     }
     # 一句话结论
@@ -681,7 +915,7 @@ def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> d
     snap["conclusion"] = (
         f"{play['label']}（60日{pct:.0f}%分位）"
         f"{'，' + cap['state5'] if cap.get('state5') else ''}"
-        f"——散户陷阱指数 {parties['retail']['trap_risk']}/100，{follow}"
+        f"，{cyc['stage']}——散户陷阱指数 {parties['retail']['trap_risk']}/100，{follow}"
     )
     return snap
 
@@ -718,10 +952,18 @@ def to_context_text(snap: dict) -> str:
         f"投机[{p['speculator']['stance']}]（{p['speculator']['evidence']}）"
     )
     r = p["retail"]
+    nature_txt = "；".join(n["text"] for n in (r.get("nature") or [])[:3])
     lines.append(
         f"- 散户画像：{r['stance']}，陷阱指数 {r['trap_risk']}/100；典型想法：{' / '.join(r['thinking'][:2])}；"
         f"可能操作：{' / '.join(r['actions'][:2])}"
+        + (f"\n  激活的人性定律：{nature_txt}" if nature_txt else "")
     )
+    lines.append(f"- 博弈周期：{s['cycle']['stage']}——{s['cycle']['desc']}")
+    if s["playbook"].get("force_motive"):
+        lines.append(f"- 主力动机：{s['playbook']['force_motive']}\n  收割链：{s['playbook']['harvest_chain']}")
+    if s.get("traps"):
+        for t in s["traps"]:
+            lines.append(f"- 陷阱[{t['name']}]：{t['evidence']} → {t['note']}")
     lines.append(f"- 主力剧本：{s['playbook']['main_force']}")
     lines.append(f"- 程序结论：{s['conclusion']}")
     if s.get("warnings"):

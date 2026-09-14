@@ -253,6 +253,14 @@ main { padding: 14px 18px 30px; max-width: 1720px; margin: 0 auto; }
 }
 .warning-box h3 { color: var(--danger); font-size: 13px; margin-bottom: 6px; }
 .warning-box li { color: var(--text); font-size: 13px; margin-bottom: 4px; }
+.trap-box h3 { color: var(--warn); }
+.trap-item {
+  background: rgba(22, 27, 34, .65); border: 1px solid rgba(245, 158, 11, .3);
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 6px;
+}
+.trap-item .t-name { color: var(--warn); font-weight: 700; font-size: 13px; margin-bottom: 2px; }
+.trap-item .t-evi { color: var(--text); font-size: 12px; margin-bottom: 2px; }
+.trap-item .t-note { color: var(--muted); font-size: 12px; }
 
 .follow-box {
   background: linear-gradient(135deg, rgba(245, 165, 35, .1), rgba(22, 27, 34, .4));
