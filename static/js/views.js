@@ -482,7 +482,26 @@
               const r = await api("/api/trades/" + id + "/review", { method: "POST" });
               const vTxt = r.verdict === "exit" ? "🚫 建议离场" : r.verdict === "reduce" ? "⚠ 建议减仓" : "✅ 可继续持有";
               const pnlTxt = r.pnl_pts == null ? "" : "（浮动 " + (r.pnl_pts > 0 ? "+" : "") + r.pnl_pts + " 点 @ " + fmtNum(r.price) + "）";
-              $("#careBody").innerHTML = '<div class="mini-note" style="margin-bottom:8px">判定：<b>' + vTxt + "</b>" + esc(pnlTxt) + "</div>" + md(r.advice);
+              const mLife = (r.advice || "").match(/(?:生死价位|生死线)[^\d\-]{0,14}(\d+(?:\.\d+)?)/);
+              const lifeBtn = mLife
+                ? '<button class="btn" id="btnCareAlert" style="margin-top:8px">🔔 对 ' + mLife[1] +
+                  ' 设预警（触发即事件流+飞书）</button>'
+                : "";
+              $("#careBody").innerHTML = '<div class="mini-note" style="margin-bottom:8px">判定：<b>' + vTxt + "</b>" + esc(pnlTxt) + "</div>"
+                + md(r.advice) + lifeBtn;
+              if (mLife) {
+                $("#btnCareAlert").addEventListener("click", async () => {
+                  const dirBelow = (r.direction || "long") === "long";
+                  try {
+                    await api("/api/alerts", { method: "POST", body: JSON.stringify({
+                      symbol: r.symbol, price: parseFloat(mLife[1]),
+                      dir: dirBelow ? "below" : "above", note: "体检生死线",
+                    }) });
+                    alert("已设预警：" + r.symbol + (dirBelow ? " 跌破 " : " 升破 ") + mLife[1] + "\n触发时会进事件流并推飞书");
+                    FA.pollShield && FA.pollShield();
+                  } catch (err) { alert("设置失败：" + err.message); }
+                });
+              }
             } catch (err) {
               $("#careBody").innerHTML = '<span style="color:var(--danger)">体检失败：' + esc(err.message) + "</span>";
             }

@@ -10,3 +10,4 @@ trades.json
 .venv/
 server.log_fix.py
 gate_log.json
+alerts.json

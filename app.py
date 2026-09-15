@@ -1916,7 +1916,7 @@ def _check_intl(hist: list, sensitivity: float):
 
 
 async def monitor_loop():
-    """盯盘双轨：国际品种 24 小时 + 国内品种（自选+持仓）按各自交易时段"""
+    """盯盘双轨：国际品种 24 小时 + 国内品种（自选+持仓+预警）按各自交易时段"""
     await asyncio.sleep(20)
     hist: list[tuple[float, dict]] = []
     while True:
@@ -1943,9 +1943,11 @@ async def monitor_loop():
                         }
                     except Exception:
                         pass
+                    symbols |= {a["symbol"] for a in _load_alerts() if not a.get("fired_ts")}
                     for sym in sorted(symbols):
                         if domestic_session_active(_variety_prefix(sym)):
                             await _check_symbol(sym, mon_cfg.get("sensitivity", 1.0))
+                    await _check_alerts()
                 _MONITOR["last_check"] = datetime.now().strftime("%H:%M:%S")
         except Exception:
             pass
@@ -2967,12 +2969,98 @@ async def trade_review_one(trade_id: str):
         head = advice[:60]
         verdict = "exit" if "exit" in head or "离场" in head else ("reduce" if ("reduce" in head or "减仓" in head) else "continue")
     return {"ok": True, "id": trade_id, "symbol": sym, "price": price,
-            "pnl_pts": pnl, "verdict": verdict, "advice": advice}
+            "pnl_pts": pnl, "verdict": verdict, "advice": advice, "direction": t["direction"]}
+
+
+# ---------------------------------------------------------------- 价格预警（生死线的哨兵）
+
+ALERTS_FILE = BASE_DIR / "alerts.json"
+
+
+def _load_alerts() -> list[dict]:
+    if ALERTS_FILE.exists():
+        try:
+            return json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_alerts(items: list[dict]) -> None:
+    try:
+        ALERTS_FILE.write_text(json.dumps(items[-50:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def _check_alerts():
+    """盯盘循环内检查：现价触及预警线 → 事件流 + 飞书，一次性触发"""
+    alerts = _load_alerts()
+    changed = False
+    for a in alerts:
+        if a.get("fired_ts"):
+            continue
+        ts_, q = _quote_cache.get(a["symbol"], (0, {}))
+        last = (q or {}).get("last")
+        if last is None:
+            continue
+        hit = (a["dir"] == "above" and last >= a["price"]) or (a["dir"] == "below" and last <= a["price"])
+        if not hit:
+            continue
+        a["fired_ts"] = int(datetime.now().timestamp() * 1000)
+        changed = True
+        arrow = "升破" if a["dir"] == "above" else "跌破"
+        note = a.get("note") or ""
+        _emit_event({
+            "id": f"alert-{a['id']}-{a['fired_ts']}", "ts": a["fired_ts"], "kind": "alert",
+            "symbol": a["symbol"], "name": "", "dir": "up" if a["dir"] == "above" else "down",
+            "price": last, "text": f"🔔 预警触发：{a['symbol']} {arrow} {a['price']}（现价 {last}）"
+                   + (f" · {note}" if note else ""),
+            "chg5": 0.0, "chg15": 0.0, "threshold": a["price"], "intl": False, "ai": "",
+        }, feishu=True, feishu_text=f"🔔 价格预警触发\n{a['symbol']} {arrow} {a['price']}，现价 {last}\n{note}")
+    if changed:
+        _save_alerts(alerts)
+
+
+class AlertIn(BaseModel):
+    symbol: str
+    price: float
+    dir: str = "below"     # above=升破提醒 / below=跌破提醒
+    note: str = ""
+
+
+@app.get("/api/alerts")
+async def alerts_get():
+    return {"ok": True, "items": [a for a in _load_alerts() if not a.get("fired_ts")][-20:]}
+
+
+@app.post("/api/alerts")
+async def alerts_add(body: AlertIn):
+    if body.dir not in ("above", "below"):
+        raise HTTPException(status_code=400, detail="dir 仅支持 above/below")
+    import uuid
+    alerts = _load_alerts()
+    now_ms = int(datetime.now().timestamp() * 1000)
+    alerts.append({"id": f"a{now_ms}-{uuid.uuid4().hex[:6]}", "ts": now_ms,
+                   "symbol": body.symbol.strip().upper(),
+                   "price": body.price, "dir": body.dir, "note": body.note.strip()[:80], "fired_ts": None})
+    _save_alerts(alerts)
+    return {"ok": True}
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def alerts_del(alert_id: str):
+    alerts = _load_alerts()
+    remain = [a for a in alerts if a["id"] != alert_id]
+    if len(remain) == len(alerts):
+        raise HTTPException(status_code=404, detail="预警不存在")
+    _save_alerts(remain)
+    return {"ok": True}
 
 
 @app.get("/api/shield")
 async def shield_status():
-    """🛡️ 盾状态：今日拦截/违规、持仓风险敞口、日亏停手线消耗"""
+    """🛡️ 盾状态：今日拦截/违规、持仓风险敞口、日亏停手线消耗、纪律连胜、活跃预警"""
     trades = _load_trades()
     cfg = load_config()["discipline"]
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3015,12 +3103,28 @@ async def shield_status():
         realized_txt = f"¥{realized:,.0f} / -¥{line:,.0f}"
         if line > 0:
             stop_used_pct = round(min(100.0, max(0.0, -realized / line * 100)), 0)
+    # 连续纪律天数：从今日回溯，无强行违规开仓的日子都算干净（被闸门拦下不断链）
+    viol_days = {t.get("date") for t in trades if t.get("violation") and t.get("date")}
+    all_dates = sorted(t.get("date") for t in trades if t.get("date"))
+    earliest = all_dates[0] if all_dates else None
+    streak = 0
+    d = datetime.now().date()
+    if today in viol_days:
+        d -= timedelta(days=1)
+    while streak < 999:
+        ds = d.strftime("%Y-%m-%d")
+        if ds in viol_days or (earliest and ds < earliest):
+            break
+        streak += 1
+        d -= timedelta(days=1)
     return {
         "ok": True, "today": today,
         "blocked_today": blocked_today, "forced_today": forced_today,
         "open_count": open_n, "no_stop_open": no_stop_open,
         "exposure_pct": exposure_pct, "stop_used_pct": stop_used_pct,
         "realized_txt": realized_txt,
+        "streak": streak,
+        "active_alerts": sum(1 for a in _load_alerts() if not a.get("fired_ts")),
     }
 
 

@@ -306,19 +306,37 @@
       const d = await FA.api("/api/shield");
       const hint = $("#shieldHint");
       if (hint) {
+        const streak = "连续纪律 " + d.streak + " 天";
         hint.textContent = d.no_stop_open > 0
-          ? "⚠ " + d.no_stop_open + " 笔持仓未设止损"
-          : (d.open_count ? "防线运转中" : "今日无持仓");
+          ? "⚠ " + d.no_stop_open + " 笔未止损 · " + streak
+          : streak + (d.active_alerts ? " · 🔔" + d.active_alerts : "");
       }
       const cell = (v, k, cls) =>
         '<div class="stat-cell"><div class="sc-v ' + (cls || "") + '">' + v + '</div><div class="sc-k">' + k + "</div></div>";
       const expCls = (d.exposure_pct == null || d.exposure_pct <= 3) ? "" : d.exposure_pct <= 6 ? "" : "num-up";
       const stopCls = (d.stop_used_pct == null || d.stop_used_pct < 60) ? "" : d.stop_used_pct < 90 ? "" : "num-up";
+      let alertLine = "";
+      if (d.active_alerts) {
+        try {
+          const al = await FA.api("/api/alerts");
+          alertLine = '<div class="mini-note" style="grid-column:1/-1">' + (al.items || []).slice(-4).map((a) =>
+            '🔔 ' + FA.esc(a.symbol) + (a.dir === "above" ? " 升破 " : " 跌破 ") + a.price +
+            (a.note ? " · " + FA.esc(a.note) : "") +
+            ' <a class="link-btn danger" data-del-alert="' + a.id + '">删</a>').join("　") + "</div>";
+        } catch (e) { /* ignore */ }
+      }
       grid.innerHTML =
         cell(d.blocked_today, "今日闸门拦截", "num-down") +
         cell(d.forced_today, "今日强行违规", d.forced_today ? "num-up" : "") +
         cell((d.exposure_pct == null ? "--" : d.exposure_pct + "%"), "持仓风险敞口", expCls) +
-        cell((d.stop_used_pct == null ? "--" : d.stop_used_pct + "%"), "停手线消耗", stopCls);
+        cell((d.stop_used_pct == null ? "--" : d.stop_used_pct + "%"), "停手线消耗", stopCls) +
+        alertLine;
+      $$("#shieldGrid [data-del-alert]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          try { await api("/api/alerts/" + b.getAttribute("data-del-alert"), { method: "DELETE" }); } catch (e) { /* ignore */ }
+          pollShield();
+        });
+      });
     } catch (e) { /* ignore */ }
   }
   FA.pollShield = pollShield;
