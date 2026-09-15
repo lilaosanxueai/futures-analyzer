@@ -163,6 +163,17 @@ main { padding: 14px 18px 30px; max-width: 1720px; margin: 0 auto; }
 .intl-item .nm { font-size: 12px; color: var(--muted); }
 .intl-item .px { font-size: 16px; font-weight: 600; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 
+/* ---------- 要闻（品种 + 宏观，辅助参考） ---------- */
+.news-list { max-height: 172px; overflow-y: auto; padding: 8px 14px; display: flex; flex-direction: column; gap: 5px; }
+.news-item { display: flex; gap: 8px; align-items: baseline; font-size: 12px; line-height: 1.5; }
+.news-item .ntime { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.news-item .ntag { flex: 0 0 auto; }
+.news-item .ntitle { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vchip {
+  display: inline-block; padding: 0 6px; border: 1px solid var(--primary); border-radius: 8px;
+  color: var(--text-strong); font-size: 11px; line-height: 1.6;
+}
+
 /* ---------- 事件流 ---------- */
 .events { max-height: 380px; overflow-y: auto; padding: 6px 0; }
 .event {
@@ -288,6 +299,14 @@ main { padding: 14px 18px 30px; max-width: 1720px; margin: 0 auto; }
 .diag-item .d-title b { color: var(--text-strong); font-size: 13px; }
 .diag-item .d-evi { color: var(--text); font-size: 12px; margin-bottom: 3px; }
 .diag-item .d-adv { color: var(--muted); font-size: 12px; }
+
+/* 散户缺陷画像 */
+.flaw-item { padding: 8px 0; border-bottom: 1px solid rgba(43, 50, 69, .4); }
+.flaw-item:last-child { border-bottom: none; }
+.flaw-item .f-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
+.flaw-item .f-head b { color: var(--text-strong); font-size: 13px; }
+.flaw-item .f-evi { color: var(--text); font-size: 12px; margin-bottom: 3px; }
+.flaw-item .f-anti { color: var(--muted); font-size: 12px; }
 .diag-item.sev-fatal { background: rgba(239, 68, 68, .08); border-left: 3px solid var(--danger); }
 .diag-item.sev-warn { background: rgba(245, 158, 11, .06); border-left: 3px solid var(--warn); }
 .diag-item.sev-info { border-left: 3px solid var(--info); }

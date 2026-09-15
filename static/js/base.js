@@ -157,6 +157,7 @@
       FA.state.dirItems = d.items || [];
     } catch (e) { /* 目录失败不阻塞 */ }
     fillSymbolSelects();
+    if (!FA.state.dirItems.length) setTimeout(loadDirectory, 60000);  // 目录未就绪/失败退避中，1 分钟后自动重试
   }
   FA.loadDirectory = loadDirectory;
 
@@ -234,6 +235,30 @@
   }
   FA.pollIntl = pollIntl;
 
+  // ---------- 要闻（辅助参考：品种 + 宏观，5 分钟一轮） ----------
+  const NEWS_ICON = { trump: "🇺🇸", mideast: "🌍", fed: "🏦" };
+  function newsRow(time, tagHtml, title) {
+    const t = (time || "").length >= 5 ? time.slice(-5) : (time || "");
+    return '<div class="news-item"><span class="ntime">' + FA.esc(t) + '</span><span class="ntag">' + tagHtml +
+      '</span><span class="ntitle" title="' + FA.esc(title) + '">' + FA.esc(title) + "</span></div>";
+  }
+  async function pollNews() {
+    const el = $("#newsList");
+    if (!el) return;
+    try {
+      const d = await FA.api("/api/news?symbols=" + encodeURIComponent(FA.watch().join(",")));
+      const variety = (d.variety || []).slice(0, 6);
+      const macro = (d.items || []).slice(0, 4);
+      el.innerHTML = variety.map((it) =>
+        newsRow(it.time, '<span class="vchip">' + FA.esc(it.variety_name || it.prefix || "") + "</span>", it.title)
+      ).join("") + macro.map((it) => {
+        const icon = (it.groups || []).map((g) => NEWS_ICON[g] || "·").join(" ");
+        return newsRow(it.time, icon, it.title);
+      }).join("") || '<span class="empty">暂无要闻（品种影响事件 / 特朗普 / 中东 / 美联储）</span>';
+    } catch (e) { /* ignore */ }
+  }
+  FA.pollNews = pollNews;
+
   // ---------- 事件流 ----------
   function eventHtml(ev) {
     const t = new Date(ev.ts || Date.now());
@@ -275,13 +300,14 @@
 
   // ---------- 启动轮询 ----------
   FA.startPolling = function () {
-    pollQuotes(); pollIntl(); pollEvents();
+    pollQuotes(); pollIntl(); pollEvents(); pollNews();
     loadDirectory().then(pollPsych);
     clearInterval(quoteTimer);
     quoteTimer = setInterval(pollQuotes, 5000);
     setInterval(pollEvents, 15000);
     setInterval(pollIntl, 30000);
     setInterval(pollPsych, 60000);
+    setInterval(pollNews, 300000);
   };
 
   // 自选删除：行右键移除

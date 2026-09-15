@@ -66,6 +66,11 @@
           <div class="intl-row" id="intlRow"><span class="empty">加载中…</span></div>
         </div>
 
+        <div class="card" id="newsCard">
+          <div class="card-head"><h2>要闻 <span class="muted small">品种 · 宏观 · 辅助参考</span></h2></div>
+          <div class="news-list" id="newsList"><span class="empty">加载中…</span></div>
+        </div>
+
         <div class="card" id="eventCard">
           <div class="card-head">
             <h2>预警事件流</h2>
@@ -142,6 +147,11 @@
           <div class="card-head"><h2>📊 行为统计</h2></div>
           <div id="statsBody" class="stats-body"><div class="empty">加载中…</div></div>
         </div>
+
+        <div class="card">
+          <div class="card-head"><h2>🐑 你的散户缺陷画像 <span class="muted small">真实交易数据判定 · 注入 AI 与晨夜报</span></h2></div>
+          <div id="flawBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+        </div>
       </div>
 
       <div class="trades-right">
@@ -170,7 +180,13 @@
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>📒 交易日志</h2></div>
+          <div class="card-head">
+            <h2>📒 交易日志</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnImport">📥 导入交割单</button>
+              <button class="btn ghost sm" id="btnTradeReview">🧠 历史复盘</button>
+            </div>
+          </div>
           <table class="table trades-table">
             <thead><tr><th>日期</th><th>品种</th><th>方向</th><th class="r">开仓价</th><th class="r">止损</th><th class="r">目标</th><th class="r">浮动/结果</th><th>操作</th></tr></thead>
             <tbody id="tradesBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
@@ -304,8 +320,49 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20260914b"></script>
-<script src="/static/js/views.js?v=20260914b"></script>
-<script src="/static/js/chat.js?v=20260914b"></script>
+<!-- 交割单导入弹窗 -->
+<div class="modal-mask hidden" id="importModal">
+  <div class="modal wide">
+    <div class="modal-head"><h2>📥 导入交割单</h2><button class="btn ghost sm" data-close="importModal">✕</button></div>
+    <div class="modal-body">
+      <div class="mini-note" style="margin-bottom:8px">
+        从期货公司 App / 网上营业厅导出「成交流水 / 交割单」（CSV 文件，或直接在 Excel 里选中区域复制粘贴到下面）。
+        需包含列：成交日期、成交时间、合约、买卖、开平、成交价、成交量（手续费可选）。重复导入自动去重。
+      </div>
+      <input type="file" id="importFile" accept=".csv,.txt" style="margin-bottom:8px">
+      <textarea id="importText" rows="8" placeholder="或把成交流水粘贴到这里（Excel 选中区域 Ctrl+C，此处 Ctrl+V）…"></textarea>
+      <div id="importPreview" class="hidden" style="margin-top:10px"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnImportCheck">解析预览</button>
+      <button class="btn primary" id="btnImportCommit" disabled>确认导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 历史交易复盘弹窗 -->
+<div class="modal-mask hidden" id="tradeReviewModal">
+  <div class="modal wide">
+    <div class="modal-head"><h2>🧠 历史交易复盘（真实交割数据）</h2><button class="btn ghost sm" data-close="tradeReviewModal">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="trDays" class="select" style="flex:0 0 120px">
+          <option value="90">近 90 天</option>
+          <option value="180">近 180 天</option>
+          <option value="365">近一年</option>
+          <option value="0">全部历史</option>
+        </select>
+        <input id="trSymbols" placeholder="品种过滤（可空，如 SA0,RB0）" style="flex:1;min-width:160px">
+        <button class="btn primary" id="btnTradeReviewGo">生成复盘</button>
+        <button class="btn" id="btnTradeReviewSave">☁ 存飞书</button>
+      </div>
+      <div id="tradeReviewBody" class="markdown-body" style="margin-top:10px"><span class="muted">先「📥 导入交割单」，这里会基于真实成交生成行为模式复盘（胜率/盈亏比/持时对比/报复交易检测）。</span></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/base.js?v=20260915a"></script>
+<script src="/static/js/views.js?v=20260915a"></script>
+<script src="/static/js/chat.js?v=20260915a"></script>
 </body>
 </html>

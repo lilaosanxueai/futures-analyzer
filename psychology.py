@@ -287,6 +287,9 @@ HUMAN_NATURE = {
     "fair_world": "公平世界幻觉：「跌这么久总该涨了」——把市场当道德主体；市场没有欠任何人一个反弹",
     "confirmation": "确认偏误：持仓后只找支持自己方向的证据，AI 和盘面都成了自我说服的工具",
     "illusion_of_control": "控制幻觉：盈利归因于技术，亏损归因于运气 → 系统性错误从不被修正",
+    "sunk_cost": "沉没成本谬误：「已经亏这么多了，现在走就白亏了」→ 用过去的投入绑架未来的决策，是扛单与摊平的共同心理根源",
+    "overconfidence": "过度自信：连胜后加大仓位、觉得「这次看准了」→ 单笔风险恰在情绪最高点失控",
+    "herding": "羊群效应：哪里放量涨就追哪里、人群的热度成了入场理由 → 买在拥挤度的顶点，成为接力的末棒",
 }
 
 # 各行情阶段激活的人性定律（散户画像的心理学标签）
@@ -796,9 +799,27 @@ def _party_retail(regime_key: str, play: dict, ts: dict, cap: dict, intra: dict)
     trap = play["trap_risk"]
     if abs(c15) >= 0.5:
         trap = min(100, trap + 5)
+    # 人性定律：阶段基线 + 盘面信号动态激活（定律不止于剧本，还看此刻实际发生了什么）
+    tags = list(NATURE_TAGS.get(regime_key, []))
+    vr = intra.get("vol_ratio") or 0
+    pos = intra.get("pos_pct")
+    pct60 = ts.get("pct60")
+    if vr >= 1.8 and (pos or 50) >= 78 and c15 > 0.15:
+        for t in ("fomo", "herding"):        # 放量 + 日内高位 + 急涨：追涨温床
+            if t not in tags:
+                tags.append(t)
+        trap = min(100, trap + 5)
+    elif vr >= 1.8 and (pos or 50) <= 22 and c15 < -0.15:
+        for t in ("herding", "loss_aversion"):  # 放量杀跌：跟风踩踏
+            if t not in tags:
+                tags.append(t)
+    if (pct60 or 50) <= 25 and (ts.get("chg20") or 0) < -3 and "sunk_cost" not in tags:
+        tags.append("sunk_cost")             # 深跌区仍想补仓摊平的冲动源
+    if (pct60 or 50) >= 75 and (cap.get("oi_pct") or 0) >= 80 and "overconfidence" not in tags:
+        tags.append("overconfidence")         # 高位 + 持仓拥挤：全民看多的自满期
     nature = [
         {"tag": t, "text": HUMAN_NATURE[t]}
-        for t in NATURE_TAGS.get(regime_key, [])
+        for t in tags
         if t in HUMAN_NATURE
     ]
     return {

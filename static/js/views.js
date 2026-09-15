@@ -58,6 +58,7 @@
     renderPsychHeader(snap);
     renderPsychBody(snap);
     loadMiniChart(sym);
+    loadIntradayChart(sym);
   }
   FA.loadPsych = loadPsych;
 
@@ -113,6 +114,11 @@
           <div class="rb-desc">${esc(s.regime.desc)}</div>
         </div>
         <div class="rb-conclusion">${esc(s.conclusion || "")}</div>
+      </div>
+
+      <div class="card" id="intradayCard">
+        <div class="card-head"><h2>日内分时走势 <span class="muted small">1 分钟线 · 黄线=均价 · 虚线=昨结</span></h2><span class="muted small" id="intradayTime"></span></div>
+        <canvas id="intradayChart" class="mini-chart" style="height:200px"></canvas>
       </div>
 
       <div class="psych-grid">
@@ -216,6 +222,91 @@
     } catch (e) { /* 图表失败不影响页面 */ }
   }
 
+  // 日内分时走势（1 分钟线 + 均价线 + 昨结基准；品种博弈页停留时每分钟自动刷新）
+  let intradayTimer = null;
+  async function loadIntradayChart(sym) {
+    try {
+      const d = await api("/api/intraday/" + encodeURIComponent(sym));
+      const cv = $("#intradayChart");
+      if (!cv) return;
+      const items = d.items || [];
+      if (items.length < 5) return;
+      const timeEl = $("#intradayTime");
+      if (timeEl) timeEl.textContent = d.count + " 根 · " + (d.time || "");
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth || 640, h = 200;
+      cv.width = w * dpr; cv.height = h * dpr;
+      const ctx = cv.getContext("2d");
+      ctx.scale(dpr, dpr);
+      const cs = getComputedStyle(document.body);
+      const up = cs.getPropertyValue("--up").trim() || "#f34e4e";
+      const down = cs.getPropertyValue("--down").trim() || "#22c55e";
+      const grid = cs.getPropertyValue("--chart-grid").trim() || "#232b3b";
+      const mut = cs.getPropertyValue("--muted").trim() || "#8a93a6";
+      const prices = items.map((x) => x.p);
+      const vals = prices.concat(items.map((x) => x.a));
+      if (d.prev_settle) vals.push(d.prev_settle);
+      if (d.last != null) vals.push(d.last);  // 实时价可能超出分钟线范围，纳入刻度防圆点出界
+      let lo = Math.min(...vals), hi = Math.max(...vals);
+      const pad = (hi - lo) * 0.1 || hi * 0.002;
+      lo -= pad; hi += pad;
+      const top = 10, bottom = 22;
+      const y = (v) => top + (1 - (v - lo) / (hi - lo)) * (h - top - bottom);
+      const x = (i) => 44 + (i / (items.length - 1)) * (w - 56);
+      // 网格与价格刻度
+      ctx.strokeStyle = grid; ctx.fillStyle = mut; ctx.font = "10px sans-serif"; ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach((f) => {
+        const yy = top + f * (h - top - bottom);
+        ctx.beginPath(); ctx.moveTo(40, yy); ctx.lineTo(w - 8, yy); ctx.stroke();
+        const val = hi - f * (hi - lo);
+        ctx.fillText(val.toFixed(0), 2, yy + 3);
+      });
+      // 昨结基准（虚线）
+      if (d.prev_settle) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = mut;
+        ctx.beginPath(); ctx.moveTo(40, y(d.prev_settle)); ctx.lineTo(w - 8, y(d.prev_settle)); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = mut;
+        ctx.fillText("昨结 " + Number(d.prev_settle).toFixed(0), w - 78, y(d.prev_settle) - 4);
+      }
+      // 价格线（红涨绿跌 vs 昨结）
+      const last = d.last != null ? d.last : prices[prices.length - 1];
+      const lineColor = d.prev_settle ? (last >= d.prev_settle ? up : down) : mut;
+      ctx.strokeStyle = lineColor; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      items.forEach((it, i) => (i ? ctx.lineTo(x(i), y(it.p)) : ctx.moveTo(x(i), y(it.p))));
+      ctx.stroke();
+      // 均价线（黄）
+      ctx.strokeStyle = "#e6b422"; ctx.lineWidth = 1;
+      ctx.beginPath();
+      items.forEach((it, i) => (i ? ctx.lineTo(x(i), y(it.a)) : ctx.moveTo(x(i), y(it.a))));
+      ctx.stroke();
+      // 最新点与标签
+      const lx = x(items.length - 1), ly = y(last);
+      ctx.fillStyle = lineColor;
+      ctx.beginPath(); ctx.arc(lx, ly, 3, 0, 7); ctx.fill();
+      const tag = Number(last).toFixed(1);
+      ctx.font = "bold 11px sans-serif";
+      const tw = ctx.measureText(tag).width + 8;
+      ctx.fillStyle = lineColor;
+      ctx.fillRect(Math.min(lx + 4, w - tw - 2), ly - 8, tw, 15);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(tag, Math.min(lx + 8, w - tw + 2), ly + 3);
+      // 时间轴（首/中/尾）
+      ctx.fillStyle = mut; ctx.font = "10px sans-serif";
+      [0, Math.floor(items.length / 2), items.length - 1].forEach((i) => {
+        ctx.fillText(items[i].t, Math.max(2, Math.min(x(i) - 12, w - 30)), h - 6);
+      });
+    } catch (e) { /* 分时图失败不影响页面 */ }
+    clearInterval(intradayTimer);
+    intradayTimer = setInterval(() => {
+      if (FA.state.currentView === "psych" && FA.state.psychSymbol === sym) loadIntradayChart(sym);
+      else clearInterval(intradayTimer);
+    }, 60000);
+  }
+
   // AI 深度解读 / 盘中快评
   $("#btnPsychAI").addEventListener("click", async () => {
     const sym = FA.state.psychSymbol;
@@ -279,10 +370,39 @@
         "</div>" +
         '<div class="kv-list">' +
         '<div class="kv"><span class="k">平均盈利 / 平均亏损</span><span class="v">' + fmtNum(o.avg_win, 1) + " / " + fmtNum(o.avg_loss, 1) + " 点</span></div>" +
-        '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) + "</span></div>" +
+        '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) +
+        " · 强行开仓 " + (b.forced || 0) + ' <span style="color:var(--up)">· 闸门拦下 ' + (b.blocked || 0) + "</span></span></div>" +
         "</div>";
     } catch (e) {
       el.innerHTML = '<div class="empty">统计失败：' + esc(e.message) + "</div>";
+    }
+    loadFlaws();
+  }
+
+  async function loadFlaws() {
+    const el = $("#flawBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/flaw-profile");
+      const flaws = d.flaws || [];
+      const saved = d.blocked_count || 0;
+      const savedLine = saved
+        ? '<div class="mini-note" style="margin-bottom:6px;color:var(--up)">🛡️ 闸门已拦下 ' + saved +
+          ' 次开仓尝试（每次都是统计上最亏钱的模式——防线在干活）</div>'
+        : "";
+      el.innerHTML = savedLine + (flaws.length
+        ? flaws.map((f) => {
+            const cls = f.severity >= 70 ? "high" : f.severity >= 45 ? "mid" : "low";
+            return '<div class="flaw-item">' +
+              '<div class="f-head"><b>' + esc(f.name) + "</b>" +
+              '<span class="trap ' + cls + '"><span class="trap-bar"><i style="width:' + Math.min(100, f.severity) + '%"></i></span><span class="trap-num">' + f.severity + "</span></span></div>" +
+              '<div class="f-evi">' + esc(f.evidence) + "</div>" +
+              '<div class="f-anti">💡 ' + esc(f.antidote) + "</div>" +
+              "</div>";
+          }).join("")
+        : (saved ? "" : '<div class="empty">暂无交易数据（至少 3 笔）——导入交割单或记几笔后，这里会画出你的缺陷画像</div>'));
+    } catch (e) {
+      el.innerHTML = '<div class="empty">画像加载失败：' + esc(e.message) + "</div>";
     }
   }
 
@@ -310,10 +430,12 @@
           actions = '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
         }
         const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + (t.note.length > 14 ? "…" : "") + "</span>" : "";
+        const viol = (t.violation || []).length
+          ? '<span title="强行开仓：' + esc(t.violation.join("；")) + '" style="color:var(--danger)">🚫</span> ' : "";
         return "<tr>" +
           "<td>" + esc(t.date) + "</td>" +
           "<td><b>" + esc(t.symbol) + "</b>" + note + "</td>" +
-          '<td><span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + "</span> " + (t.lots || 1) + "手</td>" +
+          "<td>" + viol + '<span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + "</span> " + (t.lots || 1) + "手</td>" +
           '<td class="r">' + fmtNum(t.entry) + "</td>" +
           '<td class="r">' + (t.stop_points || '<span style="color:var(--danger)">无</span>') + "</td>" +
           '<td class="r">' + (t.target_points || "--") + "</td>" +
@@ -342,6 +464,10 @@
     }
   }
 
+  function submitTrade(payload) {
+    return api("/api/trades", { method: "POST", body: JSON.stringify(payload) });
+  }
+
   $("#tradeForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const warnBox = $("#tradeWarnings");
@@ -357,23 +483,54 @@
     };
     if (!payload.symbol) { alert("请选择品种"); return; }
     try {
-      const d = await api("/api/trades", { method: "POST", body: JSON.stringify(payload) });
-      // 开仓即检：问题当场暴露
-      if ((d.warnings || []).length) {
+      let d = await submitTrade(payload);
+      // 开仓闸门：致命模式拦截 → 红色风险确认（强行通过会留违规标记并计入缺陷画像）
+      if (d.blocked && (d.blockers || []).length) {
         warnBox.classList.remove("hidden");
-        warnBox.innerHTML = d.warnings.map((w) =>
-          '<div class="tw-item ' + w.sev + '"><b>' + (w.sev === "fatal" ? "🚫" : w.sev === "warn" ? "⚠" : "ℹ") + " " + esc(w.title) + "</b>" +
-          esc(w.evidence) + "<br><span class=\"muted\">→ " + esc(w.advice) + "</span></div>").join("");
-      } else {
-        warnBox.classList.remove("hidden");
-        warnBox.innerHTML = '<div class="tw-item info"><b>✅ 开仓检查通过</b>有止损、不逆势、不超频——保持住。</div>';
+        warnBox.innerHTML =
+          '<div class="tw-item fatal"><b>🚫 开仓闸门拦截（高发亏钱模式）</b></div>' +
+          d.blockers.map((b) =>
+            '<div class="tw-item fatal"><b>' + esc(b.name) + "</b>" + esc(b.evidence) +
+            "<br><span class=\"muted\">→ " + esc(b.antidote) + "</span></div>").join("") +
+          '<div style="display:flex;gap:8px;margin-top:8px">' +
+          '<button class="btn" id="btnGateCancel">🧘 放弃，再想想</button>' +
+          '<button class="btn danger" id="btnGateForce">⚠ 我知道风险，仍要开仓（记录违规）</button></div>';
+        $("#btnGateCancel").addEventListener("click", () => warnBox.classList.add("hidden"));
+        $("#btnGateForce").addEventListener("click", async () => {
+          try {
+            d = await submitTrade(Object.assign({}, payload, { force: 1 }));
+            renderTradeResult(d, warnBox);
+            $("#tfEntry").value = ""; $("#tfNote").value = "";
+            loadTrades(); loadStats(); loadDiagnosis();
+          } catch (err) { alert("保存失败：" + err.message); }
+        });
+        return;
       }
+      renderTradeResult(d, warnBox);
       $("#tfEntry").value = ""; $("#tfNote").value = "";
       loadTrades(); loadStats(); loadDiagnosis();
     } catch (err) {
       alert("保存失败：" + err.message);
     }
   });
+
+  function renderTradeResult(d, warnBox) {
+    if (d.forced) {
+      warnBox.classList.remove("hidden");
+      warnBox.innerHTML = '<div class="tw-item fatal"><b>🚫 已强行开仓（违规标记：</b>' +
+        (d.blockers || []).map((b) => esc(b.name)).join("、") + '<b>）</b>——这笔的后续将由缺陷画像跟踪。</div>';
+      return;
+    }
+    if ((d.warnings || []).length) {
+      warnBox.classList.remove("hidden");
+      warnBox.innerHTML = d.warnings.map((w) =>
+        '<div class="tw-item ' + w.sev + '"><b>' + (w.sev === "fatal" ? "🚫" : w.sev === "warn" ? "⚠" : "ℹ") + " " + esc(w.title) + "</b>" +
+        esc(w.evidence) + "<br><span class=\"muted\">→ " + esc(w.advice) + "</span></div>").join("");
+    } else {
+      warnBox.classList.remove("hidden");
+      warnBox.innerHTML = '<div class="tw-item info"><b>✅ 开仓检查通过</b>有止损、不逆势、不超频——保持住。</div>';
+    }
+  }
 
   // ================================================================ 心得视图
 
@@ -528,6 +685,96 @@
       await api("/api/monitor/config", { method: "POST", body: JSON.stringify({ enabled: true, sensitivity: parseFloat(sens) || 1 }) });
       alert("已保存");
     } catch (e) { alert(e.message); }
+  });
+
+  // ================================================================ 交割单导入 + 历史交易复盘
+
+  $("#btnImport").addEventListener("click", () => {
+    $("#importModal").classList.remove("hidden");
+    const p = $("#importPreview");
+    p.classList.add("hidden"); p.innerHTML = "";
+    $("#btnImportCommit").disabled = true;
+  });
+  function importApiFile(dryRun) {
+    const f = $("#importFile").files[0];
+    if (!f) return Promise.reject(new Error("未选择文件"));
+    // 本地解码（UTF-8 严格失败则按 GBK，浏览器原生支持）→ 走 JSON 文本接口，免去 multipart 依赖
+    return f.arrayBuffer().then((buf) => {
+      let text;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+      catch (e) { text = new TextDecoder("gbk").decode(buf); }
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
+    });
+  }
+  function renderImportPreview(d) {
+    const p = $("#importPreview");
+    p.classList.remove("hidden");
+    const rows = (d.closed_preview || []).map((t) =>
+      "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.symbol) +
+      '<span class="muted small">(' + esc(t.contract) + ")</span></td><td>" + (t.direction === "long" ? "多" : "空") +
+      '</td><td class="r">' + t.lots + '</td><td class="r">' + t.entry + "→" + t.exit +
+      '</td><td class="r ' + (t.result_pts > 0 ? "num-up" : t.result_pts < 0 ? "num-down" : "") + '">' +
+      (t.result_pts > 0 ? "+" : "") + t.result_pts + "</td></tr>").join("");
+    const openRows = (d.open_preview || []).map((t) =>
+      "<div class='mini-note'>未平仓：[" + esc(t.date) + "] " + esc(t.symbol) + "(" + esc(t.contract) + ") " +
+      (t.direction === "long" ? "多" : "空") + " " + t.lots + "手 @ " + t.entry + "</div>").join("");
+    p.innerHTML =
+      "<div class='mini-note'>识别成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔" +
+      (d.unmatched_close ? " · <span style='color:var(--danger)'>" + d.unmatched_close + " 条平仓无对应开仓（流水可能不完整）</span>" : "") + "</div>" +
+      (rows ? "<table class='table'><thead><tr><th>日期</th><th>品种</th><th>向</th><th class='r'>手</th><th class='r'>开→平</th><th class='r'>点数</th></tr></thead><tbody>" + rows + "</tbody></table>" : "") +
+      openRows +
+      ((d.errors || []).length ? "<div class='mini-note' style='color:var(--danger)'>部分行未识别：" + esc(d.errors.join("；")) + "</div>" : "");
+    $("#btnImportCommit").disabled = !((d.closed_count || 0) + (d.open_count || 0));
+  }
+  $("#importFile").addEventListener("change", async () => {
+    try { renderImportPreview(await importApiFile(1)); }
+    catch (e) { alert("解析失败：" + e.message); }
+  });
+  $("#btnImportCheck").addEventListener("click", async () => {
+    const text = $("#importText").value.trim();
+    if (!text) { alert("请先粘贴成交流水，或选择 CSV 文件"); return; }
+    try {
+      renderImportPreview(await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: 1 }) }));
+    } catch (e) { alert("解析失败：" + e.message); }
+  });
+  $("#btnImportCommit").addEventListener("click", async () => {
+    const btn = $("#btnImportCommit");
+    btn.disabled = true; btn.textContent = "导入中…";
+    try {
+      const useFile = $("#importFile").files[0] && !$("#importText").value.trim();
+      const d = useFile
+        ? await importApiFile(0)
+        : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
+      alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+      $("#importModal").classList.add("hidden");
+      $("#importText").value = ""; $("#importFile").value = "";
+      loadTrades(); loadStats();
+    } catch (e) { alert("导入失败：" + e.message); }
+    btn.textContent = "确认导入";
+  });
+
+  $("#btnTradeReview").addEventListener("click", () => { $("#tradeReviewModal").classList.remove("hidden"); });
+  $("#btnTradeReviewGo").addEventListener("click", async () => {
+    const body = $("#tradeReviewBody");
+    body.innerHTML = '<span class="typing">AI 复盘生成中（约 30-60 秒）…</span>';
+    FA._lastTradeReview = null;
+    const days = parseInt($("#trDays").value, 10) || 0;
+    const symbols = ($("#trSymbols").value || "").split(/[,，\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    try {
+      const d = await api("/api/ai/trade-review", { method: "POST", body: JSON.stringify({ days, symbols }) });
+      body.innerHTML = md(d.report);
+      FA._lastTradeReview = d;
+    } catch (e) {
+      body.innerHTML = '<span style="color:var(--danger)">生成失败：' + esc(e.message) + "</span>";
+    }
+  });
+  $("#btnTradeReviewSave").addEventListener("click", async () => {
+    if (!FA._lastTradeReview) { alert("还没有生成复盘报告"); return; }
+    try {
+      await api("/api/ai/review-save", { method: "POST", body: JSON.stringify({ report: FA._lastTradeReview.report, stats: FA._lastTradeReview.stats }) });
+      alert("已存入飞书《AI 复盘报告》");
+    } catch (e) { alert("保存失败：" + e.message); }
   });
 
   // 暴露给 tab 切换用

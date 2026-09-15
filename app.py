@@ -16,7 +16,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -185,7 +185,19 @@ _BEAR_REGIMES = {"趋势下行", "低位阴跌", "低位恐慌"}
 _BEAR_CAPITAL = {"增仓下行"}
 
 
+_cfg_cache: dict = {"mtime": None, "cfg": None}
+
+
 def load_config() -> dict:
+    """读取配置。高频调用（监控/诊断/LLM 每次都读）——按文件 mtime 缓存已解析结果，
+    命中时返回深拷贝（调用方会修改后回存，不能共享引用）；save_config 落盘改变 mtime 自动失效。"""
+    global _cfg_cache
+    try:
+        mtime = CONFIG_FILE.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _cfg_cache["cfg"] is not None and _cfg_cache["mtime"] == mtime:
+        return json.loads(json.dumps(_cfg_cache["cfg"]))
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认值
     if CONFIG_FILE.exists():
         try:
@@ -199,6 +211,8 @@ def load_config() -> dict:
         except Exception:
             pass
     cfg.setdefault("api_keys", {})
+    _cfg_cache["mtime"] = mtime
+    _cfg_cache["cfg"] = json.loads(json.dumps(cfg))
     return cfg
 
 
@@ -244,6 +258,19 @@ async def call_ak(func, *args, **kwargs):
             if attempt + 1 < _AK_MAX_TRIES:
                 await asyncio.sleep(1.0 + attempt)
     raise last_err
+
+
+# 侧路执行器：给不依赖 V8 的纯 requests+pandas 接口用（新闻快讯/东财搜索）。
+# 必须与主队列隔离——否则页面加载时的要闻轮询会排在品种目录前面把下拉框堵空，
+# 新闻源超时还会连累共享熔断，让目录接口快速失败。
+_SIDE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ak-side")
+
+
+async def _call_ak_side(func, *args, timeout: float = 15.0, **kwargs):
+    """非 V8 依赖的 AkShare 调用：独立线程池、不重试、不触发熔断，失败交由调用方负缓存兜底"""
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_SIDE_EXECUTOR, partial(func, *args, **kwargs))
+    return await asyncio.wait_for(fut, timeout=timeout)
 
 
 async def _warmup():
@@ -656,6 +683,201 @@ async def fetch_intl(force: bool = False) -> list[dict]:
     return rows
 
 
+# ---------------------------------------------------------------- 宏观要闻（辅助参考：只留高冲击事件）
+
+# 白名单只保留对散户情绪与隔夜跳空影响最大的三类，其余快讯一律丢弃
+# （词表继承 v1 v0825t 用户调优版 trump/mideast，新增 fed 覆盖利率预期——贵金属/有色夜盘的第一驱动）
+_NEWS_GROUPS = {
+    "trump": [
+        "特朗普", "trump", "白宫", "美国国务院", "五角大楼", "美国财政部",
+        "贝森特", "关税", "对等关税",
+    ],
+    "mideast": [
+        "伊朗", "德黑兰", "哈梅内伊", "革命卫队", "伊朗核", "铀浓缩", "对伊制裁",
+        "以色列", "空袭", "袭击", "霍尔木兹", "红海", "胡塞", "停火", "加沙",
+        "哈马斯", "真主党", "黎巴嫩", "中东", "导弹", "石油设施", "沙特",
+        "opec", "欧佩克", "美国中央司令部",
+    ],
+    "fed": ["美联储", "鲍威尔", "降息", "加息", "非农", "cpi", "议息", "fomc"],
+}
+_NEWS_TAG = {"trump": "🇺🇸", "mideast": "🌍", "fed": "🏦"}
+_news_cache: dict = {"ts": 0.0, "items": []}
+NEWS_TTL = 300.0
+NEWS_MAX = 30
+
+
+def _match_news_groups(text: str) -> list[str]:
+    t = text.lower()
+    return [g for g, kws in _NEWS_GROUPS.items() if any(k.lower() in t for k in kws)]
+
+
+@app.get("/api/news")
+async def news(symbols: str = ""):
+    """要闻（辅助参考）：宏观层=新浪全球快讯白名单过滤（特朗普/中东/美联储）；
+    品种层=东财产业新闻按 symbols 逐品种搜索 + 影响词过滤，只留明确影响行情的。
+    两层都只用于解释情绪与供需事实，不参与方向判断。"""
+    loop_now = asyncio.get_event_loop().time()
+    if loop_now - _news_cache["ts"] > NEWS_TTL:
+        items, seen = [], set()
+
+        def _add(time_s: str, title: str):
+            key = (title or "")[:30]
+            if not key or key in seen:
+                return
+            groups = _match_news_groups(title)
+            if not groups:
+                return  # 白名单外全部丢弃
+            seen.add(key)
+            items.append({"time": str(time_s), "title": title, "groups": groups})
+
+        try:
+            df = await _call_ak_side(ak.stock_info_global_sina)
+            for _, r in df.iterrows():
+                _add(r.get("时间", ""), str(r.get("内容", "")))
+        except Exception:
+            pass
+
+        items.sort(key=lambda x: x["time"], reverse=True)
+        _news_cache["items"] = items[:NEWS_MAX]
+        _news_cache["ts"] = loop_now
+
+    # 并行抓各品种要闻（侧路线程池 4 workers，串行最坏 8×15s → 并行 ~2×15s）
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:8]
+    results = await asyncio.gather(*[_variety_news(s, limit=4) for s in syms], return_exceptions=True)
+    variety = [it for r in results if isinstance(r, list) for it in r]
+    variety.sort(key=lambda x: x["time"], reverse=True)
+    return {
+        "ok": True,
+        "items": _news_cache["items"],
+        "variety": variety[:12],
+        "groups": list(_NEWS_GROUPS.keys()),
+    }
+
+
+async def _news_context(n: int = 5) -> str:
+    """要闻注入块（AI 上下文用，短小；失败静默返回空——辅助信息不阻塞主链路）"""
+    try:
+        await news()
+    except Exception:
+        pass
+    items = (_news_cache.get("items") or [])[:n]
+    if not items:
+        return ""
+    lines = [
+        f"- [{'/'.join(_NEWS_TAG.get(g, '·') for g in it['groups'])}] {it['title'][:55]}"
+        for it in items
+    ]
+    return "【宏观要闻（辅助参考：解释情绪冲击/隔夜跳空风险，不作方向依据）】\n" + "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 品种要闻（辅助参考：只留明确影响行情的）
+
+# 东财品种新闻搜索词（继承 v1 dfd545d 词表，仅保留商品品种；股指/国债不适用本引擎）
+VARIETY_SEARCH = {
+    "RB": "螺纹钢", "HC": "热卷", "I": "铁矿石", "JM": "焦煤", "J": "焦炭",
+    "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "NI": "沪镍", "SN": "沪锡", "SS": "不锈钢",
+    "AU": "黄金", "AG": "白银", "SC": "原油", "FU": "燃料油", "LU": "低硫燃料油", "NR": "20号胶", "RU": "橡胶",
+    "M": "豆粕", "RM": "菜粕", "Y": "豆油", "P": "棕榈油", "OI": "菜油", "A": "豆一", "B": "豆二",
+    "TA": "PTA", "MA": "甲醇", "EG": "乙二醇", "EB": "苯乙烯", "PP": "聚丙烯", "L": "塑料", "V": "PVC", "PG": "液化气",
+    "FG": "玻璃", "SA": "纯碱", "UR": "尿素", "C": "玉米", "CS": "玉米淀粉", "CF": "棉花", "SR": "白糖",
+    "JD": "鸡蛋", "LH": "生猪", "SP": "纸浆", "LC": "碳酸锂", "SI": "工业硅", "EC": "集运",
+    "AO": "氧化铝", "BC": "国际铜", "PS": "烧碱", "PX": "对二甲苯",
+}
+
+# 股市噪音词：命中即剔除（东财搜索会混入个股行情/财报类内容，与商品供需无关）
+_STOCK_NOISE_KW = [
+    "股价", "股票", "股市", "a股", "港股", "美股", "纳指", "纳斯达克", "道指", "标普",
+    "韩股", "日经", "欧股", "沪指", "深指", "创业板", "科创板", "北交所", "恒生",
+    "涨停", "跌停", "财报", "营收", "净利润", "ipo", "股份回购", "市值", "科技股",
+    "芯片股", "ai芯片", "两市", "成交额", "目标价", "重申", "公告称", "评级",
+    "基金", "券商", "业绩", "季报", "年报", "增持", "减持", "上市公司", "游资",
+    "游戏", "流水", "服务器", "晶圆", "存储芯片", "半导体设备",
+    "银行股", "保险股", "券商股", "龙头股", "概念股", "题材股", "翻倍", "套牢",
+]
+
+# 影响词：标题/摘要命中任一才保留——只留明确作用于供给/政策储备/库存交割/需求/价格的条目
+_NEWS_IMPACT_KW = [
+    # 供给端事件
+    "减产", "限产", "增产", "复产", "停产", "检修", "事故", "爆炸", "火灾", "地震",
+    "断供", "制裁", "禁运", "出口管制", "出口限制", "投产", "点火",
+    # 政策与储备
+    "关税", "收储", "抛储", "储备", "增储", "发改委", "国务院", "工信部", "环保",
+    # 库存与仓单
+    "库存", "累库", "去库", "仓单", "交割",
+    # 需求端事件
+    "开工", "订单", "招标", "基建", "地产", "汽车", "家电", "光伏", "风电", "船舶", "出口",
+    # 价格动作
+    "涨价", "降价", "提价", "上调", "下调",
+]
+
+_deep_news_cache: dict[str, tuple[float, list]] = {}
+VARIETY_NEWS_TTL = 600.0
+
+
+def _is_stock_noise(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in _STOCK_NOISE_KW)
+
+
+def _has_market_impact(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in _NEWS_IMPACT_KW)
+
+
+async def _variety_news(symbol: str, limit: int = 4) -> list[dict]:
+    """品种要闻（辅助参考）：东财产业新闻单源，双重过滤——先剔股市噪音，
+    再要求命中影响词（供给/政策/库存/需求/价格），只保留明确对行情产生影响的条目。
+    每个品种 10 分钟缓存；失败静默返回空。"""
+    p = _variety_prefix(symbol)
+    word = VARIETY_SEARCH.get(p)
+    if not word:
+        return []
+    loop_now = asyncio.get_event_loop().time()
+    cached = _deep_news_cache.get(word)
+    if cached and loop_now - cached[0] < VARIETY_NEWS_TTL:
+        return cached[1][:limit]
+    items: list[dict] = []
+    try:
+        df = await _call_ak_side(ak.stock_news_em, symbol=word)
+        for r in df.to_dict("records"):
+            title = str(r.get("新闻标题", ""))
+            summary = str(r.get("新闻内容", ""))[:120]
+            if _is_stock_noise(title + " " + summary):
+                continue
+            # 影响词只认标题：事实性标题会直接点名库存/减产/订单等，
+            # 评论性标题（"上有压制下有支撑"）不会——避免把行情评论当成影响事件
+            if not _has_market_impact(title):
+                continue
+            items.append({
+                "time": str(r.get("发布时间", ""))[:16],
+                "title": title[:70],
+                "source": str(r.get("文章来源", "")),
+                "prefix": p,
+                "variety_name": _PREFIX_CN.get(p, p),
+            })
+    except Exception:
+        pass
+    items.sort(key=lambda x: x["time"], reverse=True)
+    _deep_news_cache[word] = (loop_now, items[:20])
+    return items[:limit]
+
+
+async def _variety_news_context(symbol: str, n: int = 2) -> str:
+    """品种要闻注入块（AI 上下文用；无命中返回空）"""
+    try:
+        items = await _variety_news(symbol, limit=n)
+    except Exception:
+        return ""
+    if not items:
+        return ""
+    lines = [
+        f"- [{it['time'][5:16] if len(it['time']) >= 16 else it['time']}] {it['title']}（{it['source']}）"
+        for it in items
+    ]
+    return (f"【{symbol} 品种要闻（辅助参考：供需/库存/政策事实，供产业方立场与情绪解释，不作方向依据）】\n"
+            + "\n".join(lines))
+
+
 async def fetch_quote(symbol: str) -> dict:
     """单合约实时行情（带 5 秒缓存）。国际品种从实时快照组装。"""
     symbol = symbol.strip().upper()
@@ -805,6 +1027,52 @@ async def daily(symbol: str, limit: int = 90):
         for r in records
     ]
     return {"ok": True, "items": items}
+
+
+@app.get("/api/intraday/{symbol}")
+async def intraday(symbol: str):
+    """当日分时走势：1 分钟线重建当前交易时段（含昨夜夜盘），附均价线与昨结基准"""
+    symbol = symbol.strip().upper()
+    try:
+        rows = await get_minute(symbol, "1")  # 30 秒缓存
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"分钟数据获取失败：{e}")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
+    # 重建当前交易时段：锚定数据中最近一次夜盘开盘（首根 21 点档 K 线——其前一根必不属于夜盘）。
+    # 顺带覆盖周一边界（周一夜盘=周五 21:00，按日历找"昨日≥20点"会漏）与非夜盘品种（回退当日）。
+    start_idx = None
+    for i in range(len(rows) - 1, 0, -1):
+        if rows[i]["datetime"][11:13] == "21" and rows[i - 1]["datetime"][11:13] != "21":
+            start_idx = i
+            break
+    if start_idx is not None and len(rows) - start_idx > 700:  # 锚到异常久远，退回日历逻辑
+        start_idx = None
+    if start_idx is None:
+        todays = [r for r in rows if r["datetime"][:10] == today] or rows[-240:]
+    else:
+        todays = rows[start_idx:]
+    quote = None
+    try:
+        quote = await fetch_quote(symbol)
+    except Exception:
+        pass
+    prev_settle = (quote or {}).get("prev_settle")
+    items, cv, cvol = [], 0.0, 0.0
+    for r in todays:
+        c = float(r.get("close") or 0)
+        if c <= 0:
+            continue
+        v = float(r.get("volume") or 0)
+        cv += c * v
+        cvol += v
+        items.append({"t": r["datetime"][11:16], "p": c, "a": round(cv / cvol, 2) if cvol else c})
+    return {
+        "ok": True, "symbol": symbol, "name": (quote or {}).get("name", ""),
+        "prev_settle": prev_settle, "last": (quote or {}).get("last"),
+        "time": (quote or {}).get("time", ""), "count": len(items), "items": items,
+    }
 
 
 @app.get("/api/intl")
@@ -1055,6 +1323,7 @@ SYSTEM_PROMPT = """你是「反幻想交易教练」——国内期货资金博�
 铁律：
 - **禁止**使用任何技术指标语言：均线金叉死叉、MACD、KDJ、RSI、布林、波浪、形态学名词一律不许出现（20日均线仅可作为"大势分界"的参考提及）。
 - **禁止迎合**：用户想抄底、扛单、重仓、频繁交易时，直接指出这是散户幻想、代价是什么，不委婉。
+- 宏观要闻（若上下文附带）仅作辅助参考：只用于解释散户情绪的来源与隔夜跳空风险，方向判断必须以价量持仓博弈为准，**禁止用消息面给任何方向背书**。
 - 所有判断给具体数值：价格、百分比、持仓量变化、分位。
 - 数据缺失明说；不确定就说不确定。
 - 你的输出仅供研究参考，不构成投资建议。"""
@@ -1146,6 +1415,9 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             parts.append("【当前已加载的实时行情】\n" + "\n".join(lines))
 
     if not symbol:
+        nblk = await _news_context()
+        if nblk:
+            parts.append(nblk)
         return "\n\n".join(parts)
 
     try:
@@ -1171,6 +1443,11 @@ async def _build_market_context(symbol: Optional[str]) -> str:
             for h in holds
         ]
         parts.append("【用户当前持有该品种仓位——分析必须兼顾该持仓的风险与执行，而非只给方向观点】\n" + "\n".join(h_lines))
+    nblk, vblk = await asyncio.gather(_news_context(), _variety_news_context(symbol))
+    if nblk:
+        parts.append(nblk)
+    if vblk:
+        parts.append(vblk)
     return "\n\n".join(parts)
 
 
@@ -1206,8 +1483,10 @@ async def ai_chat(body: ChatIn):
                 pass
     profile = _profile_context()
     position = _position_context()
+    flaw = "" if body.light else _flaw_context()
     system = (SYSTEM_PROMPT
               + ("\n\n" + profile if profile else "")
+              + ("\n\n" + flaw if flaw else "")
               + ("\n\n" + position if position else "")
               + ("\n\n" + context if context else ""))
     messages = _build_api_messages(body.messages, system)
@@ -1404,61 +1683,6 @@ async def _call_ai_simple(messages: list[dict], max_tokens: int = 2048) -> str:
     raise RuntimeError("AI 服务全部不可用 → " + "；".join(problems))
 
 
-async def _llm_json(prompt: str, max_tokens: int = 0) -> dict:
-    """调用 LLM 输出结构化 JSON（容错提取 ```json 包裹）"""
-    cfg = load_config()
-    candidates = _llm_candidates(cfg)
-    if not candidates:
-        raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在「⚙ AI 设置」中配置")
-    import logging
-    logger = logging.getLogger("uvicorn.error")
-    import time as _time
-    t0 = _time.time()
-    for idx, cand in enumerate(candidates):
-        base_url, api_key, model = cand["base_url"], cand["api_key"], cand["model"]
-        max_tokens = max(max_tokens or 0, max_output_for(model))
-        async with httpx.AsyncClient(timeout=180) as client:
-            def build(mt: int):
-                return client.post(
-                    f"{base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.2,
-                        "max_tokens": mt,
-                    },
-                )
-            resp = await build(max_tokens)
-            if resp.status_code == 400 and "max_tokens" in resp.text.lower() and max_tokens > 4096:
-                max_tokens = 4096
-                resp = await build(max_tokens)
-        if _is_provider_hard_error(resp) and idx < len(candidates) - 1:
-            logger.info(f"[llm-json] {cand['provider']} 硬错误 {resp.status_code}，切换兜底")
-            _note_provider_fail(cand["provider"])
-            continue
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"AI 服务返回 {resp.status_code}")
-        try:
-            choice = resp.json()["choices"][0]
-            content = (choice["message"].get("content") or "").strip()
-        except Exception:
-            raise HTTPException(status_code=502, detail="AI 返回内容无法解析")
-        if not content:
-            raise HTTPException(status_code=502, detail="AI 返回空内容（可能被思维链耗尽 token，请重试）")
-        m = re.search(r"\{[\s\S]*\}", content)
-        if not m:
-            raise HTTPException(status_code=502, detail=f"AI 未按 JSON 输出：{content[:120]}")
-        try:
-            out = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=502, detail=f"AI 的 JSON 无法解析：{content[:120]}")
-        logger.info(f"[llm-json] {cand['provider']}/{model} 完成，耗时 {_time.time() - t0:.0f}s" + ("（兜底）" if idx > 0 else ""))
-        _note_provider_ok(cand["provider"])
-        return out
-    raise HTTPException(status_code=502, detail="AI 调用失败")
-
-
 # ---------------------------------------------------------------- AI：博弈深度解读 + 盘中快评
 
 PSYCH_AI_PROMPT = """你是反幻想交易教练。以下是程序实时计算的「四方心理博弈快照」，请基于它（可补充你的产业常识）写一份深度解读。
@@ -1486,7 +1710,12 @@ async def psych_ai(symbol: str):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"快照计算失败：{e}")
     context = psy.to_context_text(snap)
+    nblk, vblk = await asyncio.gather(_news_context(3), _variety_news_context(symbol, 2))
+    context += "".join("\n\n" + b for b in (nblk, vblk) if b)
+    flaw = _flaw_context()
     profile = (_profile_context() or "（未填写）") + "\n" + (_position_context() or "当前无持仓")
+    if flaw:
+        profile += "\n\n" + flaw
     prompt = PSYCH_AI_PROMPT.format(context=context, profile=profile)
     try:
         advice = await _llm_text_retry(prompt, max_tokens=2400)
@@ -1513,6 +1742,8 @@ async def ai_realtime(symbol: str, force: int = 0):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"快照获取失败：{e}")
     context = psy.to_context_text(snap)
+    nblk, vblk = await asyncio.gather(_news_context(3), _variety_news_context(symbol, 2))
+    context += "".join("\n\n" + b for b in (nblk, vblk) if b)
     holds = [t for t in _load_trades() if t.get("status") == "open" and t.get("symbol") == symbol]
     hold_txt = "；".join(
         f"{'多' if h['direction'] == 'long' else '空'} {h.get('lots', 1)}手 @ {h['entry']}"
@@ -1864,6 +2095,26 @@ def _load_trades() -> list[dict]:
     return []
 
 
+GATE_LOG_FILE = BASE_DIR / "gate_log.json"
+
+
+def _load_gate_log() -> list[dict]:
+    """开仓闸门拦截记录（被拦下的尝试——防线战果，也是行为模式的证据）"""
+    if GATE_LOG_FILE.exists():
+        try:
+            return json.loads(GATE_LOG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_gate_log(items: list[dict]) -> None:
+    try:
+        GATE_LOG_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _save_trades(trades: list[dict]) -> None:
     try:
         TRADES_FILE.write_text(json.dumps(trades, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1973,6 +2224,257 @@ async def trail_loop():
         await asyncio.sleep(30)
 
 
+# ---------------------------------------------------------------- 交割单导入（真实成交 → 交易记录）
+
+# 交割单/成交流水列名别名（各家期货公司导出格式差异）
+_IMPORT_COL_ALIAS = {
+    "date": ("成交日期", "交易日期", "日期", "交易日"),
+    "time": ("成交时间", "时间", "成交时点"),
+    "contract": ("合约", "合约代码", "合约编号", "instrument", "证券代码"),
+    "dir": ("买卖", "方向", "买卖方向", "交易方向"),
+    "offset": ("开平", "开平仓", "开平标志", "开平类型"),
+    "price": ("成交价", "价格", "成交价格", "发生价格"),
+    "lots": ("成交量", "手数", "数量", "成交数量"),
+    "fee": ("手续费", "费用", "手续费金额", "成交手续费"),
+}
+_DIR_LONG = ("买", "买入", "b", "buy", "多")
+_DIR_SHORT = ("卖", "卖出", "s", "sell", "空")
+_OPEN_KW = ("开", "o")
+_CLOSE_KW = ("平", "c")
+
+
+def _imp_num(v) -> Optional[float]:
+    try:
+        s = str(v).strip().replace(",", "").replace("，", "")
+        if not s or s in ("--", "-"):
+            return None
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _imp_dt(date_s: str, time_s: str):
+    """交割单日期时间解析：2026-09-14 / 2026/9/14 / 20260914 × 21:05:32 / 09:05 / 9:05 / 空"""
+    d = str(date_s or "").strip().replace("/", "-").replace(".", "-")
+    if len(d) == 8 and d.isdigit():
+        d = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+    elif "-" in d:
+        parts = d.split("-")
+        if len(parts) == 3 and len(parts[0]) == 4 and parts[0].isdigit():
+            try:
+                d = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"  # 2026-9-4 → 2026-09-04
+            except ValueError:
+                pass
+    t = str(time_s or "").strip().replace("：", ":")
+    digits = t.replace(":", "")
+    if digits.isdigit() and len(digits) in (3, 4, 6):
+        if len(digits) == 3:      # 905 → 09:05
+            digits = "0" + digits
+        if len(digits) == 4:
+            t = f"{digits[:2]}:{digits[2:]}:00"
+        else:
+            t = f"{digits[:2]}:{digits[2:4]}:{digits[4:]}"
+    try:
+        if not d:
+            return None, ""
+        dt = datetime.fromisoformat(f"{d}T{t or '00:00:00'}")
+        return dt, d
+    except ValueError:
+        return None, ""
+
+
+def _imp_dir_offset(dir_raw: str, offset_raw: str) -> tuple[str, str]:
+    """返回 (long/short, open/close)。兼容 '买开/卖平' 复合写法与独立开平列"""
+    d = (dir_raw or "").strip().lower()
+    o = (offset_raw or "").strip().lower()
+    side = "long" if d.startswith(_DIR_LONG) else "short" if d.startswith(_DIR_SHORT) else ""
+    # 无独立开平列时从方向词推断（买开/卖平），否则看开平列
+    if "开" in dir_raw and "平" not in dir_raw:
+        act = "open"
+    elif "平" in dir_raw:
+        act = "close"
+    elif o.startswith(_CLOSE_KW):
+        act = "close"
+    elif o.startswith(_OPEN_KW):
+        act = "open"
+    else:
+        act = ""
+    return side, act
+
+
+def _parse_fills(text: str) -> tuple[list[dict], list[str]]:
+    """解析成交流水文本（CSV/制表符，Excel 直接复制粘贴即可）。返回 (fills, errors)"""
+    errors: list[str] = []
+    if not text or not text.strip():
+        return [], ["内容为空"]
+    lines = [ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+    if not lines:
+        return [], ["没有有效行"]
+    delim = "\t" if lines[0].count("\t") >= lines[0].count(",") else ","
+    header = [c.strip().strip('"') for c in lines[0].split(delim)]
+    col_map: dict[str, int] = {}
+    for key, aliases in _IMPORT_COL_ALIAS.items():
+        for i, h in enumerate(header):
+            if h and any(h.lower() == a.lower() or a in h for a in aliases):
+                col_map[key] = i
+                break
+    if "contract" not in col_map or "price" not in col_map or "lots" not in col_map:
+        return [], [f"未识别到必要列（需含 合约/成交价/成交量，表头实际为：{delim.join(header[:10])}）"]
+    fills: list[dict] = []
+    for ln in lines[1:]:
+        cells = [c.strip().strip('"') for c in ln.split(delim)]
+        if not cells or any(k in ln for k in ("合计", "小计", "总计")):
+            continue
+        contract = cells[col_map["contract"]].upper() if len(cells) > col_map["contract"] else ""
+        price = _imp_num(cells[col_map["price"]]) if len(cells) > col_map["price"] else None
+        lots = _imp_num(cells[col_map["lots"]]) if len(cells) > col_map["lots"] else None
+        if not contract or price is None or not lots:
+            continue
+        dir_raw = cells[col_map["dir"]] if "dir" in col_map and len(cells) > col_map["dir"] else ""
+        off_raw = cells[col_map["offset"]] if "offset" in col_map and len(cells) > col_map["offset"] else ""
+        side, act = _imp_dir_offset(dir_raw, off_raw)
+        if not side:
+            errors.append(f"无法识别买卖方向：{ln[:50]}")
+            continue
+        if not act:
+            act = "open"  # 兜底：无开平信息按开仓（仅影响配对，不影响金额）
+        date_s = cells[col_map["date"]] if "date" in col_map and len(cells) > col_map["date"] else ""
+        time_s = cells[col_map["time"]] if "time" in col_map and len(cells) > col_map["time"] else ""
+        dt, date_norm = _imp_dt(date_s, time_s)
+        fee = _imp_num(cells[col_map["fee"]]) if "fee" in col_map and len(cells) > col_map["fee"] else 0.0
+        fills.append({
+            "contract": contract, "side": side, "act": act, "price": price,
+            "lots": lots, "fee": abs(fee or 0.0),
+            "dt": dt, "date": date_norm or (dt.strftime("%Y-%m-%d") if dt else ""),
+            "ms": int(dt.timestamp() * 1000) if dt else 0,
+        })
+    if not fills:
+        errors.insert(0, "没有解析出有效成交行")
+    return fills, errors[:8]
+
+
+def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
+    """FIFO 配对开平仓 → (闭环交易, 未平仓, 未能配对的开仓数)。
+    平仓方向与被平持仓相反：卖平=平多，买平=平空。"""
+    fills = sorted(fills, key=lambda f: (f["ms"] or 0,))
+    queues: dict[str, list[dict]] = {}  # contract -> 待平仓手 [{side, price, lots, ms, date}]
+    closed: list[dict] = []
+    unmatched_close = 0
+    for f in fills:
+        q = queues.setdefault(f["contract"], [])
+        if f["act"] == "open":
+            q.append({"side": f["side"], "price": f["price"], "lots": f["lots"],
+                      "ms": f["ms"], "date": f["date"], "fee": f["fee"]})
+            continue
+        # 平仓：被平一侧与成交方向相反
+        closed_side = "short" if f["side"] == "long" else "long"
+        remain = f["lots"]
+        fee_left = f["fee"]
+        total_lots_in_fill = f["lots"]
+        while remain > 1e-9 and q:
+            head_long = next((h for h in q if h["side"] == closed_side), None)
+            if not head_long:
+                break
+            take = min(remain, head_long["lots"])
+            hold_min = round((f["ms"] - head_long["ms"]) / 60000, 0) if f["ms"] and head_long["ms"] else None
+            fee_share = round(fee_left * (take / total_lots_in_fill), 2) if total_lots_in_fill else 0
+            sign = 1 if closed_side == "long" else -1
+            entry_fee = round(head_long["fee"] * (take / head_long["lots"]), 2) if head_long["lots"] else 0
+            exit_ms = f["ms"] or head_long["ms"]
+            closed.append({
+                "id": f"imp{exit_ms}-{f['contract']}-{closed_side}-{len(closed)}",
+                "ts": head_long["ms"], "date": head_long["date"],
+                "symbol": (re.match(r"^([A-Za-z]{1,2})", f["contract"]).group(1).upper() + "0"
+                           if re.match(r"^([A-Za-z]{1,2})", f["contract"]) else f["contract"]),
+                "contract": f["contract"],
+                "direction": closed_side,
+                "entry": head_long["price"], "exit": f["price"],
+                "stop_points": None, "target_points": None,
+                "lots": int(take) if abs(take - round(take)) < 1e-9 else round(take, 2),
+                "status": "closed",
+                "result_pts": round(sign * (f["price"] - head_long["price"]), 1),
+                "closed_ts": exit_ms,
+                "note": f"交割单导入（持时{int(hold_min)}分）" if hold_min is not None else "交割单导入",
+                "fees": round(fee_share + entry_fee, 2),
+                "hold_min": int(hold_min) if hold_min is not None else None,
+                "source": "import", "trail": None,
+            })
+            head_long["lots"] -= take
+            head_long["fee"] -= entry_fee
+            remain -= take
+            if head_long["lots"] <= 1e-9:
+                q.remove(head_long)
+        if remain > 1e-9:
+            unmatched_close += 1
+    # 剩余未平仓 → 当前持仓
+    opened: list[dict] = []
+    for contract, q in queues.items():
+        for h in q:
+            if h["lots"] <= 1e-9:
+                continue
+            opened.append({
+                "id": f"imp{h['ms']}-{contract}-{h['side']}-open",
+                "ts": h["ms"], "date": h["date"],
+                "symbol": (re.match(r"^([A-Za-z]{1,2})", contract).group(1).upper() + "0"
+                           if re.match(r"^([A-Za-z]{1,2})", contract) else contract),
+                "contract": contract, "direction": h["side"], "entry": h["price"],
+                "stop_points": None, "target_points": None,
+                "lots": int(h["lots"]) if abs(h["lots"] - round(h["lots"])) < 1e-9 else round(h["lots"], 2),
+                "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
+                "note": "交割单导入（未平仓）", "fees": round(h["fee"], 2),
+                "source": "import", "trail": None,
+            })
+    return closed, opened, unmatched_close
+
+
+class TradeImportIn(BaseModel):
+    text: str = ""
+    dry_run: int = 1
+
+
+def _import_payload(fills: list, closed: list, opened: list, unmatched: int, errors: list):
+    return {
+        "ok": True,
+        "fills_count": len(fills),
+        "closed_count": len(closed),
+        "closed_preview": [
+            {"date": t["date"], "symbol": t["symbol"], "contract": t["contract"],
+             "direction": t["direction"], "lots": t["lots"], "entry": t["entry"],
+             "exit": t["exit"], "result_pts": t["result_pts"], "hold_min": t["hold_min"]}
+            for t in closed[:10]
+        ],
+        "open_count": len(opened),
+        "open_preview": [
+            {"date": t["date"], "symbol": t["symbol"], "contract": t["contract"],
+             "direction": t["direction"], "lots": t["lots"], "entry": t["entry"]}
+            for t in opened[:10]
+        ],
+        "unmatched_close": unmatched,
+        "errors": errors,
+    }
+
+
+@app.post("/api/trades/import")
+async def trades_import(body: TradeImportIn):
+    """导入交割单/成交流水（CSV/制表符文本，编码由前端解码）。dry_run=1 仅解析预览；
+    dry_run=0 落盘（按 id 去重，重复导入安全）"""
+    fills, errors = _parse_fills(body.text)
+    if not fills:
+        raise HTTPException(status_code=400, detail="；".join(errors) or "未解析出任何成交")
+    closed, opened, unmatched = _pair_fills(fills)
+    payload = _import_payload(fills, closed, opened, unmatched, errors)
+    if body.dry_run:
+        return payload
+    trades = _load_trades()
+    exist_ids = {t.get("id") for t in trades}
+    new_items = [t for t in closed + opened if t["id"] not in exist_ids]
+    trades.extend(new_items)
+    _save_trades(trades)
+    payload["added"] = len(new_items)
+    payload["skipped_dup"] = len(closed) + len(opened) - len(new_items)
+    return payload
+
+
 class TradeIn(BaseModel):
     symbol: str
     direction: str  # long / short
@@ -1982,6 +2484,7 @@ class TradeIn(BaseModel):
     lots: float = 1
     date: str = ""
     note: str = ""
+    force: int = 0  # 1=已在红色风险确认后仍要开仓（记录违规标记）
 
 
 # ---- 诊断规则（开仓即检 + 持仓盯防，问题即时暴露） ----
@@ -2007,13 +2510,17 @@ async def _diagnose_trade(t: dict, snap: Optional[dict], price: Optional[float])
         out.append(_issue("D01", "fatal", "开仓无止损",
                           f"{sym} {'多' if side == 'long' else '空'}单 @ {entry} 未设止损点数",
                           "无止损=把亏损的控制权交给了对手盘。立即补设止损（逻辑位，不是金额倒推位）。", sym, t.get("id", "")))
-    # D02 扛单越损（实时）
+    # D02 扛单越损（实时，两级：越损=止损犹豫；超2倍=深度扛单）
     if price and stop > 0:
         flt = sign * (price - entry)
-        if flt < -stop * 1.1:
-            out.append(_issue("D02", "fatal", "价格已穿止损仍未离场（扛单）",
+        if flt < -stop * 2:
+            out.append(_issue("D02", "fatal", "深度扛单（止损已远被击穿）",
+                              f"{sym} 浮动 {flt:+.1f} 点，已达止损 {stop:.0f} 点的 {abs(flt) / stop:.1f} 倍",
+                              "止损被击穿两倍以上仍在场=决策权已完全交给对手盘。立即离场，这笔的教训比这笔的亏损值钱。", sym, t.get("id", "")))
+        elif flt < -stop * 1.1:
+            out.append(_issue("D02", "fatal", "价格已穿止损仍未离场（止损犹豫）",
                               f"{sym} 浮动 {flt:+.1f} 点，已超止损 {stop:.0f} 点 {abs(flt) - stop:.1f} 点",
-                              "「等回本」是散户最贵的幻想：亏损单的主动权只会越来越小。按纪律离场，把决定权拿回来。", sym, t.get("id", "")))
+                              "「再等等」每多一分钟，主动权就少一分：按纪律离场，把决定权拿回来。", sym, t.get("id", "")))
     # D03 止损过窄（日内噪音可扫）
     if stop > 0 and snap:
         intra = snap.get("intraday") or {}
@@ -2167,6 +2674,10 @@ async def _diagnosis_scan(push: bool = False) -> list[dict]:
     trades = _load_trades()
     issues: list[dict] = []
     open_trades = [t for t in trades if t.get("status") == "open"]
+    missing = sorted({t["symbol"] for t in open_trades
+                      if not (_quote_cache.get(t["symbol"], (0, {}))[1] or {}).get("last")})
+    if missing:
+        await asyncio.gather(*[fetch_quote(s) for s in missing], return_exceptions=True)
     for t in open_trades:
         snap = None
         price = None
@@ -2175,12 +2686,7 @@ async def _diagnosis_scan(push: bool = False) -> list[dict]:
         except Exception:
             pass
         ts_, q = _quote_cache.get(t["symbol"], (0, {}))
-        price = (q or {}).get("last")
-        if not price:
-            try:
-                price = (await fetch_quote(t["symbol"])).get("last")
-            except Exception:
-                price = None
+        price = (q or {}).get("last")  # 取不到时仍诊断（D01/D07 等不依赖现价，仅 D02/D03 跳过）
         issues.extend(await _diagnose_trade(t, snap, price))
     issues.extend(_diagnose_global(trades))
     sev_rank = {"fatal": 0, "warn": 1, "info": 2}
@@ -2237,9 +2743,71 @@ async def diagnosis():
     return {"ok": True, "issues": _DIAG["issues"], "fatal_count": fatal, "warn_count": warn}
 
 
+# ---------------------------------------------------------------- 开仓闸门（散户高发亏钱模式的源头拦截）
+
+_GATE_BEAR_REGIMES = {"低位阴跌", "低位恐慌", "趋势下行", "高位回落"}
+
+
+def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_trades: list) -> list[dict]:
+    """源头拦截器：接飞刀 / 亏损加仓 / 幻想反弹 / 逆资金 / 追涨 / 恐慌追空。
+    返回致命级 blockers（空=放行）。设计：不剥夺开仓自由，但强制二次确认并留违规标记。"""
+    out = []
+    sym = trade["symbol"]
+    is_long = trade["direction"] == "long"
+    side_txt = "做多" if is_long else "做空"
+
+    def block(code: str, name: str, evidence: str, antidote: str):
+        out.append({"code": code, "name": name, "evidence": evidence, "antidote": antidote})
+
+    if snap:
+        regime = (snap.get("regime") or {}).get("key")
+        regime_label = (snap.get("regime") or {}).get("label", "")
+        intra = snap.get("intraday") or {}
+        cap = snap.get("capital") or {}
+        trend = snap.get("trend") or {}
+        c15 = intra.get("chg15m") or 0
+        pos_pct = intra.get("pos_pct")
+        cap5 = cap.get("state5")
+
+        if is_long and (regime in _GATE_BEAR_REGIMES or cap5 == "增仓下行") and c15 <= -0.25:
+            block("G1", "🩸 接飞刀",
+                  f"{side_txt}，但当前「{regime_label}」、日线资金「{cap5 or '不明'}」，15 分钟 {c15:+.2f}% 仍在急跌",
+                  "下跌中接多=接正在下落的兑现盘。等放量止跌与资金方向翻转确认，不赌最低点")
+        if not is_long and regime in ("低位恐慌", "低位阴跌") and (pos_pct or 50) <= 15 and c15 <= -0.4:
+            block("G1b", "🩸 恐慌末端追空",
+                  f"价格已贴日内最低（{pos_pct:.0f}% 分位）且 15 分钟 {c15:+.2f}%——杀跌末端追空易吃 V 型反弹",
+                  "恐慌衰竭处不追空；要空等反抽失败再评估")
+        if is_long and (trend.get("pct60") or 50) <= 22 and (trend.get("chg20") or 0) <= -3:
+            block("G2", "🪞 幻想反弹（深跌抄底）",
+                  f"60 日仅 {(trend.get('pct60') or 0):.0f}% 分位、20 日 {(trend.get('chg20') or 0):+.1f}%，深跌区做多=赌 V 型反转",
+                  "「跌够了」不是底部理由：底部需要持仓出清+放量反攻确认。左侧即使要做也减半仓+结构位止损")
+        if (is_long and cap5 == "增仓下行") or (not is_long and cap5 == "增仓上行"):
+            block("G3", "⚡ 逆资金方向而为",
+                  f"{side_txt}，但日线资金「{cap5}」——新进场资金在你的对侧",
+                  "逆着新钱方向做单=给对手盘送流动性。等资金方向站到同侧，或至少等它停止进攻")
+        if is_long and (pos_pct or 50) >= 85 and c15 >= 0.4:
+            block("G4", "🔥 追涨（FOMO）",
+                  f"价格贴日内高点（{pos_pct:.0f}% 分位）且 15 分钟已涨 {c15:+.2f}%——情绪最热、盈亏比最差的位置",
+                  "追在情绪极值处=接力末棒。等回踩确认再进；必须进则减半仓")
+
+    # 亏损加仓（摊平）：同品种同方向已有亏单再加仓——不需要行情快照，只看持仓与现价
+    holds = [t for t in all_trades if t.get("status") == "open"
+             and t["symbol"] == sym and t["direction"] == trade["direction"]]
+    if holds and price:
+        sign = 1 if is_long else -1
+        losing = [h for h in holds if sign * (float(price) - float(h["entry"])) < 0]
+        if losing:
+            worst = min(sign * (float(price) - float(h["entry"])) for h in losing)
+            block("G6", "📉 亏损加仓（摊平）",
+                  f"已持有同方向 {len(losing)} 笔亏单（最差浮亏 {worst:+.1f} 点），此刻加仓=摊平",
+                  "摊平是让亏损集中爆发的最快路径：亏单只减不加；加仓等它转盈后按新信号执行")
+    return out
+
+
 @app.post("/api/trades")
 async def add_trade(body: TradeIn):
-    """记一笔交易：保存后立即跑诊断，问题当场暴露（不拦截，只预警）"""
+    """记一笔交易（带开仓闸门）：接飞刀/亏损加仓/幻想反弹/逆资金/追涨先拦截——
+    返回 blocked=true 与 blockers，前端红色风险确认；force=1 二次确认后放行并留违规标记"""
     if body.direction not in ("long", "short"):
         raise HTTPException(status_code=400, detail="direction 仅支持 long/short")
     symbol = body.symbol.strip().upper()
@@ -2262,10 +2830,7 @@ async def add_trade(body: TradeIn):
         "note": body.note.strip()[:200],
         "trail": _init_trail(body.entry, body.stop_points, body.target_points),
     }
-    trades.append(trade)
-    _save_trades(trades)
-    # 开仓即检：问题即时返回前端展示
-    warnings_list = []
+    # 源头闸门：先取实时快照与现价，拦截致命模式
     try:
         snap = await psych_snapshot(symbol)
     except Exception:
@@ -2275,6 +2840,19 @@ async def add_trade(body: TradeIn):
         price = (await fetch_quote(symbol)).get("last")
     except Exception:
         pass
+    blockers = _entry_gate(trade, snap, price, trades)
+    if blockers and not body.force:
+        log = _load_gate_log()
+        log.append({"ts": now_ms, "symbol": symbol, "direction": body.direction,
+                    "entry": body.entry, "codes": [b["code"] for b in blockers],
+                    "names": [b["name"] for b in blockers]})
+        _save_gate_log(log)
+        return {"ok": True, "blocked": True, "blockers": blockers}
+    if blockers:
+        trade["violation"] = [f"{b['code']} {b['name']}" for b in blockers]
+    trades.append(trade)
+    _save_trades(trades)
+    # 开仓即检：问题即时返回前端展示
     warnings_list = await _diagnose_trade(trade, snap, price)
     # 当日超限也属于开仓时点问题
     today_n = sum(1 for t in trades if t.get("date") == trade["date"] and t.get("status") in ("open", "closed"))
@@ -2284,7 +2862,8 @@ async def add_trade(body: TradeIn):
                                     f"今日已开 {today_n} 笔（上限 {daily_max}）",
                                     "频繁交易=手续费+情绪双杀。这是今日最后一笔。", symbol, trade["id"]))
     asyncio.create_task(_diagnosis_scan(push=True))
-    return {"ok": True, "item": trade, "warnings": warnings_list}
+    return {"ok": True, "item": trade, "warnings": warnings_list,
+            "forced": bool(trade.get("violation")), "blockers": blockers}
 
 
 class TradePatch(BaseModel):
@@ -2335,17 +2914,18 @@ async def del_trade(trade_id: str):
 @app.get("/api/trades")
 async def get_trades():
     items = list(reversed(_load_trades()))
+    # 缓存未命中的持仓品种并行补拉行情（串行最坏 N×0.5s；fetch_quote 自带 5s 缓存回填）
+    missing = sorted({t["symbol"] for t in items
+                      if t.get("status") == "open"
+                      and not (_quote_cache.get(t["symbol"], (0, {}))[1] or {}).get("last")})
+    if missing:
+        await asyncio.gather(*[fetch_quote(s) for s in missing], return_exceptions=True)
     for t in items:
         if t.get("status") != "open":
             continue
         sym = t["symbol"]
         ts_, q = _quote_cache.get(sym, (0, {}))
         price = (q or {}).get("last")
-        if not price:
-            try:
-                price = (await fetch_quote(sym)).get("last")
-            except Exception:
-                price = None
         if not price:
             continue
         sign = 1 if t["direction"] == "long" else -1
@@ -2412,13 +2992,129 @@ async def trades_stats():
         "open_count": sum(1 for t in trades if t["status"] == "open"),
         "abandoned_count": sum(1 for t in trades if t["status"] == "abandoned"),
         "by_symbol": {s: _summary(v) for s, v in sorted(by_symbol.items())},
-        "behavior": {"no_stop": no_stop, "held_thru_stop": hold_loss, "revenge": revenge},
+        "behavior": {"no_stop": no_stop, "held_thru_stop": hold_loss, "revenge": revenge,
+                     "forced": sum(1 for t in trades if t.get("violation")),
+                     "blocked": len(_load_gate_log())},
     }
 
 
 @app.get("/api/discipline/config")
 async def discipline_config_get():
     return {"ok": True, "discipline": load_config()["discipline"]}
+
+
+# ---------------------------------------------------------------- 散户缺陷画像（真实交易数据驱动）
+
+def _flaw_profile() -> list[dict]:
+    """从真实交易记录检测该交易者的散户缺陷：每项含证据与解药（纪律规则），按严重度排序。
+    只用已存字段（不需要行情回放），随时可算。样本 <3 笔时返回空——不拿两笔交易给人贴标签。"""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
+    if len(closed) < 3 and len(trades) < 3:
+        return []
+    cfg = load_config()["discipline"]
+    flaws: list[dict] = []
+
+    def add(name: str, count: int, total: int, evidence: str, antidote: str, weight: float = 1.0):
+        if count <= 0 or total <= 0:
+            return
+        rate = count / total
+        flaws.append({
+            "name": name, "count": count, "rate": round(rate * 100),
+            "severity": min(100, int(rate * 100 * weight)),
+            "evidence": evidence, "antidote": antidote,
+        })
+
+    # 1 无止损：把亏损控制权交给对手盘
+    no_stop = sum(1 for t in trades if not t.get("stop_points"))
+    add("无止损开仓", no_stop, len(trades), f"{no_stop}/{len(trades)} 笔未设止损",
+        "开仓即挂硬止损（结构位之外），单笔风险 ≤ 账户 1%")
+
+    # 2 穿损扛单：止损形同虚设
+    held = sum(
+        1 for t in closed if t.get("stop_points") and t.get("exit")
+        and (1 if t["direction"] == "long" else -1) * (float(t["exit"]) - float(t["entry"]))
+        < -float(t["stop_points"]) * 1.1
+    )
+    add("穿损扛单", held, len(closed), f"{held}/{len(closed)} 笔超过止损 10% 才离场",
+        "止损是保险不是建议：触发即离场，「等回本」的代价是主动权持续流失", weight=1.2)
+
+    # 3 持亏砍盈（处置效应）：亏损单比盈利单拿得久
+    wins_h = [t["hold_min"] for t in closed if float(t["result_pts"]) > 0 and t.get("hold_min") is not None]
+    loss_h = [t["hold_min"] for t in closed if float(t["result_pts"]) < 0 and t.get("hold_min") is not None]
+    if wins_h and loss_h and sum(loss_h) / len(loss_h) > sum(wins_h) / len(wins_h) * 1.3:
+        add("持亏砍盈（处置效应）", len(loss_h), len(closed),
+            f"亏损单平均持 {sum(loss_h) / len(loss_h):.0f} 分钟 vs 盈利单 {sum(wins_h) / len(wins_h):.0f} 分钟",
+            "规则对调：盈利单按计划走到目标（浮盈回撤过半才走），亏损单到止损无条件走")
+
+    # 4 盈亏比倒挂：赚小赔大
+    wins = [float(t["result_pts"]) for t in closed if float(t["result_pts"]) > 0]
+    losses = [float(t["result_pts"]) for t in closed if float(t["result_pts"]) < 0]
+    if wins and losses and sum(wins) / len(wins) < abs(sum(losses) / len(losses)) * 0.7:
+        add("盈亏比倒挂", len(losses), len(closed),
+            f"平均盈利 {sum(wins) / len(wins):+.0f} 点 vs 平均亏损 {sum(losses) / len(losses):+.0f} 点",
+            "截断亏损、让利润奔跑——两者规则不能对称")
+
+    # 5 报复性交易：亏损了结后 30 分钟内再开仓
+    seq = sorted(closed, key=lambda t: t.get("closed_ts") or 0)
+    revenge = sum(
+        1 for i, t in enumerate(seq[:-1])
+        if float(t["result_pts"]) < 0 and t.get("closed_ts")
+        and (seq[i + 1].get("ts") or 0) and 0 < seq[i + 1]["ts"] - t["closed_ts"] < 30 * 60 * 1000
+    )
+    add("报复性交易", revenge, len(seq), f"{revenge} 次亏损平仓后 30 分钟内立即开新仓",
+        "亏损后的第一冲动是情绪不是机会：强制冷静期 30 分钟内不开仓", weight=1.2)
+
+    # 6 频繁交易：超过日内开仓上限的天数
+    from collections import Counter
+    daily_max = int(cfg.get("daily_max_trades", 3))
+    by_day = Counter(t.get("date") for t in trades if t.get("date"))
+    over_days = {d: c for d, c in by_day.items() if c > daily_max}
+    add("频繁交易", len(over_days), max(len(by_day), 1),
+        (f"{len(over_days)}/{len(by_day)} 个交易日超过 {daily_max} 笔上限"
+         + (f"（最猛的一天 {max(over_days.values())} 笔）" if over_days else "")),
+        "频率是手续费+情绪双杀：当日达到上限即停止开新仓")
+
+    # 7 连胜后加仓（过度自信）
+    streak_add = sum(
+        1 for i in range(2, len(seq))
+        if all(float(seq[j]["result_pts"]) > 0 for j in range(i - 2, i))
+        and float(seq[i].get("lots") or 1) > float(seq[i - 1].get("lots") or 1)
+    )
+    add("连胜后加仓（过度自信）", streak_add, max(len(seq) - 2, 1),
+        f"{streak_add} 次两连胜后立即加大手数",
+        "仓位由风险预算决定，与连胜次数和心情无关")
+
+    # 8 无视拦截强行开仓：闸门拦下仍 force 通过——最硬的纪律失效证据
+    forced = [t for t in trades if t.get("violation")]
+    add("无视拦截强行开仓", len(forced), len(trades),
+        f"{len(forced)}/{len(trades)} 笔在风险闸门警告后仍强行开仓"
+        + (f"（最近：{'、'.join(t['violation'][0] for t in forced[-2:])}）" if forced else ""),
+        "闸门拦的是统计上最亏钱的入场模式；每次强行通过都是在为「我知道我在干什么」的幻觉付费",
+        weight=1.3)
+
+    flaws.sort(key=lambda f: -f["severity"])
+    return flaws[:8]
+
+
+def _flaw_context() -> str:
+    """缺陷画像注入块（AI 上下文用）"""
+    flaws = _flaw_profile()
+    blocked = len(_load_gate_log())
+    if not flaws and not blocked:
+        return ""
+    lines = [f"- {f['name']}（严重度 {f['severity']}/100）：{f['evidence']}；解药：{f['antidote']}" for f in flaws]
+    head = "【该交易者的散户缺陷画像（由其真实交易记录判定；分析与建议必须优先针对这些缺陷）】"
+    if blocked:
+        lines.append(f"- 🛡️ 闸门拦截战果：{blocked} 次开仓尝试被拦下后放弃（正面信号——拦下的都是统计上最亏钱的模式，值得肯定）")
+    if not flaws:
+        return head + "\n" + lines[-1]
+    return head + "\n" + "\n".join(lines)
+
+
+@app.get("/api/flaw-profile")
+async def flaw_profile_api():
+    return {"ok": True, "flaws": _flaw_profile(), "blocked_count": len(_load_gate_log())}
 
 
 @app.post("/api/discipline/config")
@@ -2602,6 +3298,334 @@ async def ai_review_save(body: ReviewSaveIn):
     )
     await _feishu_append(doc_id, _md_to_feishu_blocks(head + body.report))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- 历史交易 AI 复盘（真实交割数据）
+
+# ---------------------------------------------------------------- 历史交易盘面回放（入场快照 + MFE/MAE）
+
+async def _daily_bars_for(symbol: str) -> list[dict]:
+    """get_daily 标准化为升序日线（date/high/low/close/oi），失败返回空"""
+    try:
+        rows = await get_daily(symbol)
+    except Exception:
+        return []
+    bars = []
+    for r in rows:
+        d = str(r.get("date") or r.get("datetime") or "")[:10]
+        try:
+            bar = {
+                "date": d,
+                "high": float(r.get("high") or 0), "low": float(r.get("low") or 0),
+                "close": float(r.get("close") or 0), "oi": float(r.get("hold") or r.get("position") or 0),
+            }
+        except (TypeError, ValueError):
+            continue
+        if d and bar["close"] > 0:
+            bars.append(bar)
+    bars.sort(key=lambda b: b["date"])
+    return bars
+
+
+def _trade_day_idx(ts_ms: int, bars: list[dict]) -> int:
+    """成交时间 → 所属交易日索引。夜盘（20 点后成交）归属下一根日线；非交易日找下一交易日"""
+    if not ts_ms:
+        return -1
+    try:
+        dt = datetime.fromtimestamp(ts_ms / 1000)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return -1
+    d = dt.strftime("%Y-%m-%d")
+    idx = next((i for i, b in enumerate(bars) if b["date"] == d), -1)
+    if idx < 0:
+        return next((i for i, b in enumerate(bars) if b["date"] > d), -1)
+    if dt.hour >= 20 and idx + 1 < len(bars):
+        return idx + 1
+    return idx
+
+
+def _replay_tag(t: dict, bars: list[dict], mbars: Optional[list] = None) -> tuple[str, dict]:
+    """单笔交易盘面回放：返回 (标注文本, 行为标签字典)。日线不足返回 ("", {})。
+    mbars=15 分钟线 (ms, high, low) 升序列表——覆盖持有窗口时 MFE/MAE 用日内精度。"""
+    if len(bars) < 25:
+        return "", {}
+    ei = _trade_day_idx(t.get("ts") or 0, bars)
+    if ei < 20:
+        return "", {}
+    entry = float(t["entry"])
+    sign = 1 if t["direction"] == "long" else -1
+    is_long = t["direction"] == "long"
+
+    # 合约口径校验：具体月份合约价格与主连日线背离（换月期/非主力成交）时回放无意义，宁缺毋滥
+    b_check = bars[ei]
+    if not (b_check["low"] * 0.9 <= entry <= b_check["high"] * 1.1):
+        return "", {}
+
+    win60 = bars[max(0, ei - 59):ei + 1]
+    hi60 = max(b["high"] for b in win60)
+    lo60 = min(b["low"] for b in win60)
+    pos60 = (entry - lo60) / (hi60 - lo60) * 100 if hi60 > lo60 else 50.0
+    ma20 = sum(b["close"] for b in bars[ei - 19:ei + 1]) / 20
+    dev20 = (entry - ma20) / ma20 * 100
+
+    b0, prev, b5 = bars[ei], bars[ei - 1], bars[ei - 5]
+    rng = b0["high"] - b0["low"]
+    day_pos = (entry - b0["low"]) / rng if rng > 0 else 0.5
+    day_chg = (b0["close"] - prev["close"]) / prev["close"] * 100 if prev["close"] else 0
+    oi5 = (b0["oi"] - b5["oi"]) / b5["oi"] * 100 if b5["oi"] else 0
+    px5 = (b0["close"] - b5["close"]) / b5["close"] * 100 if b5["close"] else 0
+    cap_tag = ("增仓" if oi5 > 1 else "减仓" if oi5 < -1 else "仓平") + \
+              ("上行" if px5 > 0.5 else "下行" if px5 < -0.5 else "横盘")
+
+    flags = {"chase": False, "counter_trend": False, "mfe_capture": None, "mae": None, "exit_early": False}
+    if is_long and day_pos >= 0.78 and day_chg > 0.3:
+        flags["chase"] = True
+    if not is_long and day_pos <= 0.22 and day_chg < -0.3:
+        flags["chase"] = True
+    if (is_long and px5 < -0.5 and pos60 < 35) or (not is_long and px5 > 0.5 and pos60 > 65):
+        flags["counter_trend"] = True
+    against = (is_long and cap_tag in ("增仓下行", "减仓下行")) or (not is_long and cap_tag in ("增仓上行", "减仓上行"))
+
+    tags = []
+    if flags["chase"]:
+        tags.append("追涨杀跌位")
+    if flags["counter_trend"]:
+        tags.append("逆势抄底摸顶")
+    if against:
+        tags.append("逆5日资金")
+    # 展示口径：区间位置夹在 0-100（区间外无百分比意义）；浮盈/浮亏极值越界侧显示"无"
+    head = (f"60日{max(0.0, min(100.0, pos60)):.0f}%分位 距MA20{dev20:+.1f}% "
+            f"5日{cap_tag} 当日区间{max(0.0, min(100.0, day_pos)) * 100:.0f}%")
+    if tags:
+        head += "⚠" + "/".join(tags)
+
+    tail = ""
+    exit_ts = t.get("closed_ts") or 0
+    xi = _trade_day_idx(exit_ts, bars) if exit_ts else ei
+    if xi >= ei:
+        # MFE/MAE 按方向取价：多头看最高/最低，空头看最低/最高（方向反了会把浮盈浮亏互换）。
+        # 15 分钟线完整覆盖持有窗口时用日内精度，否则回退日线近似。
+        mfe = mae = None
+        prec = ""
+        e_ms = t.get("ts") or 0
+        if mbars and e_ms and exit_ts and mbars[0][0] <= e_ms and mbars[-1][0] >= exit_ts:
+            seg_m = [b for b in mbars if e_ms <= b[0] <= exit_ts]
+            if len(seg_m) >= 2:
+                if sign > 0:
+                    mfe = max(b[1] for b in seg_m) - entry
+                    mae = min(b[2] for b in seg_m) - entry
+                else:
+                    mfe = entry - min(b[2] for b in seg_m)
+                    mae = entry - max(b[1] for b in seg_m)
+                prec = "（15分钟精度）"
+        if mfe is None:
+            seg = bars[ei:xi + 1]
+            if sign > 0:
+                mfe = max(b["high"] for b in seg) - entry
+                mae = min(b["low"] for b in seg) - entry
+            else:
+                mfe = entry - min(b["low"] for b in seg)
+                mae = entry - max(b["high"] for b in seg)
+        flags["mfe_capture"] = None
+        flags["mae"] = mae
+        res = float(t["result_pts"]) if t.get("result_pts") is not None else 0.0
+        if mfe > 1e-9:
+            flags["mfe_capture"] = res / mfe
+        # 拿早判定：盈利单只兑现小半浮盈，且出场后 3 根日线继续朝有利方向走
+        post = bars[xi + 1:xi + 4]
+        if flags["mfe_capture"] is not None and 0 < flags["mfe_capture"] < 0.5 and post and t.get("exit"):
+            drift = sign * (post[-1]["close"] - float(t["exit"])) / float(t["exit"]) * 100
+            flags["exit_early"] = drift > 0.5
+        cap_txt = f"（兑现{flags['mfe_capture'] * 100:.0f}%）" if flags["mfe_capture"] is not None and res > 0 else ""
+        mfe_txt = f"{mfe:+.0f}" if mfe > 1e-9 else "无"
+        mae_txt = f"{mae:+.0f}" if mae < -1e-9 else "无"
+        tail = f" | 持有期浮盈极值{mfe_txt} 浮亏极值{mae_txt}{cap_txt}{prec}"
+    return f" [{head}{tail}]", flags
+
+
+def _replay_summary(flag_list: list[dict]) -> list[str]:
+    """回放标签聚合 → 统计行"""
+    if not flag_list:
+        return []
+    n = len(flag_list)
+    chase = sum(1 for f in flag_list if f["chase"])
+    counter = sum(1 for f in flag_list if f["counter_trend"])
+    caps = [f["mfe_capture"] for f in flag_list if f["mfe_capture"] is not None and f["mfe_capture"] > 0]
+    maes = [f["mae"] for f in flag_list if f["mae"] is not None and f["mae"] < 0]
+    early = sum(1 for f in flag_list if f["exit_early"])
+    lines = []
+    if chase or counter:
+        lines.append(f"- 入场质量：追涨杀跌位 {chase}/{n} 笔、逆势抄底摸顶 {counter}/{n} 笔（对照当日区间位置与 5 日趋势自动判定）")
+    if caps:
+        lines.append(f"- 盈利单浮盈兑现率平均 {sum(caps) / len(caps) * 100:.0f}%（实际结果 ÷ 持有期最大浮盈；低=该赚的没赚到）")
+    if maes:
+        avg_mae = sum(maes) / len(maes)
+        lines.append(f"- 持有期最大浮亏平均 {avg_mae:+.0f} 点（入场到出场承受过的最深浮亏=实际扛单深度）")
+    if early:
+        lines.append(f"- 疑似拿早 {early} 笔（盈利单兑现不足一半且出场后继续朝有利方向走）")
+    return lines
+
+
+class TradeReviewIn(BaseModel):
+    days: int = 90      # 0 = 全部历史
+    symbols: list[str] = []
+
+
+@app.post("/api/ai/trade-review")
+async def ai_trade_review(body: TradeReviewIn):
+    """真实交易历史复盘：聚合统计 + 逐笔明细 → 反幻想教练视角的行为模式报告"""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
+    if body.days > 0:
+        cutoff = (datetime.now() - timedelta(days=body.days)).strftime("%Y-%m-%d")
+        closed = [t for t in closed if (t.get("date") or "") >= cutoff]
+    if body.symbols:
+        want = {s.upper() for s in body.symbols}
+        closed = [t for t in closed if t["symbol"].upper() in want]
+    if len(closed) < 3:
+        raise HTTPException(status_code=400, detail=f"样本太少（{len(closed)} 笔已平仓，至少 3 笔才能复盘）——先在「📥 导入交割单」里导入历史数据")
+    closed.sort(key=lambda t: (t.get("closed_ts") or t.get("ts") or 0))
+
+    pts = [float(t["result_pts"]) for t in closed]
+    wins = [p for p in pts if p > 0]
+    losses = [p for p in pts if p < 0]
+    gross_win, gross_loss = sum(wins), abs(sum(losses))
+    # 最长连亏
+    max_lose_streak = cur = 0
+    for p in pts:
+        cur = cur + 1 if p < 0 else 0
+        max_lose_streak = max(max_lose_streak, cur)
+    # 方向偏好
+    longs = [t for t in closed if t["direction"] == "long"]
+    shorts = [t for t in closed if t["direction"] == "short"]
+    # 品种分布
+    by_sym: dict[str, list] = {}
+    for t in closed:
+        by_sym.setdefault(t["symbol"], []).append(float(t["result_pts"]))
+    sym_rows = sorted(by_sym.items(), key=lambda kv: -abs(sum(kv[1])))[:8]
+    # 持仓时长（仅导入数据有 hold_min）：盈利单 vs 亏损单平均持时（持亏砍盈的硬证据）
+    hw = [t["hold_min"] for t in closed if t.get("hold_min") is not None and t["result_pts"] > 0]
+    hl = [t["hold_min"] for t in closed if t.get("hold_min") is not None and t["result_pts"] < 0]
+    # 报复交易 proxy：亏损平仓后 30 分钟内再开仓
+    revenge = 0
+    for i, t in enumerate(closed[:-1]):
+        if float(t["result_pts"]) >= 0 or not t.get("closed_ts"):
+            continue
+        nxt = closed[i + 1]
+        if (nxt.get("ts") or 0) and 0 < nxt["ts"] - t["closed_ts"] < 30 * 60 * 1000:
+            revenge += 1
+    fees_total = round(sum(float(t.get("fees") or 0) for t in closed), 2)
+
+    avg_win_s = f"{sum(wins) / len(wins):+.0f}" if wins else "无"
+    avg_loss_s = f"{sum(losses) / len(losses):+.0f}" if losses else "无"
+    stat_lines = [
+        f"- 已平仓 {len(closed)} 笔：胜率 {len(wins) / len(closed) * 100:.0f}%"
+        f"（盈 {len(wins)} / 亏 {len(losses)}），累计 {sum(pts):+.0f} 点，手续费 ¥{fees_total:,.0f}",
+        f"- 平均盈利 {avg_win_s} 点 vs 平均亏损 {avg_loss_s} 点"
+        f"（盈亏比 {(gross_win / gross_loss) if gross_loss else float('inf'):.2f}）",
+        f"- 最大单笔亏损 {min(pts):+.0f} 点；最长连亏 {max_lose_streak} 笔；最大单笔盈利 {max(pts):+.0f} 点",
+        f"- 方向偏好：多单 {len(longs)} 笔 {sum(float(t['result_pts']) for t in longs):+.0f} 点 / "
+        f"空单 {len(shorts)} 笔 {sum(float(t['result_pts']) for t in shorts):+.0f} 点",
+    ]
+    if hw and hl:
+        stat_lines.append(
+            f"- 持仓时长：盈利单平均 {sum(hw) / len(hw):.0f} 分钟 vs 亏损单平均 {sum(hl) / len(hl):.0f} 分钟"
+            f"（亏损单拿得比盈利单久 = 处置效应实锤）" if sum(hl) / len(hl) > sum(hw) / len(hw) else
+            f"- 持仓时长：盈利单平均 {sum(hw) / len(hw):.0f} 分钟 vs 亏损单平均 {sum(hl) / len(hl):.0f} 分钟")
+    if revenge:
+        stat_lines.append(f"- 亏损平仓后 30 分钟内再开仓：{revenge} 次（报复性交易嫌疑）")
+    if sym_rows:
+        stat_lines.append("分品种（累计点数）："
+                          + "、".join(f"{s} {sum(v):+.0f}点/{len(v)}笔" for s, v in sym_rows))
+
+    # 违规单 vs 正常单绩效对比（强行通过闸门的单，成绩单不会说谎）
+    forced_closed = [t for t in closed if t.get("violation")]
+    if forced_closed:
+        def _mini(items: list) -> str:
+            if not items:
+                return "0 笔"
+            pts_ = [float(t["result_pts"]) for t in items]
+            wins_ = [p for p in pts_ if p > 0]
+            return f"{len(items)} 笔、胜率 {len(wins_) / len(items) * 100:.0f}%、累计 {sum(pts_):+.0f} 点"
+        stat_lines.append(f"- 🚫 违规对比：强行通过闸门的单 {_mini(forced_closed)} vs 听劝的正常单 "
+                          f"{_mini([t for t in closed if not t.get('violation')])}")
+
+    # 盘面回放：预载涉及品种的日线（V8 队列串行，但每品种 30 分钟缓存，只拉一次）
+    # 与 15 分钟线（约 2 个月覆盖——持有窗口在其内的交易 MFE/MAE 用日内精度）
+    symbols_involved = sorted({t["symbol"] for t in closed})
+    bars_map, m15_map = {}, {}
+    for s in symbols_involved:
+        bars_map[s] = await _daily_bars_for(s)
+        try:
+            mrows = await get_minute(s, "15")
+        except Exception:
+            mrows = []
+        idx = []
+        for r in mrows:
+            try:
+                ms = int(datetime.fromisoformat(str(r["datetime"])).timestamp() * 1000)
+                hi_, lo_ = float(r.get("high") or 0), float(r.get("low") or 0)
+                if hi_ > 0 and lo_ > 0:
+                    idx.append((ms, hi_, lo_))
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+        m15_map[s] = idx
+
+    detail = []
+    flag_list = []
+    for t in closed[-40:]:
+        hold = f"（持时{t['hold_min']}分）" if t.get("hold_min") is not None else ""
+        contract = f"({t['contract']})" if t.get("contract") else ""
+        viol = " 🚫强行" if t.get("violation") else ""
+        tag, flags = _replay_tag(t, bars_map.get(t["symbol"], []), m15_map.get(t["symbol"]))
+        if flags:
+            flag_list.append(flags)
+        detail.append(
+            f"- {t.get('date', '')} {t['symbol']}{contract} "
+            f"{'多' if t['direction'] == 'long' else '空'} {t.get('lots', 1)}手 "
+            f"{t['entry']}→{t.get('exit')}{hold} {float(t['result_pts']):+.0f}点{viol}{tag}"
+        )
+    stat_lines.extend(_replay_summary(flag_list))
+
+    holds_open = [t for t in _load_trades() if t.get("status") == "open"]
+    hold_lines = [
+        f"- {t.get('date', '')} {t['symbol']} {'多' if t['direction'] == 'long' else '空'} "
+        f"{t.get('lots', 1)}手 @ {t['entry']}"
+        + (f"（止损 {'未设 ⚠' if not t.get('stop_points') else t['stop_points'] + ' 点'}）")
+        for t in holds_open[:8]
+    ]
+
+    scope = f"近 {body.days} 天" if body.days > 0 else "全部历史"
+    if body.symbols:
+        scope += f"·品种 {'、'.join(body.symbols)}"
+
+    prompt = f"""以下是这位期货散户交易者的真实交割数据复盘范围（{scope}）。数据来自期货公司结算单导入，是客观事实（手记记录可能混入，标注里带「交割单导入」的为真实成交）。
+
+【汇总统计】
+{chr(10).join(stat_lines)}
+
+【逐笔明细】（最多最近 40 笔。每笔末尾 [ ] 内为**入场时刻盘面回放**：60 日分位/距 MA20/5 日资金状态/当日区间位置（⚠行为标签：追涨杀跌位/逆势抄底摸顶/逆5日资金），以及持有期最大浮盈/浮亏与浮盈兑现率——日线粒度近似，夜盘成交归属下一交易日）
+{chr(10).join(detail)}
+
+【当前持仓】
+{chr(10).join(hold_lines) if hold_lines else "无持仓"}
+
+请以反幻想交易教练视角生成历史交易复盘报告（Markdown，## 分节，1000 字内）：
+
+一、行为模式画像：用具体交易举证——追涨杀跌/抄底扛单/频繁交易/报复性交易/持亏砍盈；哪个品种、哪个方向在反复送钱（用分品种统计说话）。盈亏比与持仓时长对比（盈利单 vs 亏损单）是处置效应的硬证据，有数据必须引用。
+二、决策质量审计（盘面回放）：入场快照的 ⚠ 标签逐类清算——追涨杀跌位入场几笔？逆 5 日资金方向开仓几笔、这些单的结果如何？逆势抄底摸顶的单付出了什么代价？浮盈兑现率低+拿早判定=该赚的没赚到，持有期浮亏极值深=实际扛单深度远超表面止损。
+三、人性定律归因：每条行为模式点名支配它的人性定律（损失厌恶/处置效应/锚定/近因外推/踏空焦虑/公平世界幻觉/确认偏误/控制幻觉）。
+四、做对的事：数据能支撑的肯定（顺资金方向的单、拿住的高兑现单、有纪律的离场）。
+五、改进建议：3~5 条可执行建议，逐条对应上述发现，给具体数字标准（如"只顺 5 日资金方向开仓"、"浮盈回撤过半即离场"）。
+
+要求：所有论断引用具体数值与日期；数据缺失明说；不编造。结尾注明不构成投资建议。"""
+
+    report = await _llm_text_retry(prompt, max_tokens=2800)
+    return {
+        "ok": True, "report": report,
+        "stats": {"trades": len(closed), "days": body.days, "symbols": body.symbols,
+                  "win_rate": round(len(wins) / len(closed) * 100, 1), "total_pts": round(sum(pts), 1)},
+    }
 
 
 # ---------------------------------------------------------------- 飞书
@@ -3101,17 +4125,36 @@ async def _generate_report() -> str:
     except Exception:
         pass
 
+    # 宏观要闻 + 自选品种要闻（辅助参考；品种并行抓取）
+    try:
+        nblk = await _news_context(5)
+        if nblk:
+            parts.append(nblk)
+        news_results = await asyncio.gather(*[_variety_news(s, limit=1) for s in syms], return_exceptions=True)
+        v_lines = []
+        for s, res in zip(syms, news_results):
+            if isinstance(res, Exception):
+                continue
+            for it in res:
+                v_lines.append(f"- [{s} {it['time'][5:16] if len(it['time']) >= 16 else it['time']}] {it['title'][:55]}")
+        if v_lines:
+            parts.append("【自选品种要闻（辅助参考：供需/库存/政策事实，不作方向依据）】\n" + "\n".join(v_lines[:6]))
+    except Exception:
+        pass
+
     if not parts:
         return "（暂无可用数据，请稍后重新生成）"
 
     kind = "晨报（日盘前瞻）" if _report_slot().endswith("-am") else "夜报（夜盘前瞻）"
     profile = _profile_context()
+    flaw = _flaw_context()
     prompt = (
         (f"交易者画像：\n{profile}\n\n" if profile else "")
+        + (f"{flaw}\n\n" if flaw else "")
         + f"你是反幻想交易教练。基于以下数据生成{kind}，Markdown 格式：\n"
-        f"## 一、市场情绪概览（3-4 句：各品种散户情绪处于什么阶段，外盘给的基调）\n"
+        f"## 一、市场情绪概览（3-4 句：各品种散户情绪处于什么阶段，外盘与宏观要闻给的情绪基调——要闻只解释情绪来源与跳空风险，不作方向依据）\n"
         f"## 二、分品种博弈要点（每品种 1-2 句：资金方向+散户陷阱+关键价位）\n"
-        f"## 三、今日纪律（3-5 条：结合持仓与诊断问题，给出「不做清单」——今天最不该做的是什么）\n"
+        f"## 三、今日纪律（3-5 条：结合持仓、诊断问题与缺陷画像，给出「不做清单」——今天最不该做的是什么；若上下文带缺陷画像，逐条点名对应缺陷）\n"
         f"要求：客观精炼、全文 600 字以内、全部引用具体数值；结尾注明仅供参考。\n\n"
         + "\n\n".join(parts)
     )
