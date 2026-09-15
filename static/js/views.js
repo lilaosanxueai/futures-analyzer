@@ -222,7 +222,7 @@
     } catch (e) { /* 图表失败不影响页面 */ }
   }
 
-  // 日内分时走势（1 分钟线 + 均价线 + 昨结基准；品种博弈页停留时每分钟自动刷新）
+  // 日内分时走势（1 分钟线 + 均价线 + 昨结基准 + 持仓止损/入场线；品种博弈页停留时每分钟自动刷新）
   let intradayTimer = null;
   async function loadIntradayChart(sym) {
     try {
@@ -231,8 +231,17 @@
       if (!cv) return;
       const items = d.items || [];
       if (items.length < 5) return;
+      // 该品种当前持仓 → 画入场线与止损线（看得见的盾）
+      let hold = null;
+      try {
+        const tr = (await api("/api/trades")).items.find((x) => x.status === "open" && x.symbol === sym);
+        if (tr) {
+          const sg = tr.direction === "long" ? 1 : -1;
+          hold = { entry: tr.entry, stop: tr.stop_points ? tr.entry - sg * tr.stop_points : null };
+        }
+      } catch (e) { /* ignore */ }
       const timeEl = $("#intradayTime");
-      if (timeEl) timeEl.textContent = d.count + " 根 · " + (d.time || "");
+      if (timeEl) timeEl.textContent = d.count + " 根 · " + (d.time || "") + (hold ? " · 🛡️ 已叠加持仓线" : "");
       const dpr = window.devicePixelRatio || 1;
       const w = cv.clientWidth || 640, h = 200;
       cv.width = w * dpr; cv.height = h * dpr;
@@ -243,10 +252,12 @@
       const down = cs.getPropertyValue("--down").trim() || "#22c55e";
       const grid = cs.getPropertyValue("--chart-grid").trim() || "#232b3b";
       const mut = cs.getPropertyValue("--muted").trim() || "#8a93a6";
+      const danger = cs.getPropertyValue("--danger").trim() || "#ef4444";
       const prices = items.map((x) => x.p);
       const vals = prices.concat(items.map((x) => x.a));
       if (d.prev_settle) vals.push(d.prev_settle);
       if (d.last != null) vals.push(d.last);  // 实时价可能超出分钟线范围，纳入刻度防圆点出界
+      if (hold) { vals.push(hold.entry); if (hold.stop != null) vals.push(hold.stop); }
       let lo = Math.min(...vals), hi = Math.max(...vals);
       const pad = (hi - lo) * 0.1 || hi * 0.002;
       lo -= pad; hi += pad;
@@ -270,6 +281,23 @@
         ctx.restore();
         ctx.fillStyle = mut;
         ctx.fillText("昨结 " + Number(d.prev_settle).toFixed(0), w - 78, y(d.prev_settle) - 4);
+      }
+      // 持仓线：入场（灰点线）与止损（红虚线）——危险线看得见
+      if (hold) {
+        ctx.save();
+        ctx.setLineDash([2, 3]);
+        ctx.strokeStyle = cs.getPropertyValue("--text").trim() || "#d6dce5";
+        ctx.beginPath(); ctx.moveTo(40, y(hold.entry)); ctx.lineTo(w - 8, y(hold.entry)); ctx.stroke();
+        ctx.fillStyle = mut;
+        ctx.fillText("入场 " + Number(hold.entry).toFixed(0), 44, y(hold.entry) - 4);
+        if (hold.stop != null) {
+          ctx.setLineDash([7, 4]);
+          ctx.strokeStyle = danger; ctx.lineWidth = 1.6;
+          ctx.beginPath(); ctx.moveTo(40, y(hold.stop)); ctx.lineTo(w - 8, y(hold.stop)); ctx.stroke();
+          ctx.fillStyle = danger;
+          ctx.fillText("止损 " + Number(hold.stop).toFixed(0), 44, y(hold.stop) - 4);
+        }
+        ctx.restore();
       }
       // 价格线（红涨绿跌 vs 昨结）
       const last = d.last != null ? d.last : prices[prices.length - 1];
@@ -424,6 +452,7 @@
         }
         if (t.status === "open") {
           actions =
+            '<button class="link-btn" data-act="care" data-id="' + t.id + '" title="AI 持仓体检">🩺</button>' +
             '<button class="link-btn" data-act="close" data-id="' + t.id + '">了结</button>' +
             '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
         } else {
@@ -445,6 +474,20 @@
       $$("#tradesBody .link-btn").forEach((b) => {
         b.addEventListener("click", async () => {
           const id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
+          if (act === "care") {
+            $("#tradeCareModal").classList.remove("hidden");
+            $("#careTitle").textContent = id;
+            $("#careBody").innerHTML = '<span class="typing">AI 体检中（约 10-30 秒）…</span>';
+            try {
+              const r = await api("/api/trades/" + id + "/review", { method: "POST" });
+              const vTxt = r.verdict === "exit" ? "🚫 建议离场" : r.verdict === "reduce" ? "⚠ 建议减仓" : "✅ 可继续持有";
+              const pnlTxt = r.pnl_pts == null ? "" : "（浮动 " + (r.pnl_pts > 0 ? "+" : "") + r.pnl_pts + " 点 @ " + fmtNum(r.price) + "）";
+              $("#careBody").innerHTML = '<div class="mini-note" style="margin-bottom:8px">判定：<b>' + vTxt + "</b>" + esc(pnlTxt) + "</div>" + md(r.advice);
+            } catch (err) {
+              $("#careBody").innerHTML = '<span style="color:var(--danger)">体检失败：' + esc(err.message) + "</span>";
+            }
+            return;
+          }
           if (act === "del") {
             if (!confirm("删除这条记录？")) return;
             await api("/api/trades/" + id, { method: "DELETE" });

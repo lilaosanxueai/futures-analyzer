@@ -2749,8 +2749,9 @@ _GATE_BEAR_REGIMES = {"低位阴跌", "低位恐慌", "趋势下行", "高位回
 
 
 def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_trades: list) -> list[dict]:
-    """源头拦截器：接飞刀 / 亏损加仓 / 幻想反弹 / 逆资金 / 追涨 / 恐慌追空。
-    返回致命级 blockers（空=放行）。设计：不剥夺开仓自由，但强制二次确认并留违规标记。"""
+    """源头拦截器：接飞刀 / 亏损加仓 / 幻想反弹 / 逆资金 / 追涨 / 恐慌追空 /
+    冷静期 / 日亏停手线 / 日内超频。返回致命级 blockers（空=放行）。
+    设计：不剥夺开仓自由，但强制二次确认并留违规标记。"""
     out = []
     sym = trade["symbol"]
     is_long = trade["direction"] == "long"
@@ -2759,6 +2760,48 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
     def block(code: str, name: str, evidence: str, antidote: str):
         out.append({"code": code, "name": name, "evidence": evidence, "antidote": antidote})
 
+    # ---- 纪律类（用户配置的风控参数，在源头执行）----
+    cfg = load_config()["discipline"]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    cooling_min = float(cfg.get("cooling_min", 30) or 0)
+    if cooling_min > 0:
+        now_ms = int(datetime.now().timestamp() * 1000)
+        last_loss_ts = max(
+            (t.get("closed_ts") or 0) for t in all_trades
+            if t.get("status") == "closed" and (t.get("result_pts") or 0) < 0 and t.get("closed_ts")
+        ) if any(t.get("status") == "closed" and (t.get("result_pts") or 0) < 0 and t.get("closed_ts")
+                 for t in all_trades) else 0
+        if last_loss_ts and now_ms - last_loss_ts < cooling_min * 60 * 1000:
+            remain = (cooling_min * 60 * 1000 - (now_ms - last_loss_ts)) / 60000
+            block("G7", "⏳ 冷静期内（亏损后）",
+                  f"{cooling_min - remain:.0f} 分钟前刚有亏损平仓，{cooling_min:.0f} 分钟冷静期还剩 {remain:.0f} 分钟",
+                  "亏损后的第一冲动是情绪不是机会。冷静期是给大脑的冷却时间——等它走完再评估")
+
+    acct = float(cfg.get("account_size") or 0)
+    if acct > 0:
+        realized = 0.0
+        for t in all_trades:
+            if t.get("date") == today and t.get("status") == "closed" and t.get("result_pts") is not None:
+                m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
+                if m:
+                    realized += float(t["result_pts"]) * m * float(t.get("lots") or 1)
+        stop_line = -acct * float(cfg.get("daily_stop", 3.0)) / 100
+        if realized < stop_line:
+            block("G8", "🛑 日亏已达停手线",
+                  f"今日已实现约 ¥{realized:,.0f}，已越过停手线 ¥{stop_line:,.0f}",
+                  "停手线是体系的最后防线。今天结束了——关掉软件，亏损不会因为再看一眼而变少")
+
+    daily_max = int(cfg.get("daily_max_trades", 3) or 0)
+    if daily_max > 0:
+        today_n = sum(1 for t in all_trades
+                      if t.get("date") == today and t.get("status") in ("open", "closed"))
+        if today_n >= daily_max:
+            block("G9", "🌀 日内开仓已达上限",
+                  f"今日已开 {today_n} 笔（上限 {daily_max}），这是第 {today_n + 1} 笔",
+                  "频繁交易=手续费+情绪双杀。真有机会，明天它还在；没机会，今天开 10 笔也不会有")
+
+    # ---- 盘面类（实时博弈快照）----
     if snap:
         regime = (snap.get("regime") or {}).get("key")
         regime_label = (snap.get("regime") or {}).get("label", "")
@@ -2850,6 +2893,10 @@ async def add_trade(body: TradeIn):
         return {"ok": True, "blocked": True, "blockers": blockers}
     if blockers:
         trade["violation"] = [f"{b['code']} {b['name']}" for b in blockers]
+        vi_txt = "；".join(f"{b['name']}——{b['evidence']}" for b in blockers)
+        asyncio.create_task(_feishu_push(
+            f"🚫 无视闸门强行开仓\n{symbol} {'做多' if body.direction == 'long' else '做空'} "
+            f"{body.lots} 手 @ {body.entry}\n拦截原因：{vi_txt[:600]}\n此单后续将由违规成绩单跟踪"))
     trades.append(trade)
     _save_trades(trades)
     # 开仓即检：问题即时返回前端展示
@@ -2871,6 +2918,110 @@ class TradePatch(BaseModel):
     result_pts: Optional[float] = None
     note: Optional[str] = None
     status: Optional[str] = None
+
+
+@app.post("/api/trades/{trade_id}/review")
+async def trade_review_one(trade_id: str):
+    """持仓 AI 体检：原计划 + 当前博弈快照 → continue/reduce/exit 判定 + 生死价位 + 执行偏差"""
+    t = next((x for x in _load_trades() if x["id"] == trade_id and x.get("status") == "open"), None)
+    if not t:
+        raise HTTPException(status_code=404, detail="持仓记录不存在（或已平仓）")
+    sym = t["symbol"]
+    try:
+        snap = await psych_snapshot(sym)
+    except Exception:
+        snap = None
+    price = (_quote_cache.get(sym, (0, {}))[1] or {}).get("last")
+    if not price:
+        try:
+            price = (await fetch_quote(sym)).get("last")
+        except Exception:
+            price = None
+    sign = 1 if t["direction"] == "long" else -1
+    pnl = round(sign * (float(price) - float(t["entry"])), 1) if price else None
+    context = psy.to_context_text(snap) if snap else "（博弈快照暂不可用：数据源异常）"
+    prompt = f"""你是反幻想交易教练。对用户当前持仓做一次体检，给出明确的动作指导。
+
+【原计划】
+- {sym} {'做多' if t['direction'] == 'long' else '做空'} {t.get('lots', 1)} 手，入场 {t['entry']}，
+  止损 {t.get('stop_points') or '未设 ⚠'} 点，目标 {t.get('target_points') or '未设'} 点
+- 开仓理由：{t.get('note') or '（无记录）'}
+- 现价 {price}，浮动 {pnl:+.1f} 点
+
+【当前博弈快照】
+{context}
+
+输出（Markdown，400 字内）：
+**判定**：continue（持有）/ reduce（减仓）/ exit（离场），三选一
+**依据**：资金方向、位置分位、陷阱结构各一句，引用具体数值
+**建议动作**：可执行的具体动作（移损移到哪个价位、减仓减几成、等什么信号）
+**生死价位**：跌破/升破哪个具体数字必须无条件离场
+**执行偏差**：当前持倧行为与原计划的差距（浮盈后止损未上移/快到目标未处置等；无偏差也要说明）
+
+不迎合：该离场就直说离场。数据缺失明说。结尾注明不构成投资建议。"""
+    advice = await _llm_text_retry(prompt, max_tokens=1400)
+    m = re.search(r"判定[^\n：:]*[：:]\s*\**\s*(continue|reduce|exit|持有|减仓|离场)", advice)
+    if m:
+        verdict = {"持有": "continue", "减仓": "reduce", "离场": "exit"}.get(m.group(1), m.group(1))
+    else:
+        head = advice[:60]
+        verdict = "exit" if "exit" in head or "离场" in head else ("reduce" if ("reduce" in head or "减仓" in head) else "continue")
+    return {"ok": True, "id": trade_id, "symbol": sym, "price": price,
+            "pnl_pts": pnl, "verdict": verdict, "advice": advice}
+
+
+@app.get("/api/shield")
+async def shield_status():
+    """🛡️ 盾状态：今日拦截/违规、持仓风险敞口、日亏停手线消耗"""
+    trades = _load_trades()
+    cfg = load_config()["discipline"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    acct = float(cfg.get("account_size") or 0)
+
+    def _day_of(ms: int) -> str:
+        try:
+            return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return ""
+
+    blocked_today = sum(1 for g in _load_gate_log() if _day_of(g.get("ts") or 0) == today)
+    forced_today = sum(1 for t in trades if t.get("violation") and t.get("date") == today)
+
+    exposure = 0.0
+    no_stop_open = 0
+    open_n = 0
+    for t in trades:
+        if t.get("status") != "open":
+            continue
+        open_n += 1
+        m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
+        stop = t.get("stop_points")
+        if m and stop:
+            exposure += float(stop) * m * float(t.get("lots") or 1)
+        else:
+            no_stop_open += 1
+    exposure_pct = round(exposure / acct * 100, 1) if acct > 0 else None
+
+    stop_used_pct = None
+    realized_txt = None
+    if acct > 0:
+        realized = 0.0
+        for t in trades:
+            if t.get("date") == today and t.get("status") == "closed" and t.get("result_pts") is not None:
+                m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
+                if m:
+                    realized += float(t["result_pts"]) * m * float(t.get("lots") or 1)
+        line = acct * float(cfg.get("daily_stop", 3.0)) / 100
+        realized_txt = f"¥{realized:,.0f} / -¥{line:,.0f}"
+        if line > 0:
+            stop_used_pct = round(min(100.0, max(0.0, -realized / line * 100)), 0)
+    return {
+        "ok": True, "today": today,
+        "blocked_today": blocked_today, "forced_today": forced_today,
+        "open_count": open_n, "no_stop_open": no_stop_open,
+        "exposure_pct": exposure_pct, "stop_used_pct": stop_used_pct,
+        "realized_txt": realized_txt,
+    }
 
 
 @app.patch("/api/trades/{trade_id}")

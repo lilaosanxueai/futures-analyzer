@@ -298,9 +298,34 @@
   FA.on = (name, fn) => { (listeners[name] = listeners[name] || []).push(fn); };
   FA.emit = (name) => { (listeners[name] || []).forEach((fn) => { try { fn(); } catch (e) { } }); };
 
+  // ---------- 🛡️ 盾状态（60 秒一轮） ----------
+  async function pollShield() {
+    const grid = $("#shieldGrid");
+    if (!grid) return;
+    try {
+      const d = await FA.api("/api/shield");
+      const hint = $("#shieldHint");
+      if (hint) {
+        hint.textContent = d.no_stop_open > 0
+          ? "⚠ " + d.no_stop_open + " 笔持仓未设止损"
+          : (d.open_count ? "防线运转中" : "今日无持仓");
+      }
+      const cell = (v, k, cls) =>
+        '<div class="stat-cell"><div class="sc-v ' + (cls || "") + '">' + v + '</div><div class="sc-k">' + k + "</div></div>";
+      const expCls = (d.exposure_pct == null || d.exposure_pct <= 3) ? "" : d.exposure_pct <= 6 ? "" : "num-up";
+      const stopCls = (d.stop_used_pct == null || d.stop_used_pct < 60) ? "" : d.stop_used_pct < 90 ? "" : "num-up";
+      grid.innerHTML =
+        cell(d.blocked_today, "今日闸门拦截", "num-down") +
+        cell(d.forced_today, "今日强行违规", d.forced_today ? "num-up" : "") +
+        cell((d.exposure_pct == null ? "--" : d.exposure_pct + "%"), "持仓风险敞口", expCls) +
+        cell((d.stop_used_pct == null ? "--" : d.stop_used_pct + "%"), "停手线消耗", stopCls);
+    } catch (e) { /* ignore */ }
+  }
+  FA.pollShield = pollShield;
+
   // ---------- 启动轮询 ----------
   FA.startPolling = function () {
-    pollQuotes(); pollIntl(); pollEvents(); pollNews();
+    pollQuotes(); pollIntl(); pollEvents(); pollNews(); pollShield();
     loadDirectory().then(pollPsych);
     clearInterval(quoteTimer);
     quoteTimer = setInterval(pollQuotes, 5000);
@@ -308,6 +333,7 @@
     setInterval(pollIntl, 30000);
     setInterval(pollPsych, 60000);
     setInterval(pollNews, 300000);
+    setInterval(pollShield, 60000);
   };
 
   // 自选删除：行右键移除

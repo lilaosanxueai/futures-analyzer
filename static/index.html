@@ -71,6 +71,11 @@
           <div class="news-list" id="newsList"><span class="empty">加载中…</span></div>
         </div>
 
+        <div class="card" id="shieldCard">
+          <div class="card-head"><h2>🛡️ 散户之盾</h2><span class="muted small" id="shieldHint"></span></div>
+          <div class="stat-grid" id="shieldGrid" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+        </div>
+
         <div class="card" id="eventCard">
           <div class="card-head">
             <h2>预警事件流</h2>
@@ -361,8 +366,16 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20260915a"></script>
-<script src="/static/js/views.js?v=20260915a"></script>
-<script src="/static/js/chat.js?v=20260915a"></script>
+<!-- 持仓体检弹窗 -->
+<div class="modal-mask hidden" id="tradeCareModal">
+  <div class="modal">
+    <div class="modal-head"><h2>🩺 持仓体检 <span class="muted small" id="careTitle"></span></h2><button class="btn ghost sm" data-close="tradeCareModal">✕</button></div>
+    <div class="modal-body"><div id="careBody" class="markdown-body">生成中…</div></div>
+  </div>
+</div>
+
+<script src="/static/js/base.js?v=20260915b"></script>
+<script src="/static/js/views.js?v=20260915b"></script>
+<script src="/static/js/chat.js?v=20260915b"></script>
 </body>
 </html>
