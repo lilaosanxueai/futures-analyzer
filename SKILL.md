@@ -99,7 +99,7 @@ trader_profile.json  交易者画像（风格/教训/规则，注入 AI）
 ## 安装来源
 
 - **GitHub**: [lilaosanxueai/futures-analyzer](https://github.com/lilaosanxueai/futures-analyzer)
-- **版本**: main@de98481（v2.0.0，2026-09-15 同步）
+- **版本**: main@fb87d1c（v2.0.0 + 2026-09-15 强化系列，已推送 GitHub）
 - **语言**: Python 3.12（FastAPI + AkShare + httpx）
 - **本地路径**: `C:\Users\10166\.agents\skills\futures-analyzer`
 - **虚拟环境**: `.venv`（依赖已装：akshare 1.18.94 / fastapi 0.141.1 / pandas 3.0.5 / uvicorn 0.52.4 / pypinyin 0.55.0，v2 依赖无变化，直接复用）
