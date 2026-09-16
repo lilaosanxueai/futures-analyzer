@@ -289,11 +289,12 @@ async def lifespan(_app):
     trail_task = asyncio.create_task(trail_loop())
     psych_task = asyncio.create_task(psych_watch_loop())
     diagnose_task = asyncio.create_task(diagnose_loop())
+    care_task = asyncio.create_task(auto_care_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
-    for t in (warmup_task, monitor_task, trail_task, psych_task,
-              diagnose_task, report_task, selfcheck_task):
+    for t in (warmup_task, monitor_task, trail_task, psych_task, diagnose_task,
+              care_task, report_task, selfcheck_task):
         t.cancel()
 
 
@@ -2730,6 +2731,64 @@ async def diagnose_loop():
         await asyncio.sleep(60)
 
 
+_CARE_COOLDOWN: dict[str, float] = {}
+
+
+async def auto_care_loop():
+    """持仓风险突变自动体检：浮亏达止损 60% 或盘面阶段逆转 → 自动 AI 体检 + 事件流 + 飞书。
+    每笔持仓 4 小时冷却，防止 LLM 轰炸。盾主动出击，不用用户点。"""
+    await asyncio.sleep(150)
+    while True:
+        try:
+            now = datetime.now()
+            if not is_trading_time(now):
+                await asyncio.sleep(60)
+                continue
+            loop_now = asyncio.get_event_loop().time()
+            for t in [x for x in _load_trades() if x.get("status") == "open"]:
+                if loop_now - _CARE_COOLDOWN.get(t["id"], -1e9) < 4 * 3600:
+                    continue
+                stop = t.get("stop_points")
+                try:
+                    snap = await psych_snapshot(t["symbol"])
+                except Exception:
+                    continue
+                ts_, q = _quote_cache.get(t["symbol"], (0, {}))
+                price = (q or {}).get("last")
+                if not price:
+                    continue
+                sign = 1 if t["direction"] == "long" else -1
+                pnl = sign * (float(price) - float(t["entry"]))
+                near_stop = bool(stop) and pnl <= -float(stop) * 0.6
+                regime = (snap.get("regime") or {}).get("key")
+                adverse = (t["direction"] == "long" and regime in _GATE_BEAR_REGIMES) or \
+                          (t["direction"] == "short" and regime in ("趋势上行", "高位加速"))
+                if not (near_stop or adverse):
+                    continue
+                _CARE_COOLDOWN[t["id"]] = loop_now
+                try:
+                    r = await trade_review_one(t["id"])
+                    v_txt = {"exit": "建议离场", "reduce": "建议减仓"}.get(r.get("verdict"), "继续观察")
+                    why = "浮亏逼近止损" if near_stop else "盘面阶段逆转"
+                    _emit_event({
+                        "id": f"care-{t['id']}-{int(loop_now)}",
+                        "ts": int(datetime.now().timestamp() * 1000),
+                        "kind": "diag", "etype": "AUTOCARE", "level": "fatal",
+                        "symbol": t["symbol"], "name": "", "dir": "down", "price": r.get("price"),
+                        "text": f"🩺 自动体检（{why}）：{v_txt}，浮动 {r.get('pnl_pts')} 点",
+                        "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": False,
+                        "ai": (r.get("advice") or "")[:600],
+                    }, feishu=True,
+                        feishu_text=f"🩺 持仓自动体检（{why}）\n{t['symbol']} "
+                                    f"{'多' if t['direction'] == 'long' else '空'} 浮动 {r.get('pnl_pts')} 点 → {v_txt}\n\n"
+                                    f"{(r.get('advice') or '')[:800]}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(180)
+
+
 @app.get("/api/diagnosis")
 async def diagnosis():
     loop_now = asyncio.get_event_loop().time()
@@ -2748,6 +2807,37 @@ async def diagnosis():
 # ---------------------------------------------------------------- 开仓闸门（散户高发亏钱模式的源头拦截）
 
 _GATE_BEAR_REGIMES = {"低位阴跌", "低位恐慌", "趋势下行", "高位回落"}
+
+# 闸门命中 → 支配情绪推断（情绪是行为的根，拦截类型就是情绪证据）
+_GATE_MOOD = (
+    ("G7", "报复冲动"), ("G4", "FOMO 追涨"), ("G1b", "恐慌追空"),
+    ("G6", "摊平执念"), ("G2", "抄底贪婪"), ("G1", "接飞刀冲动"),
+    ("G9", "手痒超频"), ("G3", "逆势执念"), ("G8", "失控硬扛"),
+)
+
+
+def _infer_mood(blockers: list[dict]) -> str:
+    codes = {b["code"] for b in blockers}
+    for code, mood in _GATE_MOOD:
+        if code in codes:
+            return mood
+    return "未分类冲动"
+
+
+def _suggested_lots(symbol: str, stop_points: float) -> Optional[float]:
+    """风险预算制建议手数：账户 × 单笔风险% ÷（止损点数 × 合约乘数）"""
+    if not stop_points or stop_points <= 0:
+        return None
+    cfg = load_config()["discipline"]
+    acct = float(cfg.get("account_size") or 0)
+    m = CONTRACT_MULTIPLIER.get(_variety_prefix(symbol))
+    if acct <= 0 or not m:
+        return None
+    per_lot_risk = stop_points * m
+    if per_lot_risk <= 0:
+        return None
+    budget = acct * float(cfg.get("risk_per_trade", 1.0)) / 100
+    return int(budget // per_lot_risk)
 
 
 def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_trades: list) -> list[dict]:
@@ -2886,15 +2976,20 @@ async def add_trade(body: TradeIn):
     except Exception:
         pass
     blockers = _entry_gate(trade, snap, price, trades)
+    mood = _infer_mood(blockers) if blockers else "平静"
+    sug_lots = _suggested_lots(symbol, body.stop_points)
     if blockers and not body.force:
         log = _load_gate_log()
         log.append({"ts": now_ms, "symbol": symbol, "direction": body.direction,
                     "entry": body.entry, "codes": [b["code"] for b in blockers],
-                    "names": [b["name"] for b in blockers]})
+                    "names": [b["name"] for b in blockers], "mood": mood})
         _save_gate_log(log)
-        return {"ok": True, "blocked": True, "blockers": blockers}
+        return {"ok": True, "blocked": True, "blockers": blockers,
+                "mood": mood, "suggested_lots": sug_lots}
     if blockers:
         trade["violation"] = [f"{b['code']} {b['name']}" for b in blockers]
+        trade["mood"] = mood
+        vi_txt = "；".join(f"{b['name']}——{b['evidence']}" for b in blockers)
         vi_txt = "；".join(f"{b['name']}——{b['evidence']}" for b in blockers)
         asyncio.create_task(_feishu_push(
             f"🚫 无视闸门强行开仓\n{symbol} {'做多' if body.direction == 'long' else '做空'} "
@@ -2912,7 +3007,8 @@ async def add_trade(body: TradeIn):
                                     "频繁交易=手续费+情绪双杀。这是今日最后一笔。", symbol, trade["id"]))
     asyncio.create_task(_diagnosis_scan(push=True))
     return {"ok": True, "item": trade, "warnings": warnings_list,
-            "forced": bool(trade.get("violation")), "blockers": blockers}
+            "forced": bool(trade.get("violation")), "blockers": blockers,
+            "mood": mood, "suggested_lots": sug_lots}
 
 
 class TradePatch(BaseModel):
@@ -3361,7 +3457,10 @@ def _flaw_context() -> str:
     lines = [f"- {f['name']}（严重度 {f['severity']}/100）：{f['evidence']}；解药：{f['antidote']}" for f in flaws]
     head = "【该交易者的散户缺陷画像（由其真实交易记录判定；分析与建议必须优先针对这些缺陷）】"
     if blocked:
-        lines.append(f"- 🛡️ 闸门拦截战果：{blocked} 次开仓尝试被拦下后放弃（正面信号——拦下的都是统计上最亏钱的模式，值得肯定）")
+        from collections import Counter as _Cnt
+        moods = _Cnt(g.get("mood") for g in _load_gate_log() if g.get("mood"))
+        mood_txt = "、".join(f"{k} {v} 次" for k, v in moods.most_common(3))
+        lines.append(f"- 🛡️ 闸门拦截战果：{blocked} 次（{mood_txt}）——正面信号：拦下的都是统计上最亏钱的模式，值得肯定")
     if not flaws:
         return head + "\n" + lines[-1]
     return head + "\n" + "\n".join(lines)
@@ -3804,6 +3903,18 @@ async def ai_trade_review(body: TradeReviewIn):
             return f"{len(items)} 笔、胜率 {len(wins_) / len(items) * 100:.0f}%、累计 {sum(pts_):+.0f} 点"
         stat_lines.append(f"- 🚫 违规对比：强行通过闸门的单 {_mini(forced_closed)} vs 听劝的正常单 "
                           f"{_mini([t for t in closed if not t.get('violation')])}")
+
+    # 情绪画像（闸门推断）：什么心情下最亏钱
+    mood_groups: dict[str, list[float]] = {}
+    for t in closed:
+        if t.get("mood"):
+            mood_groups.setdefault(t["mood"], []).append(float(t["result_pts"]))
+    if len(mood_groups) >= 1:
+        parts = []
+        for mo, pts_ in sorted(mood_groups.items(), key=lambda kv: sum(kv[1])):
+            wins_ = [p for p in pts_ if p > 0]
+            parts.append(f"{mo} {sum(pts_):+.0f}点/{len(pts_)}笔（胜率 {len(wins_) / len(pts_) * 100:.0f}%）")
+        stat_lines.append("- 情绪画像（开仓时闸门推断的主导情绪，按累计点数升序=最伤钱的在前）：" + "、".join(parts))
 
     # 盘面回放：预载涉及品种的日线（V8 队列串行，但每品种 30 分钟缓存，只拉一次）
     # 与 15 分钟线（约 2 个月覆盖——持有窗口在其内的交易 MFE/MAE 用日内精度）

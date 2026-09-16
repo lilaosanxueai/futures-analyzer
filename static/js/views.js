@@ -548,16 +548,32 @@
       let d = await submitTrade(payload);
       // 开仓闸门：致命模式拦截 → 红色风险确认（强行通过会留违规标记并计入缺陷画像）
       if (d.blocked && (d.blockers || []).length) {
+        const sugTxt = d.suggested_lots != null
+          ? '<div class="mini-note">📏 风险预算建议手数：≤ ' + d.suggested_lots + " 手（账户单笔风险 ÷ 止损额）</div>" : "";
         warnBox.classList.remove("hidden");
         warnBox.innerHTML =
-          '<div class="tw-item fatal"><b>🚫 开仓闸门拦截（高发亏钱模式）</b></div>' +
+          '<div class="tw-item fatal"><b>🚫 开仓闸门拦截</b>（主导情绪判定：' + esc(d.mood || "--") + "）</div>" +
           d.blockers.map((b) =>
             '<div class="tw-item fatal"><b>' + esc(b.name) + "</b>" + esc(b.evidence) +
             "<br><span class=\"muted\">→ " + esc(b.antidote) + "</span></div>").join("") +
-          '<div style="display:flex;gap:8px;margin-top:8px">' +
+          sugTxt +
+          '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
           '<button class="btn" id="btnGateCancel">🧘 放弃，再想想</button>' +
+          '<button class="btn ghost" id="btnGateAsk">🧠 问教练：为什么拦我</button>' +
           '<button class="btn danger" id="btnGateForce">⚠ 我知道风险，仍要开仓（记录违规）</button></div>';
         $("#btnGateCancel").addEventListener("click", () => warnBox.classList.add("hidden"));
+        $("#btnGateAsk").addEventListener("click", () => {
+          const q = "我刚想开仓被闸门拦下了。情形：" +
+            d.blockers.map((b) => b.name + "（" + b.evidence + "）").join("；") +
+            "。请拆穿我此刻的幻想（主导情绪判定：" + (d.mood || "") + "），并告诉我什么条件下这个方向才值得做。";
+          const chatSel = $("#chatSymbol");
+          if (chatSel) chatSel.value = payload.symbol || "";
+          $("#chatInput").value = q;
+          const tab = document.querySelector('.tab[data-view="work"]');
+          if (tab) tab.click();
+          warnBox.classList.add("hidden");
+          setTimeout(() => $("#btnChatSend").click(), 350);
+        });
         $("#btnGateForce").addEventListener("click", async () => {
           try {
             d = await submitTrade(Object.assign({}, payload, { force: 1 }));
@@ -577,20 +593,23 @@
   });
 
   function renderTradeResult(d, warnBox) {
+    const sug = d.suggested_lots != null
+      ? '<div class="mini-note">📏 风险预算建议手数：≤ ' + d.suggested_lots + " 手</div>" : "";
     if (d.forced) {
       warnBox.classList.remove("hidden");
       warnBox.innerHTML = '<div class="tw-item fatal"><b>🚫 已强行开仓（违规标记：</b>' +
-        (d.blockers || []).map((b) => esc(b.name)).join("、") + '<b>）</b>——这笔的后续将由缺陷画像跟踪。</div>';
+        (d.blockers || []).map((b) => esc(b.name)).join("、") + '<b>）</b>——主导情绪：' + esc(d.mood || "--") +
+        "，这笔的后续将由缺陷画像与违规成绩单跟踪。</div>" + sug;
       return;
     }
     if ((d.warnings || []).length) {
       warnBox.classList.remove("hidden");
       warnBox.innerHTML = d.warnings.map((w) =>
         '<div class="tw-item ' + w.sev + '"><b>' + (w.sev === "fatal" ? "🚫" : w.sev === "warn" ? "⚠" : "ℹ") + " " + esc(w.title) + "</b>" +
-        esc(w.evidence) + "<br><span class=\"muted\">→ " + esc(w.advice) + "</span></div>").join("");
+        esc(w.evidence) + "<br><span class=\"muted\">→ " + esc(w.advice) + "</span></div>").join("") + sug;
     } else {
       warnBox.classList.remove("hidden");
-      warnBox.innerHTML = '<div class="tw-item info"><b>✅ 开仓检查通过</b>有止损、不逆势、不超频——保持住。</div>';
+      warnBox.innerHTML = '<div class="tw-item info"><b>✅ 开仓检查通过</b>有止损、不逆势、不超频——保持住。</div>' + sug;
     }
   }
 
