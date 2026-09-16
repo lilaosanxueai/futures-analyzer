@@ -2998,6 +2998,11 @@ async def add_trade(body: TradeIn):
     _save_trades(trades)
     # 开仓即检：问题即时返回前端展示
     warnings_list = await _diagnose_trade(trade, snap, price)
+    if not (body.note or "").strip():
+        warnings_list.append(_issue("D14", "warn", "开仓无理由记录",
+                                    "本笔未填写开仓理由",
+                                    "理由写不出来=没想清楚这笔靠什么赚钱。每个开仓都该有一句能被事后验证的逻辑（回放复盘也要靠它）。",
+                                    symbol, trade["id"]))
     # 当日超限也属于开仓时点问题
     today_n = sum(1 for t in trades if t.get("date") == trade["date"] and t.get("status") in ("open", "closed"))
     daily_max = int(load_config()["discipline"].get("daily_max_trades", 3))
@@ -3224,6 +3229,47 @@ async def shield_status():
     }
 
 
+def _exit_mood(t: dict) -> str:
+    """平仓情绪推断：出场行为对照计划（目标/止损）给出定性"""
+    if t.get("result_pts") is None or t.get("exit") is None:
+        return ""
+    res = float(t["result_pts"])
+    stop = float(t.get("stop_points") or 0)
+    target = float(t.get("target_points") or 0)
+    if res < 0 and stop and res <= -stop * 0.9:
+        return "止损执行"
+    if res < 0:
+        return "未到损提前认错"
+    if target and res >= target * 0.9:
+        return "按计划兑现"
+    return "半途兑现"
+
+
+def _post_close_review(t: dict):
+    """平仓后 AI 单笔复盘（异步触发）：计划 vs 实际 → 一句教训进事件流，趁热打铁"""
+    async def _job():
+        try:
+            sign_txt = "做多" if t["direction"] == "long" else "做空"
+            prompt = f"""你是反幻想交易教练。一笔交易刚刚平仓，请用 150 字内点评（ Markdown 不用标题）：
+- {t['symbol']} {sign_txt} {t.get('lots', 1)} 手 @ {t['entry']}，止损 {t.get('stop_points') or '未设'} 点、目标 {t.get('target_points') or '未设'} 点
+- 开仓理由：{t.get('note') or '（无记录）'}；主导情绪：{t.get('mood') or '平静'}
+- 实际出场 {t.get('exit')}，结果 {t['result_pts']:+.1f} 点（平仓定性：{_exit_mood(t)}），持有 {t.get('hold_min') or '?'} 分钟
+请回答两点：①这笔执行与计划的差距（好或坏都点名）；②给下次的一句话教训。不构成投资建议。"""
+            advice = await _llm_text_retry(prompt, max_tokens=700)
+            _emit_event({
+                "id": f"crev-{t['id']}-{int(datetime.now().timestamp() * 1000)}",
+                "ts": int(datetime.now().timestamp() * 1000),
+                "kind": "diag", "etype": "CLOSE_REVIEW", "level": "info",
+                "symbol": t["symbol"], "name": "", "dir": "down", "price": t.get("exit"),
+                "text": f"📋 平仓复盘（{_exit_mood(t)} {t['result_pts']:+.1f} 点）",
+                "chg5": 0.0, "chg15": 0.0, "threshold": 0.0, "intl": False,
+                "ai": advice,
+            })
+        except Exception:
+            pass
+    asyncio.create_task(_job())
+
+
 @app.patch("/api/trades/{trade_id}")
 async def patch_trade(trade_id: str, body: TradePatch):
     trades = _load_trades()
@@ -3247,6 +3293,9 @@ async def patch_trade(trade_id: str, body: TradePatch):
                 t["status"] = "closed"
             if not t.get("closed_ts"):
                 t["closed_ts"] = int(datetime.now().timestamp() * 1000)
+            if body.exit is not None and not t.get("exit_mood"):
+                t["exit_mood"] = _exit_mood(t)
+                _post_close_review(t)  # 趁热打铁：平仓即复盘
         _save_trades(trades)
         return {"ok": True, "item": t}
     raise HTTPException(status_code=404, detail="交易记录不存在")

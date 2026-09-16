@@ -260,6 +260,23 @@
   FA.pollNews = pollNews;
 
   // ---------- 事件流 ----------
+  // 桌面通知：fatal 级事件与哨兵触发弹系统通知（页面最小化也能看到）；首次点击时申请权限
+  let notifyReady = false;
+  function requestNotify() {
+    if (notifyReady || !("Notification" in window)) return;
+    notifyReady = true;
+    if (Notification.permission === "default") Notification.requestPermission();
+  }
+  document.addEventListener("click", requestNotify, { once: true });
+
+  function desktopNotify(ev) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      const body = (ev.text || "").slice(0, 120);
+      new Notification(ev.symbol ? `${ev.symbol} 盾预警` : "盾预警", { body, tag: ev.id, silent: false });
+    } catch (e) { /* ignore */ }
+  }
+
   function eventHtml(ev) {
     const t = new Date(ev.ts || Date.now());
     const hhmm = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
@@ -287,7 +304,18 @@
     if (!el) return;
     try {
       const d = await FA.api("/api/monitor/events?limit=30");
-      el.innerHTML = (d.events || []).map(eventHtml).join("") || '<div class="empty">暂无事件</div>';
+      const evs = d.events || [];
+      el.innerHTML = evs.map(eventHtml).join("") || '<div class="empty">暂无事件</div>';
+      // 桌面通知：新到的 fatal / 哨兵触发（以 ts 去重，localStorage 记最后通知时间）
+      const lastKey = "fa_last_notify_ts";
+      const lastTs = LS.get(lastKey, 0);
+      let maxTs = lastTs;
+      evs.forEach((ev) => {
+        const ts = ev.ts || 0;
+        if (ts > maxTs) maxTs = ts;
+        if (ts > lastTs && (ev.level === "fatal" || ev.kind === "alert")) desktopNotify(ev);
+      });
+      if (maxTs > lastTs) LS.set(lastKey, maxTs);
     } catch (e) { /* ignore */ }
   }
   FA.pollEvents = pollEvents;

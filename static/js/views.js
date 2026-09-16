@@ -434,6 +434,48 @@
     }
   }
 
+  // 累计点数权益曲线（已平仓单按时间累积——盈亏轨迹一眼看清）
+  function drawEquity(items) {
+    const cv = $("#equityChart");
+    if (!cv) return;
+    const closed = items
+      .filter((t) => t.status === "closed" && t.result_pts != null && t.closed_ts)
+      .sort((a, b) => a.closed_ts - b.closed_ts);
+    if (closed.length < 2) { cv.style.display = "none"; return; }
+    cv.style.display = "";
+    let cum = 0;
+    const cums = closed.map((t) => (cum += t.result_pts));
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth || 400, h = 120;
+    cv.width = w * dpr; cv.height = h * dpr;
+    const ctx = cv.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const cs = getComputedStyle(document.body);
+    const grid = cs.getPropertyValue("--chart-grid").trim() || "#232b3b";
+    const mut = cs.getPropertyValue("--muted").trim() || "#8a93a6";
+    const up = cs.getPropertyValue("--up").trim() || "#f34e4e";
+    const down = cs.getPropertyValue("--down").trim() || "#22c55e";
+    const lo = Math.min(0, ...cums), hi = Math.max(0, ...cums);
+    const pad = (hi - lo) * 0.1 || 1;
+    const top = 8, bottom = 16;
+    const y = (v) => top + (1 - (v - lo + pad) / (hi - lo + pad * 2)) * (h - top - bottom);
+    const x = (i) => 8 + (i / (cums.length - 1)) * (w - 16);
+    ctx.strokeStyle = grid; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(w, y(0)); ctx.stroke();
+    ctx.fillStyle = mut; ctx.font = "10px sans-serif";
+    ctx.fillText("0", 2, y(0) - 3);
+    ctx.fillText(String(Math.round(cums[cums.length - 1])), 2, 10);
+    ctx.strokeStyle = cums[cums.length - 1] >= 0 ? up : down;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    cums.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+    ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.arc(x(cums.length - 1), y(cums[cums.length - 1]), 3, 0, 7); ctx.fill();
+    ctx.fillStyle = mut;
+    ctx.fillText("累计点数（" + closed.length + " 笔已平）", 34, h - 4);
+  }
+
   async function loadTrades() {
     const body = $("#tradesBody");
     try {
@@ -471,6 +513,7 @@
           '<td class="r">' + pnlHtml + "</td>" +
           "<td>" + actions + "</td></tr>";
       }).join("");
+      drawEquity(d.items || []);
       $$("#tradesBody .link-btn").forEach((b) => {
         b.addEventListener("click", async () => {
           const id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
@@ -511,7 +554,18 @@
             if (!confirm("删除这条记录？")) return;
             await api("/api/trades/" + id, { method: "DELETE" });
           } else {
-            const exitStr = prompt("了结价（留空=仅标记为了结，不填盈亏）\n提示：填了结价可自动计算盈亏点数", "");
+            const lv = t.live || {};
+            let hint = "";
+            if (lv.pnl_pts != null) {
+              hint = lv.pnl_pts > 0 ? `当前浮动 +${lv.pnl_pts} 点` : `当前浮动 ${lv.pnl_pts} 点`;
+              if (t.target_points && lv.pnl_pts > 0 && lv.pnl_pts < t.target_points * 0.5)
+                hint += "\n⚠ 浮盈未及目标一半——确认不是怕回吐的早兑现？（处置效应）";
+              if (lv.pnl_pts < 0 && t.stop_points && lv.pnl_pts > -t.stop_points)
+                hint += "\n未到止损离场：若是主动认错可以；若是恐慌，请再看一眼计划。";
+              if (t.stop_points && lv.pnl_pts <= -t.stop_points)
+                hint += "\n止损已破——现在离场是执行纪律，不是认输。";
+            }
+            const exitStr = prompt("了结价（留空=仅标记了结，不填盈亏）\n" + hint, "");
             if (exitStr === null) return;
             const body = {};
             if (exitStr.trim() !== "" && !isNaN(parseFloat(exitStr))) body.exit = parseFloat(exitStr);
