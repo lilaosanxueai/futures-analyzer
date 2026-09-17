@@ -163,10 +163,14 @@
 
   function fillSymbolSelects() {
     const items = FA.state.dirItems;
-    if (!items.length) return;
     ["#psychSymbol", "#tfSymbol"].forEach((sel) => {
       const el = $(sel);
       if (!el) return;
+      if (!items.length) {
+        // 目录未就绪（数据源限流退避中）：明确提示而非留空，重试到位后自动填充
+        el.innerHTML = '<option value="">目录加载中…（每分钟自动重试）</option>';
+        return;
+      }
       const cur = el.value;
       el.innerHTML = '<option value="">选择品种…</option>' + items.map((it) =>
         '<option value="' + it.symbol + '">' + FA.esc(it.symbol + " " + it.name) + "</option>").join("");
