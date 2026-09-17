@@ -155,7 +155,10 @@
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>🐑 你的散户缺陷画像 <span class="muted small">真实交易数据判定 · 注入 AI 与晨夜报</span></h2></div>
+          <div class="card-head">
+            <h2>🐑 你的散户缺陷画像 <span class="muted small">真实交易数据判定 · 注入 AI 与晨夜报</span></h2>
+            <button class="btn ghost sm" id="btnShieldWeekly">📋 盾周报</button>
+          </div>
           <div id="flawBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
       </div>
@@ -191,6 +194,7 @@
             <div class="head-actions">
               <button class="btn ghost sm" id="btnImport">📥 导入交割单</button>
               <button class="btn ghost sm" id="btnTradeReview">🧠 历史复盘</button>
+              <button class="btn ghost sm" id="btnExportCsv">📤 导出 CSV</button>
             </div>
           </div>
           <table class="table trades-table">
@@ -375,8 +379,21 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20260915b"></script>
-<script src="/static/js/views.js?v=20260915b"></script>
-<script src="/static/js/chat.js?v=20260915b"></script>
+<!-- 盾周报弹窗 -->
+<div class="modal-mask hidden" id="shieldWeeklyModal">
+  <div class="modal wide">
+    <div class="modal-head"><h2>📋 盾周报（近 7 天防线战报）</h2><button class="btn ghost sm" data-close="shieldWeeklyModal">✕</button></div>
+    <div class="modal-body">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:8px">
+        <button class="btn" id="btnWeeklySave">☁ 存飞书</button>
+      </div>
+      <div id="weeklyBody" class="markdown-body"><span class="muted">已平仓 ≥2 笔后可生成——拦截战果、违规检讨、情绪画像、最佳最差执行、下周纪律重点。</span></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/base.js?v=20260915c"></script>
+<script src="/static/js/views.js?v=20260915c"></script>
+<script src="/static/js/chat.js?v=20260915c"></script>
 </body>
 </html>

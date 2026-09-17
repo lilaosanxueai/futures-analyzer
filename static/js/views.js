@@ -912,6 +912,33 @@
     } catch (e) { alert("保存失败：" + e.message); }
   });
 
+  // CSV 导出
+  $("#btnExportCsv").addEventListener("click", () => {
+    window.open("/api/trades/export", "_blank");
+  });
+
+  // 盾周报
+  $("#btnShieldWeekly").addEventListener("click", async () => {
+    $("#shieldWeeklyModal").classList.remove("hidden");
+    const body = $("#weeklyBody");
+    FA._lastWeekly = null;
+    body.innerHTML = '<span class="typing">盾周报生成中（约 30-60 秒）…</span>';
+    try {
+      const d = await api("/api/ai/shield-weekly", { method: "POST" });
+      body.innerHTML = md(d.report);
+      FA._lastWeekly = d;
+    } catch (e) {
+      body.innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + "</span>";
+    }
+  });
+  $("#btnWeeklySave").addEventListener("click", async () => {
+    if (!FA._lastWeekly) { alert("还没有生成周报"); return; }
+    try {
+      await api("/api/ai/review-save", { method: "POST", body: JSON.stringify({ report: FA._lastWeekly.report, stats: FA._lastWeekly.stats }) });
+      alert("已存入飞书《AI 复盘报告》");
+    } catch (e) { alert("保存失败：" + e.message); }
+  });
+
   // 暴露给 tab 切换用
   FA.loadTrades = loadTrades;
   FA.loadDiagnosis = loadDiagnosis;

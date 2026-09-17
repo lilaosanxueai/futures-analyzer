@@ -152,6 +152,7 @@ DEFAULT_CONFIG = {
     "discipline": {
         "account_size": 0.0,       # 账户权益（0=未设置，风险类检查跳过）
         "risk_per_trade": 1.0,     # 单笔风险上限（总资金%）
+        "max_total_risk": 3.0,     # 组合总风险上限（总资金%，全部持仓满打亏损之和）
         "daily_stop": 3.0,         # 日内止损线（总资金%，达到即当日停手）
         "daily_max_trades": 3,     # 日内开仓次数上限
         "cooling_min": 30,         # 亏损后的冷静等待期（分钟）
@@ -2893,6 +2894,30 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
                   f"今日已开 {today_n} 笔（上限 {daily_max}），这是第 {today_n + 1} 笔",
                   "频繁交易=手续费+情绪双杀。真有机会，明天它还在；没机会，今天开 10 笔也不会有")
 
+    # G10 组合总风险：全部持仓满打亏损 + 本笔超上限 → 单笔合规但组合重仓的隐形杠杆
+    max_total = float(cfg.get("max_total_risk", 3.0) or 0)
+    if acct > 0 and max_total > 0:
+        cur_risk = 0.0
+        no_stop_cnt = 0
+        for t in all_trades:
+            if t.get("status") != "open":
+                continue
+            m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
+            s = t.get("stop_points")
+            if m and s:
+                cur_risk += float(s) * m * float(t.get("lots") or 1)
+            else:
+                no_stop_cnt += 1
+        m_new = CONTRACT_MULTIPLIER.get(_variety_prefix(sym))
+        if m_new and trade.get("stop_points"):
+            new_risk = float(trade["stop_points"]) * m_new * float(trade.get("lots") or 1)
+            total_pct = (cur_risk + new_risk) / acct * 100
+            if total_pct > max_total:
+                block("G10", "🎯 组合总风险超限",
+                      f"本笔入组后满打总亏损 ≈ 账户 {total_pct:.1f}%（上限 {max_total:.1f}%）"
+                      + (f"；另有 {no_stop_cnt} 笔无止损持仓未计入（实际更高）" if no_stop_cnt else ""),
+                      "单笔合规≠组合安全：多仓叠加是隐形杠杆。先减旧仓、或等其一了结再开新")
+
     # ---- 盘面类（实时博弈快照）----
     if snap:
         regime = (snap.get("regime") or {}).get("key")
@@ -3340,6 +3365,97 @@ async def get_trades():
             "trail_line": round(tr["peak"] - sign * tr["points"], 2) if tr.get("active") and not tr.get("triggered") else None,
         }
     return {"ok": True, "items": items}
+
+
+@app.get("/api/trades/export")
+async def trades_export():
+    """交易记录 CSV 导出（含 BOM，Excel 中文不乱码）——完整档案：情绪/违规/平仓定性/持时"""
+    from fastapi.responses import Response
+    header = ["日期", "品种", "合约", "方向", "手数", "入场价", "止损点", "目标点", "出场价",
+              "结果点", "状态", "开仓情绪", "平仓定性", "违规", "持时分钟", "备注"]
+    rows = [header]
+    for t in sorted(_load_trades(), key=lambda x: x.get("ts") or 0):
+        rows.append([
+            str(t.get("date", "")), t.get("symbol", ""), str(t.get("contract") or ""),
+            "多" if t.get("direction") == "long" else "空", str(t.get("lots", 1)),
+            str(t.get("entry", "")), str(t.get("stop_points") or ""),
+            str(t.get("target_points") or ""), str(t.get("exit") or ""),
+            str(t.get("result_pts") if t.get("result_pts") is not None else ""),
+            {"open": "持仓中", "closed": "已平仓", "abandoned": "已放弃"}.get(t.get("status"), t.get("status", "")),
+            t.get("mood") or "", t.get("exit_mood") or "",
+            "；".join(t.get("violation") or []), str(t.get("hold_min") or ""),
+            (t.get("note") or "").replace("\n", " "),
+        ])
+
+    def _cell(v: str) -> str:
+        return '"' + v.replace('"', '""') + '"' if ("," in v or '"' in v or "\n" in v) else v
+
+    csv = "\n".join(",".join(_cell(c) for c in r) for r in rows)
+    return Response(
+        content="\ufeff" + csv,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=trades_export.csv"},
+    )
+
+
+@app.post("/api/ai/shield-weekly")
+async def shield_weekly():
+    """盾周报：近 7 天防线战报（拦截/违规/情绪/连胜/盈亏/最佳最差执行）→ AI 教练周总结"""
+    trades = _load_trades()
+    since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    def _d_of(ts) -> str:
+        try:
+            return datetime.fromtimestamp((ts or 0) / 1000).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return ""
+
+    wk_closed = [t for t in trades if t.get("status") == "closed" and (t.get("date") or "") >= since
+                 and t.get("result_pts") is not None]
+    if len(wk_closed) < 2:
+        raise HTTPException(status_code=400, detail="近 7 天已平仓不足 2 笔——数据多一点再出周报更有意义")
+    gate = [g for g in _load_gate_log() if _d_of(g.get("ts")) >= since]
+    viol = [t for t in trades if t.get("violation") and (t.get("date") or "") >= since]
+
+    from collections import Counter
+    gate_moods = Counter(g.get("mood") for g in gate if g.get("mood"))
+    pts = [float(t["result_pts"]) for t in wk_closed]
+    wins = [p for p in pts if p > 0]
+    best = max(wk_closed, key=lambda t: float(t["result_pts"]))
+    worst = min(wk_closed, key=lambda t: float(t["result_pts"]))
+    s = await shield_status()
+    flaws = _flaw_profile()
+
+    def _one(t: dict) -> str:
+        return (f"{t.get('date')} {t['symbol']} {'多' if t['direction'] == 'long' else '空'} "
+                f"{t.get('lots', 1)}手 {t['entry']}→{t.get('exit')} {float(t['result_pts']):+.0f}点"
+                f"（{'、'.join(t.get('violation') or [])}）" if t.get("violation") else
+                f"{t.get('date')} {t['symbol']} {'多' if t['direction'] == 'long' else '空'} "
+                f"{t.get('lots', 1)}手 {t['entry']}→{t.get('exit')} {float(t['result_pts']):+.0f}点")
+
+    lines = [
+        f"- 已平仓 {len(wk_closed)} 笔：胜率 {len(wins) / len(wk_closed) * 100:.0f}%，累计 {sum(pts):+.0f} 点",
+        f"- 闸门拦截 {len(gate)} 次（{('、'.join(f'{k} {v} 次' for k, v in gate_moods.most_common(3))) or '无'}）",
+        f"- 强行违规 {len(viol)} 笔；当前纪律连胜 {s.get('streak', 0)} 天",
+        f"- 最佳：{_one(best)}；最差：{_one(worst)}",
+    ]
+    if flaws:
+        lines.append("- 当前缺陷画像 Top3：" + "；".join(f"{f['name']}（{f['evidence']}）" for f in flaws[:3]))
+    prompt = f"""你是反幻觉交易教练。以下是这位交易者近 7 天的防线战报，请生成盾周报（Markdown，## 分节，700 字内）：
+
+{chr(10).join(lines)}
+
+一、防线战果：拦截与连胜值得怎样的肯定（用数字说话）
+二、违规检讨：强行通过的单付出了什么代价（如无违规则肯定这一点）
+三、情绪画像：什么情绪主导时最容易亏钱/被拦
+四、最佳与最差执行：点名具体交易，好经验固定成规则、坏教训给出对策
+五、下周纪律重点：3 条可执行清单（逐条对应上述发现，给数字标准）
+
+要求：引用具体数值与日期，数据缺失明说，不编造。结尾注明不构成投资建议。"""
+    report = await _llm_text_retry(prompt, max_tokens=2400)
+    return {"ok": True, "report": report,
+            "stats": {"trades": len(wk_closed), "blocked": len(gate), "forced": len(viol),
+                      "streak": s.get("streak", 0), "total_pts": round(sum(pts), 1)}}
 
 
 @app.get("/api/trades/stats")
@@ -4537,6 +4653,35 @@ async def _generate_report() -> str:
                 lines.append(f"- {it['name']}：{it['last']}（{'+' if (pct or 0) >= 0 else ''}{pct}%）")
         if lines:
             parts.append("【外盘大势锚】\n" + "\n".join(lines))
+    except Exception:
+        pass
+
+    # 昨日执行回顾（闸门/违规/平仓定性的每日闭环，晨报最有用）
+    try:
+        yd = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        def _d_of(ts) -> str:
+            try:
+                return datetime.fromtimestamp((ts or 0) / 1000).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OSError, OverflowError):
+                return ""
+
+        all_trades_ = _load_trades()
+        y_open = [t for t in all_trades_ if t.get("date") == yd]
+        y_forced = sum(1 for t in y_open if t.get("violation"))
+        y_closed = [t for t in all_trades_ if t.get("status") == "closed" and _d_of(t.get("closed_ts")) == yd]
+        exit_moods: dict[str, int] = {}
+        for t in y_closed:
+            exit_moods[t.get("exit_mood") or "未定性"] = exit_moods.get(t.get("exit_mood") or "未定性", 0) + 1
+        y_blocked = sum(1 for g in _load_gate_log() if _d_of(g.get("ts")) == yd)
+        y_pts = sum(float(t["result_pts"]) for t in y_closed if t.get("result_pts") is not None)
+        if y_open or y_closed or y_blocked:
+            mood_txt = "、".join(f"{k} {v} 笔" for k, v in exit_moods.items()) or "无"
+            parts.append(
+                f"【昨日执行回顾】开仓 {len(y_open)} 笔（强行违规 {y_forced}）；闸门拦截 {y_blocked} 次；"
+                f"平仓 {len(y_closed)} 笔（{mood_txt}），当日已实现 {y_pts:+.0f} 点"
+                + ("——拦截全部放弃，纪律连胜保持 ✅" if (y_blocked and not y_forced) else "")
+            )
     except Exception:
         pass
 
