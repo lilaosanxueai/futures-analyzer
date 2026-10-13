@@ -115,6 +115,14 @@
         </div>
         <div class="rb-conclusion">${esc(s.conclusion || "")}</div>
       </div>
+${(s.variety_profile || "").split("｜").filter(Boolean).length > 1 ? `
+      <div class="card" id="vpCard">
+        <div class="card-head"><h2>📋 品种档案 <span class="muted small">核心矛盾 · 季节性 · 散户死法 · 该盯什么</span></h2></div>
+        <div class="kv-list" style="padding:8px 14px">
+          ${(s.variety_profile || "").split("｜").filter(Boolean).map((seg) =>
+            '<div class="kv"><span class="v" style="text-align:left">' + esc(seg) + "</span></div>").join("")}
+        </div>
+      </div>` : ""}
 
       <div class="card" id="intradayCard">
         <div class="card-head"><h2>日内分时走势 <span class="muted small">1 分钟线 · 黄线=均价 · 虚线=昨结</span></h2><span class="muted small" id="intradayTime"></span></div>

@@ -373,9 +373,33 @@
   }
   FA.pollShield = pollShield;
 
+  // ---------- 热度榜（全市场成交量 Top10，5 分钟一轮） ----------
+  async function pollHot() {
+    const el = $("#hotList");
+    if (!el) return;
+    try {
+      const d = await FA.api("/api/hot-rank");
+      const items = d.items || [];
+      el.innerHTML = items.map((it, i) => {
+        const vol = it.volume >= 1e8 ? (it.volume / 1e8).toFixed(2) + "亿手"
+          : (it.volume / 1e4).toFixed(0) + "万手";
+        return '<div class="news-item hot-row" data-sym="' + FA.esc(it.symbol) + '" style="cursor:pointer">' +
+          '<span class="ntime">#' + (i + 1) + "</span>" +
+          '<span class="ntag">' + (i < 3 ? "🔥" : "") + "</span>" +
+          '<span class="ntitle"><b>' + FA.esc(it.name) + "</b> " + FA.esc(it.symbol) +
+          ' <span class="' + FA.pctCls(it.change_pct) + '">' + FA.fmtPct(it.change_pct) + "</span>" +
+          ' <span class="muted small">' + vol + "</span></span></div>";
+      }).join("") || '<span class="empty">行情源暂不可用</span>';
+      $$("#hotList .hot-row").forEach((row) => {
+        row.addEventListener("click", () => FA.openPsych(row.getAttribute("data-sym")));
+      });
+    } catch (e) { /* ignore */ }
+  }
+  FA.pollHot = pollHot;
+
   // ---------- 启动轮询 ----------
   FA.startPolling = function () {
-    pollQuotes(); pollIntl(); pollEvents(); pollNews(); pollShield();
+    pollQuotes(); pollIntl(); pollEvents(); pollNews(); pollShield(); pollHot();
     loadDirectory().then(pollPsych);
     clearInterval(quoteTimer);
     quoteTimer = setInterval(pollQuotes, 5000);
@@ -384,6 +408,7 @@
     setInterval(pollPsych, 60000);
     setInterval(pollNews, 300000);
     setInterval(pollShield, 60000);
+    setInterval(pollHot, 300000);
   };
 
   // 自选删除：行右键移除
