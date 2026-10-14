@@ -592,6 +592,46 @@ ${(s.variety_profile || "").split("｜").filter(Boolean).length > 1 ? `
     return api("/api/trades", { method: "POST", body: JSON.stringify(payload) });
   }
 
+  // 开仓表单实时风险金额：点数 → 真金白银的痛感前置
+  let _mults = null, _acctSize = 0;
+  async function ensureMults() {
+    if (_mults) return;
+    try {
+      const d = await api("/api/multipliers");
+      _mults = d.multipliers || {};
+      _acctSize = d.account_size || 0;
+    } catch (e) { /* ignore */ }
+  }
+  function updateRiskPreview() {
+    const el = $("#riskPreview");
+    if (!el || !_mults) return;
+    const sym = $("#tfSymbol").value || "";
+    const pfx = sym.replace(/0$/, "").toUpperCase();
+    const m = _mults[pfx];
+    const stop = parseFloat($("#tfStop").value) || 0;
+    const lots = parseFloat($("#tfLots").value) || 0;
+    if (!sym || !m || stop <= 0 || lots <= 0) { el.textContent = ""; return; }
+    const risk = stop * m * lots;
+    let txt = "💸 本笔满打亏损：¥" + risk.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) +
+      "（止损 " + stop + " 点 × " + m + " 元/点 × " + lots + " 手）";
+    if (_acctSize > 0) {
+      const pct = risk / _acctSize * 100;
+      txt += "，占账户 " + pct.toFixed(2) + "%" + (pct > 1 ? " ⚠ 超单笔风险预算" : "");
+    } else {
+      txt += "（设置里填账户权益后显示占比）";
+    }
+    el.textContent = txt;
+    el.style.color = risk > 0 && _acctSize > 0 && risk / _acctSize * 100 > 1 ? "var(--danger)" : "";
+  }
+  ["tfSymbol", "tfStop", "tfLots"].forEach((id) => {
+    const el = $("#" + id);
+    if (el) {
+      el.addEventListener("change", () => { ensureMults().then(updateRiskPreview); });
+      el.addEventListener("input", () => { ensureMults().then(updateRiskPreview); });
+    }
+  });
+  ensureMults().then(updateRiskPreview);
+
   $("#tradeForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const warnBox = $("#tradeWarnings");
