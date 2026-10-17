@@ -128,6 +128,27 @@ ${(s.variety_profile || "").split("｜").filter(Boolean).length > 1 ? `
         <div class="card-head"><h2>日内分时走势 <span class="muted small">1 分钟线 · 黄线=均价 · 虚线=昨结</span></h2><span class="muted small" id="intradayTime"></span></div>
         <canvas id="intradayChart" class="mini-chart" style="height:200px"></canvas>
       </div>
+${(() => {
+        const f = s.fundamentals || {};
+        if (!f.inventory && f.basis == null) return "";
+        const rows = [];
+        if (f.inventory != null) {
+          const chg = f.inv_chg2w_pct;
+          const chgCls = chg == null ? "" : chg > 1 ? "num-down" : chg < -1 ? "num-up" : "";
+          const tone = chg == null ? "" : chg > 1 ? "累库 · 需求弱于供给" : chg < -1 ? "去库 · 需求消化快" : "平稳";
+          rows.push('<div class="kv"><span class="k">交易所库存</span><span class="v">' +
+            fmtNum(f.inventory, 0) + (chg != null ? '（两周 <span class="' + chgCls + '">' + (chg > 0 ? "+" : "") + chg + '%</span>）' : "") +
+            (tone ? " · " + tone : "") + ' <span class="muted small">' + esc(f.inv_date || "") + "</span></span></div>");
+        }
+        if (f.basis != null) {
+          const tone = f.basis < 0 ? "现货升水 · 产业惜售/现货紧" : "期货升水 · 现货充裕";
+          rows.push('<div class="kv"><span class="k">现货 / 基差</span><span class="v">' +
+            (f.spot != null ? fmtNum(f.spot) : "--") + ' / <b class="' + (f.basis < 0 ? "num-up" : "") + '">' + (f.basis > 0 ? "+" : "") + f.basis + "</b> · " + tone +
+            ' <span class="muted small">' + esc((f.spot_date || "").slice(4, 6) + "-" + (f.spot_date || "").slice(6)) + "</span></span></div>");
+        }
+        return '<div class="card" id="fundCard"><div class="card-head"><h2>⚖ 供需温度计 <span class="muted small">需求侧实时读数 · 库存与基差</span></h2></div>' +
+          '<div class="kv-list" style="padding:8px 14px">' + rows.join("") + "</div></div>";
+      })()}
 
       <div class="psych-grid">
         ${partyCard("industry", "🏭 产业（套保盘）", s.parties.industry)}
