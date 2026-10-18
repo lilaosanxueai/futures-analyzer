@@ -708,9 +708,34 @@ def detect_traps(minute: list, ts: dict, cap: dict, intra: dict, regime_key: str
 
 # ---------------------------------------------------------------- 四方立场推断
 
-def _party_industry(ts: dict) -> dict:
-    """产业资本：以价格在周期中的位置推断套保盘行为（无直接数据，标注推断）"""
+def _party_industry(ts: dict, fund: Optional[dict] = None) -> dict:
+    """产业资本：价格周期位置推断套保盘行为 + 供需数据（库存/基差）修正立场。
+    现货升水=产业惜售偏多、深期货升水+累库=现货充裕偏空——实盘数据优先于位置推断。"""
     pct = ts.get("pct60")
+    pos_txt = f"价格处 60 日 {pct:.0f}% " if pct is not None else ""
+    # 供需实况修正（有数据时优先）
+    if fund:
+        chg = fund.get("inv_chg2w_pct")
+        basis = fund.get("basis")
+        f_ev = []
+        if fund.get("inventory") is not None:
+            f_ev.append(f"库存 {fund['inventory']:,.0f}" + (f"（两周 {chg:+.1f}%）" if chg is not None else ""))
+        if basis is not None:
+            f_ev.append(f"基差 {basis:+.0f}（{'现货升水' if basis < 0 else '期货升水'}）")
+        f_txt = "；".join(f_ev)
+        # 深度现货升水 + 未暴累库 → 产业惜售偏多
+        if basis is not None and basis < 0 and (chg is None or chg < 20):
+            return {"stance": "惜售偏多（现货紧）",
+                    "evidence": f"{pos_txt}{f_txt} → 现货升水且未暴累库，产业惜售、下游被迫接受高价",
+                    "intent": "卖出保值盘收敛，实盘托底；回调遇到实盘买气", "confidence": "high"}
+        # 暴累库 + 期货升水 → 现货充裕偏空
+        if chg is not None and chg > 20 and (basis is None or basis > 0):
+            return {"stance": "现货压力偏空", "evidence": f"{pos_txt}库存两周 {chg:+.1f}% 暴累，" + (f"基差 {basis:+.0f} 期货升水" if basis is not None else "") + " → 货卖不动，产业卖保意愿强",
+                    "intent": "上游主动抛货+卖出保值，反弹都被实盘卖单压制", "confidence": "high"}
+        # 快速去库 → 需求消化快（中性偏多支撑）
+        if chg is not None and chg < -15:
+            return {"stance": "去库支撑（偏多）", "evidence": f"{pos_txt}库存两周 {chg:+.1f}% 快速去化 → 需求消化快于供给",
+                    "intent": "实盘需求在接货，深跌缺乏现货配合", "confidence": "medium"}
     if pct is None:
         return {"stance": "未知", "evidence": "数据不足", "intent": "—", "confidence": "low"}
     if pct >= 78:
@@ -866,7 +891,7 @@ def _warnings(regime_key: str, ts: dict, cap: dict, intra: dict) -> list[str]:
 
 # ---------------------------------------------------------------- 主入口
 
-def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> dict:
+def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list, fund: Optional[dict] = None) -> dict:
     """四方心理博弈全景快照（纯计算）"""
     ts = trend_stats(daily)
     cap = capital_flow(daily)
@@ -884,7 +909,7 @@ def analyze(symbol: str, name: str, quote: dict, daily: list, minute: list) -> d
             oi_chg_today = round(oi_now - prev_holds[-1])
 
     parties = {
-        "industry": _party_industry(ts),
+        "industry": _party_industry(ts, fund),
         "institution": _party_institution(ts, cap, intra),
         "speculator": _party_speculator(ts, intra),
         "retail": _party_retail(regime_key, play, ts, cap, intra),

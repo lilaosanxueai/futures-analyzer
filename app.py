@@ -1197,12 +1197,13 @@ async def psych_snapshot(symbol: str, force: bool = False) -> dict:
             minute = []
     directory = await get_directory(max_age=3600)
     name = directory.get(symbol, {}).get("name", "") or quote.get("name", "")
-    snap = psy.analyze(symbol, name, quote, daily, minute)
-    # 供需温度计（需求侧实时读数：库存+基差，侧路缓存不阻塞）
+    # 供需温度计与行情数据并行拉取（需求侧实时读数：库存+基差，侧路缓存不阻塞）
     try:
-        snap["fundamentals"] = await _variety_fundamentals(symbol)
+        fund = await _variety_fundamentals(symbol)
     except Exception:
-        snap["fundamentals"] = {}
+        fund = {}
+    snap = psy.analyze(symbol, name, quote, daily, minute, fund=fund)
+    snap["fundamentals"] = fund
     snap["ts"] = int(datetime.now().timestamp() * 1000)
     _psych_cache[symbol] = (loop_now, snap)
     return snap
@@ -1476,7 +1477,7 @@ SYSTEM_PROMPT = """你是「反幻想交易教练」——国内期货资金博�
 - 你的唯一职责：拆穿散户幻想，让用户顺应大势、顺应资金方向、顺应品种现状、顺应情绪。
 
 每次回答的分析框架：
-1. **品种现状**：价格在周期中的位置（区间分位）、大势方向、波动状态、博弈周期阶段（吸筹/洗盘/主升/出货/出清）——只用价格与量仓数据说话。
+1. **品种现状**：价格在周期中的位置（区间分位）、大势方向、波动状态、博弈周期阶段（吸筹/洗盘/主升/出货/出清）——只用价格与量仓数据说话。若上下文带【供需温度计】，必须先引用库存与基差数据定性供需，再谈位置（实盘数据优先于图形推断）。
 2. **四方动机审计**：产业 / 主力 / 投机 / 散户各自的立场、**动机（他的利润从哪里来、谁在为他买单）**与意图推断，引用持仓量变化作为证据，标注置信度。
 3. **散户怎么想、会怎么做**：此刻典型散户的心理活动与潜在操作，并**点名支配该行为的人性定律**（这是你的核心输出，要具体到"他为什么此刻忍不住想开单"）。
 4. **主力怎么利用**：诱多 / 诱空 / 洗盘 / 逼仓 / 出货的剧本推演与收割链（谁的动作成为谁的燃料），指出识别标志。
@@ -2761,6 +2762,19 @@ async def _diagnose_trade(t: dict, snap: Optional[dict], price: Optional[float])
                 out.append(_issue("D08", "warn", "杀跌追空（日内 {p:.0f}% 分位）".format(p=pos_pct),
                                   f"入场贴近日内低点（{pos_pct:.0f}% 分位），15 分钟已跌 {c15:+.2f}%——恐慌追空位",
                                   "恐慌末端追空容易吃反弹。等反抽衰竭再进。", sym, t.get("id", "")))
+    # D17 逆供需信号开仓（慢变量 warn 级：暴累库做多=接供给压力，快速去库做空=逆需求）
+    if snap:
+        f = snap.get("fundamentals") or {}
+        chg = f.get("inv_chg2w_pct")
+        basis = f.get("basis")
+        if chg is not None and chg > 20 and side == "long" and (basis is None or basis > 0):
+            out.append(_issue("D17", "warn", "逆供需信号做多（暴累库）",
+                              f"库存两周 {chg:+.1f}% 暴累" + (f"，基差 {basis:+.0f} 期货升水" if basis is not None else "") + "——供给压力未被消化",
+                              "累库+期货升水=货卖不动的实锤：反弹是产业抛货的机会。逆供需做多需要更强的独立逻辑", sym, t.get("id", "")))
+        elif chg is not None and chg < -15 and side == "short":
+            out.append(_issue("D17", "warn", "逆供需信号做空（快速去库）",
+                              f"库存两周 {chg:+.1f}% 快速去化——需求消化快于供给",
+                              "去库说明实盘在接货，深跌缺乏现货配合；空单要等去库放缓或重新累库的信号", sym, t.get("id", "")))
     return out
 
 
@@ -4865,11 +4879,18 @@ async def _generate_report() -> str:
             continue
         r = snap["parties"]["retail"]
         watch = next((seg for seg in _variety_profile(s).split("｜") if seg.startswith("跟踪")), "")
+        f = snap.get("fundamentals") or {}
+        fund_short = ""
+        if f.get("inventory") is not None and f.get("inv_chg2w_pct") is not None:
+            fund_short = f"库存{f['inv_chg2w_pct']:+.1f}%/2周"
+        if f.get("basis") is not None:
+            fund_short += ("，" if fund_short else "") + f"基差{f['basis']:+.0f}"
         lines.append(
             f"- {s}（{snap.get('name', '')}）：{snap['regime']['label']}，"
             f"{snap['last']}（{snap.get('change_pct'):+.2f}%），"
             f"日线资金「{snap['capital'].get('state5') or '数据不足'}」，"
             f"散户陷阱指数 {r['trap_risk']}/100"
+            + (f"；供需：{fund_short}" if fund_short else "")
             + (f"；{watch}" if watch else "")
         )
     if lines:
