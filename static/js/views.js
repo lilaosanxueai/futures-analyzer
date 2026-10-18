@@ -129,6 +129,37 @@ ${(s.variety_profile || "").split("｜").filter(Boolean).length > 1 ? `
         <canvas id="intradayChart" class="mini-chart" style="height:200px"></canvas>
       </div>
 ${(() => {
+        const st = s.seats || {};
+        if (st.long_total == null) return "";
+        const rows = [];
+        const net = st.net_chg || 0;
+        rows.push('<div class="kv"><span class="k">前20席位净变化</span><span class="v"><b class="' +
+          (net > 0 ? "num-up" : net < 0 ? "num-down" : "") + '">' + (net > 0 ? "+" : "") + net.toLocaleString("zh-CN") +
+          "</b> · " + esc(st.bias || "") + ' <span class="muted small">' + esc(st.contract || "") + " " + esc((st.date || "").slice(4, 6) + "-" + (st.date || "").slice(6)) + "盘后</span></span></div>");
+        rows.push('<div class="kv"><span class="k">多单合计</span><span class="v">' + fmtNum(st.long_total, 0) +
+          "（" + (st.long_chg > 0 ? "+" : "") + fmtNum(st.long_chg, 0) + "）</span></div>");
+        rows.push('<div class="kv"><span class="k">空单合计</span><span class="v">' + fmtNum(st.short_total, 0) +
+          "（" + (st.short_chg > 0 ? "+" : "") + fmtNum(st.short_chg, 0) + "）</span></div>");
+        const seatLine = (arr, label) =>
+          '<div class="kv"><span class="k">' + label + '</span><span class="v" style="text-align:left;font-size:12px">' +
+          (arr || []).map((r) => esc(r.name) + " " + fmtNum(r.pos, 0) +
+            (r.chg ? ' <span class="' + (r.chg > 0 ? "num-up" : "num-down") + '">' + (r.chg > 0 ? "+" : "") + fmtNum(r.chg, 0) + "</span>" : "")
+          ).join(" · ") + "</span></div>";
+        rows.push(seatLine(st.top_long, "多头榜 Top5"));
+        rows.push(seatLine(st.top_short, "空头榜 Top5"));
+        // 价仓背离
+        const chg = s.change_pct;
+        if (chg != null && Math.abs(chg) >= 0.3) {
+          if (chg > 0 && net < 0) {
+            rows.push('<div class="kv"><span class="k">⚠ 价仓背离</span><span class="v" style="color:var(--danger)">今日涨 ' + fmtPct(chg) + ' 但席位净变化为负——上涨缺乏席位支持，警惕诱多</span></div>');
+          } else if (chg < 0 && net > 0) {
+            rows.push('<div class="kv"><span class="k">⚠ 价仓背离</span><span class="v" style="color:var(--up)">今日跌 ' + fmtPct(chg) + ' 但席位净变化为正——或为散户踩踏，警惕诱空洗盘</span></div>');
+          }
+        }
+        return '<div class="card" id="seatCard"><div class="card-head"><h2>🏛 主力席位 <span class="muted small">前 20 会员持仓 · 主力账户的脚印</span></h2></div>' +
+          '<div class="kv-list" style="padding:8px 14px">' + rows.join("") + "</div></div>";
+      })()}
+${(() => {
         const f = s.fundamentals || {};
         if (!f.inventory && f.basis == null) return "";
         const rows = [];

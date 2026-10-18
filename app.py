@@ -972,6 +972,91 @@ async def _fund_blk(symbol: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------- 主力席位追踪（资金偏好的实锤）
+
+_SEAT_CACHE: dict[str, tuple[float, dict]] = {}
+SEAT_TTL = 14400.0   # 盘后日更数据，4 小时缓存
+
+
+async def _seat_data(symbol: str) -> dict:
+    """前 20 会员席位持仓（新浪成交持仓页：多单/空单榜各 20 席，含较上日增减）。
+    主力账户动向的唯一公开实据——净变化合计定多空力量，与价格背离提示诱多/诱空。
+    接口口径（实测）：symbol∈{多单持仓,空单持仓}，contract=具体月份合约（用主力判定），date=交易日。"""
+    out: dict = {}
+    loop_now = asyncio.get_event_loop().time()
+    cached = _SEAT_CACHE.get(symbol)
+    if cached and loop_now - cached[0] < SEAT_TTL:
+        return cached[1]
+    try:
+        dom = await _dominant_contract(symbol)
+    except Exception:
+        dom = None
+    if not dom or dom in _INTL_HIST_MAP.values() or _variety_prefix(symbol) in ("IF", "IH", "IC", "IM", "T", "TF", "TS", "TL"):
+        _SEAT_CACHE[symbol] = (loop_now, out)
+        return out
+    longs, shorts = [], []
+    for back in range(5):
+        day = (datetime.now() - timedelta(days=back)).strftime("%Y%m%d")
+        try:
+            df_l = await _call_ak_side(ak.futures_hold_pos_sina, symbol="多单持仓", contract=dom, date=day, timeout=20)
+            df_s = await _call_ak_side(ak.futures_hold_pos_sina, symbol="空单持仓", contract=dom, date=day, timeout=20)
+        except Exception:
+            continue
+        if len(df_l) and len(df_s):
+            longs, shorts, out["date"] = df_l.to_dict("records"), df_s.to_dict("records"), day
+            break
+    if longs and shorts:
+        def _sum_pos(rows, key):
+            return sum(int(_num(r.get(key)) or 0) for r in rows)
+
+        def _sum_chg(rows):
+            return sum(int(_num(r.get("比上交易增减")) or 0) for r in rows)
+
+        out["contract"] = dom
+        out["long_total"], out["short_total"] = _sum_pos(longs, "多单持仓"), _sum_pos(shorts, "空单持仓")
+        out["long_chg"], out["short_chg"] = _sum_chg(longs), _sum_chg(shorts)
+        out["net_chg"] = out["long_chg"] - out["short_chg"]
+        out["bias"] = ("多头席位增仓占优" if out["net_chg"] > 0
+                       else "空头席位增仓占优" if out["net_chg"] < 0 else "席位均衡")
+        out["top_long"] = [{"name": r.get("会员简称"), "pos": _num(r.get("多单持仓")),
+                             "chg": _num(r.get("比上交易增减"))} for r in longs[:5]]
+        out["top_short"] = [{"name": r.get("会员简称"), "pos": _num(r.get("空单持仓")),
+                              "chg": _num(r.get("比上交易增减"))} for r in shorts[:5]]
+    _SEAT_CACHE[symbol] = (loop_now, out)
+    return out
+
+
+def _seat_one(r: dict) -> str:
+    c = r.get("chg")
+    return f"{r.get('name', '?')} {_num(r.get('pos')) or 0:,.0f}" + (f"（{c:+,.0f}）" if c else "")
+
+
+def _seat_text(sym: str, s: dict, day_chg_pct: Optional[float] = None) -> str:
+    """席位读数注入文本（含价仓背离提示）"""
+    if not s or s.get("long_total") is None:
+        return ""
+    lines = [
+        f"- 前20席位：多单 {s['long_total']:,}（较上日 {s['long_chg']:+,}）/ 空单 {s['short_total']:,}（较上日 {s['short_chg']:+,}）→ {s.get('bias')}",
+        f"- 多头榜：{'、'.join(_seat_one(r) for r in (s.get('top_long') or [])[:3])}",
+        f"- 空头榜：{'、'.join(_seat_one(r) for r in (s.get('top_short') or [])[:3])}",
+    ]
+    net = s.get("net_chg") or 0
+    if day_chg_pct is not None and abs(day_chg_pct) >= 0.3:
+        if day_chg_pct > 0 and net < 0:
+            lines.append(f"- ⚠ 价仓背离：今日涨 {day_chg_pct:+.2f}% 但席位净变化 {net:+,}——上涨缺乏席位支持，警惕诱多（拉高为出货）")
+        elif day_chg_pct < 0 and net > 0:
+            lines.append(f"- ⚠ 价仓背离：今日跌 {day_chg_pct:+.2f}% 但席位净变化 {net:+,}——下跌或由散户踩踏造成，警惕诱空（洗盘）")
+    return (f"【{sym}（{s.get('contract', '')}）主力席位动向（{s.get('date', '')} 盘后，前 20 会员——"
+            f"席位是主力账户的脚印，净变化定多空力量）】\n" + "\n".join(lines))
+
+
+async def _seat_blk(symbol: str, day_chg_pct: Optional[float] = None) -> str:
+    try:
+        return _seat_text(symbol, await _seat_data(symbol), day_chg_pct)
+    except Exception:
+        return ""
+
+
 async def fetch_quote(symbol: str) -> dict:
     """单合约实时行情（带 5 秒缓存）。国际品种从实时快照组装。"""
     symbol = symbol.strip().upper()
@@ -1197,13 +1282,17 @@ async def psych_snapshot(symbol: str, force: bool = False) -> dict:
             minute = []
     directory = await get_directory(max_age=3600)
     name = directory.get(symbol, {}).get("name", "") or quote.get("name", "")
-    # 供需温度计与行情数据并行拉取（需求侧实时读数：库存+基差，侧路缓存不阻塞）
+    # 供需温度计与席位追踪（与行情数据并行拉取；侧路缓存不阻塞）
     try:
         fund = await _variety_fundamentals(symbol)
     except Exception:
         fund = {}
     snap = psy.analyze(symbol, name, quote, daily, minute, fund=fund)
     snap["fundamentals"] = fund
+    try:
+        snap["seats"] = await _seat_data(symbol)
+    except Exception:
+        snap["seats"] = {}
     snap["ts"] = int(datetime.now().timestamp() * 1000)
     _psych_cache[symbol] = (loop_now, snap)
     return snap
@@ -1612,6 +1701,10 @@ async def _build_market_context(symbol: Optional[str]) -> str:
     fund = _fund_text(symbol, await _variety_fundamentals(symbol))
     if fund:
         parts.append(fund)
+    day_pct = (_quote_cache.get(symbol, (0, {}))[1] or {}).get("change_pct")
+    seat = _seat_text(symbol, await _seat_data(symbol), day_pct)
+    if seat:
+        parts.append(seat)
 
     intl = await _intl_context_for(symbol)
     if intl:
@@ -1895,6 +1988,9 @@ async def psych_ai(symbol: str):
     context = psy.to_context_text(snap)
     nblk, vblk, fblk = await asyncio.gather(_news_context(3), _variety_news_context(symbol, 2), _fund_blk(symbol))
     context += "".join("\n\n" + b for b in (nblk, vblk, fblk) if b)
+    sblk = await _seat_blk(symbol, (snap or {}).get("change_pct"))
+    if sblk:
+        context += "\n\n" + sblk
     flaw = _flaw_context()
     profile = (_profile_context() or "（未填写）") + "\n" + (_position_context() or "当前无持仓")
     if flaw:
@@ -1927,6 +2023,9 @@ async def ai_realtime(symbol: str, force: int = 0):
     context = psy.to_context_text(snap)
     nblk, vblk, fblk = await asyncio.gather(_news_context(3), _variety_news_context(symbol, 2), _fund_blk(symbol))
     context += "".join("\n\n" + b for b in (nblk, vblk, fblk) if b)
+    sblk = await _seat_blk(symbol, (snap or {}).get("change_pct"))
+    if sblk:
+        context += "\n\n" + sblk
     holds = [t for t in _load_trades() if t.get("status") == "open" and t.get("symbol") == symbol]
     hold_txt = "；".join(
         f"{'多' if h['direction'] == 'long' else '空'} {h.get('lots', 1)}手 @ {h['entry']}"
@@ -4885,12 +4984,15 @@ async def _generate_report() -> str:
             fund_short = f"库存{f['inv_chg2w_pct']:+.1f}%/2周"
         if f.get("basis") is not None:
             fund_short += ("，" if fund_short else "") + f"基差{f['basis']:+.0f}"
+        seat = snap.get("seats") or {}
+        seat_short = f"席位净变{seat['net_chg']:+,}" if seat.get("net_chg") is not None else ""
         lines.append(
             f"- {s}（{snap.get('name', '')}）：{snap['regime']['label']}，"
             f"{snap['last']}（{snap.get('change_pct'):+.2f}%），"
             f"日线资金「{snap['capital'].get('state5') or '数据不足'}」，"
             f"散户陷阱指数 {r['trap_risk']}/100"
             + (f"；供需：{fund_short}" if fund_short else "")
+            + (f"；{seat_short}（{seat.get('bias', '')}）" if seat_short else "")
             + (f"；{watch}" if watch else "")
         )
     if lines:
