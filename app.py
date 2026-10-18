@@ -281,6 +281,10 @@ async def _warmup():
         await call_ak(ak.futures_display_main_sina)
     except Exception:
         pass  # 预热失败不影响服务
+    try:
+        await _ensure_gate_bt()  # 闸门回测预热（日线缓存复用，之后拦截弹窗即时显示）
+    except Exception:
+        pass
 
 
 @asynccontextmanager
@@ -970,6 +974,146 @@ async def _fund_blk(symbol: str) -> str:
         return _fund_text(symbol, await _variety_fundamentals(symbol))
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------- 闸门规则回测（防线自己证明价值）
+
+_BT_UNIVERSE_FALLBACK = ["RB0", "SA0", "MA0", "AU0", "CU0", "I0", "FG0", "TA0", "M0", "P0"]
+_BT_RULE_NAMES = {
+    "G1": "接飞刀（下跌急跌中做多）",
+    "G1b": "恐慌末端追空",
+    "G2": "幻想反弹（深跌抄底做多）",
+    "G3": "逆 5 日资金方向开仓",
+    "G4": "追涨（日内高位急涨做多）",
+}
+_BT_UNBACKTESTABLE = ["G5", "G6", "G7", "G8", "G9", "G10", "G11"]  # 持仓/账户状态类，无市场回测
+_gate_bt_cache: dict = {"key": None, "ts": 0.0, "stats": {}}
+GATE_BT_TTL = 86400.0
+
+
+def _bt_features(bars: list[dict], i: int) -> dict:
+    """第 i 日的日级特征（与实时闸门同义的近似口径：MA20 趋势代替 regime、日涨幅代替 15 分钟动量）"""
+    c = bars[i]["close"]
+    win = bars[max(0, i - 59):i + 1]
+    hi, lo = max(b["high"] for b in win), min(b["low"] for b in win)
+    ma20 = sum(b["close"] for b in bars[i - 19:i + 1]) / 20
+    ma20_prev = sum(b["close"] for b in bars[i - 23:i - 3]) / 20
+    chg20 = (c / bars[i - 20]["close"] - 1) * 100
+    chg1 = (c / bars[i - 1]["close"] - 1) * 100
+    rng = bars[i]["high"] - bars[i]["low"]
+    oi5 = (bars[i]["oi"] / bars[i - 5]["oi"] - 1) * 100 if bars[i - 5].get("oi") else 0.0
+    px5 = (c / bars[i - 5]["close"] - 1) * 100
+    return {
+        "pct60": (c - lo) / (hi - lo) * 100 if hi > lo else 50.0,
+        "bear": c < ma20 and ma20 < ma20_prev and chg20 < -1,
+        "chg1": chg1, "chg20": chg20,
+        "day_pos": (c - bars[i]["low"]) / rng if rng > 0 else 0.5,
+        "cap": ("增仓" if oi5 > 1 else "减仓" if oi5 < -1 else "仓平")
+               + ("上行" if px5 > 0.5 else "下行" if px5 < -0.5 else "横盘"),
+    }
+
+
+def _bt_triggers(f: dict) -> list[tuple[str, int]]:
+    """当日触发的（规则，方向）——与实时闸门 G1/G1b/G2/G3/G4 同义的日级口径"""
+    out = []
+    if f["bear"] and f["chg1"] <= -1.0:
+        out.append(("G1", 1))
+    if f["bear"] and f["pct60"] <= 15 and f["chg1"] <= -1.5:
+        out.append(("G1b", -1))
+    if f["pct60"] <= 22 and f["chg20"] <= -3:
+        out.append(("G2", 1))
+    if f["cap"] == "增仓下行":
+        out.append(("G3", 1))
+    elif f["cap"] == "增仓上行":
+        out.append(("G3", -1))
+    if f["day_pos"] >= 0.85 and f["chg1"] >= 1.0:
+        out.append(("G4", 1))
+    return out
+
+
+def _bt_run(bars_map: dict[str, list]) -> dict:
+    """对全部品种日线逐日扫描：规则触发 → 模拟被拦方向开仓的前向收益（1/3/5 日收盘口径）"""
+    acc: dict[str, dict] = {c: {"n": 0, "win": 0, "s1": 0.0, "s3": 0.0, "s5": 0.0,
+                                "worst": 0.0, "best": 0.0, "mae": []} for c in _BT_RULE_NAMES}
+    n_days = 0
+    for sym, bars in bars_map.items():
+        if len(bars) < 70:
+            continue
+        n_days += len(bars)
+        for i in range(60, len(bars) - 5):
+            f = _bt_features(bars, i)
+            c0 = bars[i]["close"]
+            for code, sign in _bt_triggers(f):
+                a = acc[code]
+                r1 = (bars[i + 1]["close"] / c0 - 1) * 100 * sign
+                r3 = (bars[i + 3]["close"] / c0 - 1) * 100 * sign
+                r5 = (bars[i + 5]["close"] / c0 - 1) * 100 * sign
+                a["n"] += 1
+                a["win"] += 1 if r5 > 0 else 0
+                a["s1"] += r1
+                a["s3"] += r3
+                a["s5"] += r5
+                a["worst"] = min(a["worst"], r5)
+                a["best"] = max(a["best"], r5)
+                seg = bars[i + 1:i + 6]
+                if sign > 0:
+                    a["mae"].append((min(b["low"] for b in seg) / c0 - 1) * 100)
+                else:
+                    a["mae"].append((max(b["high"] for b in seg) / c0 - 1) * 100)
+    out = {}
+    for code, a in acc.items():
+        if a["n"] == 0:
+            continue
+        mae_sorted = sorted(a["mae"])
+        out[code] = {
+            "name": _BT_RULE_NAMES[code],
+            "n": a["n"], "years": round(n_days / 244, 1),
+            "win5": round(a["win"] / a["n"] * 100, 1),
+            "exp1": round(a["s1"] / a["n"], 2),
+            "exp3": round(a["s3"] / a["n"], 2),
+            "exp5": round(a["s5"] / a["n"], 2),
+            "worst": round(a["worst"], 1), "best": round(a["best"], 1),
+            "p95_mae": round(mae_sorted[min(len(mae_sorted) - 1, int(len(mae_sorted) * 0.95))], 1),
+        }
+    return out
+
+
+async def _ensure_gate_bt(symbols: Optional[list] = None) -> dict:
+    """回测统计（自选品种或默认主力全集；24h 内存缓存）"""
+    key = tuple(sorted(symbols)) if symbols else None
+    loop_now = asyncio.get_event_loop().time()
+    if _gate_bt_cache["key"] == key and loop_now - _gate_bt_cache["ts"] < GATE_BT_TTL:
+        return _gate_bt_cache["stats"]
+    syms = list(symbols) if symbols else (sorted(set(_MONITOR["watch"])) or _BT_UNIVERSE_FALLBACK)[:12]
+    bars_map = {}
+    for s in syms:
+        try:
+            bars = await _daily_bars_for(s)
+        except Exception:
+            bars = []
+        if len(bars) >= 70:
+            bars_map[s] = bars
+    stats = await asyncio.to_thread(_bt_run, bars_map)
+    _gate_bt_cache.update({"key": key, "ts": loop_now, "stats": stats})
+    return stats
+
+
+def _bt_line(code: str, stats: dict) -> str:
+    """拦截弹窗用的回测结论行"""
+    s = stats.get(code)
+    if not s or s["n"] < 20:
+        return ""
+    return (f"历史回测（约 {s['years']:.0f} 年 {s['n']} 次同模式）：5 日期望 {s['exp5']:+.2f}%、"
+            f"胜率 {s['win5']:.0f}%，最差 {s['worst']:+.1f}%，5 日内平均最深逆行 {s['p95_mae']:+.1f}%")
+
+
+@app.get("/api/gate-backtest")
+async def gate_backtest(symbols: str = ""):
+    """闸门规则历史回测：市场类规则（G1-G4）的触发期望；账户状态类无市场回测如实标注"""
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] or None
+    stats = await _ensure_gate_bt(syms)
+    return {"ok": True, "stats": stats,
+            "unbacktestable": [{"code": c, "note": "持仓/账户状态类规则，依赖你的交易记录，无市场回测"} for c in _BT_UNBACKTESTABLE]}
 
 
 # ---------------------------------------------------------------- 主力席位追踪（资金偏好的实锤）
@@ -3317,6 +3461,12 @@ async def add_trade(body: TradeIn):
     blockers = _entry_gate(trade, snap, price, trades)
     mood = _infer_mood(blockers) if blockers else "平静"
     sug_lots = _suggested_lots(symbol, body.stop_points)
+    if blockers:
+        bt_stats = _gate_bt_cache["stats"] or await _ensure_gate_bt([symbol])
+        for b in blockers:
+            line = _bt_line(b["code"], bt_stats)
+            if line:
+                b["backtest"] = line
     if blockers and not body.force:
         log = _load_gate_log()
         log.append({"ts": now_ms, "symbol": symbol, "direction": body.direction,

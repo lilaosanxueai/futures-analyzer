@@ -709,7 +709,8 @@ ${(() => {
           '<div class="tw-item fatal"><b>🚫 开仓闸门拦截</b>（主导情绪判定：' + esc(d.mood || "--") + "）</div>" +
           d.blockers.map((b) =>
             '<div class="tw-item fatal"><b>' + esc(b.name) + "</b>" + esc(b.evidence) +
-            "<br><span class=\"muted\">→ " + esc(b.antidote) + "</span></div>").join("") +
+            "<br><span class=\"muted\">→ " + esc(b.antidote) + "</span>" +
+            (b.backtest ? '<br><span style="color:var(--up)">📊 ' + esc(b.backtest) + "</span>" : "") + "</div>").join("") +
           sugTxt +
           '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
           '<button class="btn" id="btnGateCancel">🧘 放弃，再想想</button>' +
@@ -1015,6 +1016,36 @@ ${(() => {
   // CSV 导出
   $("#btnExportCsv").addEventListener("click", () => {
     window.open("/api/trades/export", "_blank");
+  });
+
+  // 闸门回测报告
+  $("#btnGateBt").addEventListener("click", async () => {
+    $("#gateBtModal").classList.remove("hidden");
+    const el = $("#gateBtBody");
+    try {
+      const d = await api("/api/gate-backtest");
+      const stats = d.stats || {};
+      const rows = Object.entries(stats).map(([code, s]) => {
+        const good = s.exp5 < 0;  // 期望为负=拦得对（绿色）
+        const cls = good ? "num-up" : "num-down";
+        return "<tr>" +
+          "<td><b>" + esc(code) + "</b></td><td>" + esc(s.name) + "</td>" +
+          '<td class="r">' + s.n + '（约' + s.years + '年）</td>' +
+          '<td class="r ' + cls + '">' + (s.exp5 > 0 ? "+" : "") + s.exp5 + "%</td>" +
+          '<td class="r">' + s.win5 + "%</td>" +
+          '<td class="r ' + cls + '">' + (s.exp3 > 0 ? "+" : "") + s.exp3 + "%</td>" +
+          '<td class="r">' + s.worst + "%</td>" +
+          '<td class="r">' + s.p95_mae + "%</td></tr>";
+      }).join("");
+      const unb = (d.unbacktestable || []).map((u) =>
+        '<div class="mini-note">' + esc(u.code) + "：" + esc(u.note) + "</div>").join("");
+      el.innerHTML = (rows
+        ? '<table class="table"><thead><tr><th>规则</th><th>模式</th><th class="r">样本</th><th class="r">5日期望</th><th class="r">胜率</th><th class="r">3日期望</th><th class="r">最差</th><th class="r">5日95%逆行</th></tr></thead><tbody>' + rows + "</tbody></table>"
+        : '<div class="empty">样本不足（自选品种历史太短）</div>') + unb +
+        '<div class="hint">口径：日级近似条件触发后按被拦方向模拟开仓的前向收盘收益；期望为负=闸门拦得值。品种范围为当前自选。</div>';
+    } catch (e) {
+      el.innerHTML = '<span style="color:var(--danger)">回测失败：' + esc(e.message) + "</span>";
+    }
   });
 
   // 盾周报

@@ -205,6 +205,7 @@
               <button class="btn ghost sm" id="btnImport">📥 导入交割单</button>
               <button class="btn ghost sm" id="btnTradeReview">🧠 历史复盘</button>
               <button class="btn ghost sm" id="btnExportCsv">📤 导出 CSV</button>
+              <button class="btn ghost sm" id="btnGateBt">📊 闸门回测</button>
             </div>
           </div>
           <table class="table trades-table">
@@ -402,8 +403,16 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20260915c"></script>
-<script src="/static/js/views.js?v=20260915c"></script>
-<script src="/static/js/chat.js?v=20260915c"></script>
+<!-- 闸门回测弹窗 -->
+<div class="modal-mask hidden" id="gateBtModal">
+  <div class="modal wide">
+    <div class="modal-head"><h2>📊 闸门规则历史回测 <span class="muted small">被拦下的单，躲过了什么</span></h2><button class="btn ghost sm" data-close="gateBtModal">✕</button></div>
+    <div class="modal-body"><div id="gateBtBody"><span class="typing">回测计算中（拉取自选品种全量日线，首次约 10-30 秒）…</span></div></div>
+  </div>
+</div>
+
+<script src="/static/js/base.js?v=20261016a"></script>
+<script src="/static/js/views.js?v=20261016a"></script>
+<script src="/static/js/chat.js?v=20261016a"></script>
 </body>
 </html>
