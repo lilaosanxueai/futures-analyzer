@@ -61,6 +61,33 @@
     psychSymbol: "",
   };
 
+  // ---------- 皮肤切换（深夜蓝/纯黑/浅色/墨绿，localStorage 持久化 + 防闪烁恢复在 index.html 内联脚本） ----------
+  const THEMES = [
+    { id: "default", name: "深夜蓝" },
+    { id: "black", name: "纯黑" },
+    { id: "light", name: "浅色" },
+    { id: "green", name: "墨绿" },
+  ];
+  function applyTheme(id) {
+    if (id && id !== "default") document.documentElement.setAttribute("data-theme", id);
+    else document.documentElement.removeAttribute("data-theme");
+    try { localStorage.setItem("fa_theme", id); } catch (e) { /* ignore */ }
+    const btn = $("#btnTheme");
+    if (btn) {
+      const cur = THEMES.find((t) => t.id === id) || THEMES[0];
+      btn.title = "皮肤：" + cur.name + "（点击切换）";
+    }
+  }
+  applyTheme(LS.get("fa_theme", "default"));
+  const themeBtn = $("#btnTheme");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      const cur = LS.get("fa_theme", "default");
+      const idx = THEMES.findIndex((t) => t.id === cur);
+      applyTheme(THEMES[(idx + 1 + THEMES.length) % THEMES.length].id);
+    });
+  }
+
   // ---------- 时钟与市场状态 ----------
   function tickClock() {
     const el = $("#clock");

@@ -675,7 +675,20 @@ ${(() => {
     el.textContent = txt;
     el.style.color = risk > 0 && _acctSize > 0 && risk / _acctSize * 100 > 1 ? "var(--danger)" : "";
   }
-  ["tfSymbol", "tfStop", "tfLots"].forEach((id) => {
+  async function autoFillPrice() {
+    const sym = $("#tfSymbol").value;
+    if (!sym) return;
+    try {
+      const d = await api("/api/watchlist?symbols=" + encodeURIComponent(sym));
+      const q = (d.quotes || [])[0];
+      if (q && q.last != null) {
+        $("#tfEntry").value = q.last;
+        $("#tfEntry").title = "已自动填入最新价 " + q.last + "（" + (q.time || "") + "）";
+      }
+    } catch (e) { /* ignore */ }
+  }
+  $("#tfSymbol").addEventListener("change", autoFillPrice);
+  ["tfStop", "tfLots"].forEach((id) => {
     const el = $("#" + id);
     if (el) {
       el.addEventListener("change", () => { ensureMults().then(updateRiskPreview); });
@@ -698,6 +711,13 @@ ${(() => {
       note: $("#tfNote").value,
     };
     if (!payload.symbol) { alert("请选择品种"); return; }
+    // 开仓理由必须充分（前端先拦，后端同样校验）
+    const note = (payload.note || "").trim();
+    const lazy = ["看涨", "看跌", "感觉", "抄底", "追涨", "杀跌", "赌", "试试", "蒙", "直觉", "朋友说", "听说", "群里"];
+    if (!note) { alert("开仓理由必须填写：写清这笔靠什么赚钱（供需/资金/位置）"); return; }
+    if (note.length < 10) { alert("开仓理由太短（" + note.length + " 字）——至少 10 字，写清逻辑"); return; }
+    const hitLazy = lazy.find((k) => k in note || note.includes(k));
+    if (hitLazy && note.length < 20) { alert("理由含空话「" + hitLazy + "」且无具体逻辑——供需/资金/位置至少说清一样"); return; }
     try {
       let d = await submitTrade(payload);
       // 开仓闸门：致命模式拦截 → 红色风险确认（强行通过会留违规标记并计入缺陷画像）
@@ -880,12 +900,34 @@ ${(() => {
     $("#profileModal").classList.remove("hidden");
     try {
       const d = await api("/api/profile");
-      const p = d.profile || {};
-      $("#pfStyle").value = p.style || "";
-      $("#pfRisk").value = p.risk_preference || "";
-      renderLessons(p.lessons || []);
+      renderProfile(d.profile || {});
     } catch (e) { /* ignore */ }
   }
+  function renderProfile(p) {
+    $("#pfStyle").value = p.style || "";
+    $("#pfRisk").value = p.risk_preference || "";
+    const aiEl = $("#pfAiSummary");
+    if (aiEl) {
+      aiEl.innerHTML = p.ai_summary ? md(p.ai_summary) : "";
+      const tsEl = $("#pfSynTs");
+      if (tsEl) {
+        tsEl.textContent = p.ai_summary_ts
+          ? "上次综合：" + new Date(p.ai_summary_ts).toLocaleString("zh-CN", { hour12: false }) : "";
+      }
+    }
+    renderLessons(p.lessons || []);
+  }
+  $("#btnPfSynthesize").addEventListener("click", async () => {
+    const btn = $("#btnPfSynthesize");
+    btn.disabled = true; btn.textContent = "🧠 综合分析中（约 20-40 秒）…";
+    try {
+      const d = await api("/api/profile/synthesize", { method: "POST" });
+      renderProfile(d.profile || {});
+    } catch (err) {
+      alert("综合画像失败：" + err.message);
+    }
+    btn.disabled = false; btn.textContent = "🧠 由真实记录综合画像";
+  });
   function renderLessons(lessons) {
     $("#pfLessons").innerHTML = lessons.map((l, i) =>
       '<div class="lesson-item"><span>' + esc(l) + '</span><button class="link-btn danger" data-i="' + i + '">删</button></div>').join("") || '<div class="muted small">暂无教训记录</div>';

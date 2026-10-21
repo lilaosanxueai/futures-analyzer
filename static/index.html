@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
-<link rel="stylesheet" href="/static/style.css?v=20260914b">
+<script>try{var t=localStorage.getItem("fa_theme");if(t&&t!=="default")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<link rel="stylesheet" href="/static/style.css?v=20261022a">
 </head>
 <body>
 
@@ -21,6 +22,7 @@
     <span id="clock" class="clock">--:--:--</span>
   </div>
   <div class="top-right">
+    <button class="btn ghost" id="btnTheme" title="切换皮肤">🎨</button>
     <button class="btn ghost" id="btnProfile" title="交易者画像（AI 记忆）">👤 画像</button>
     <button class="btn ghost" id="btnSelfcheck" title="系统自检">🩺 自检</button>
     <button class="btn ghost" id="btnReport" title="晨/夜报">📋 简报</button>
@@ -329,6 +331,11 @@
     <div class="modal-head"><h2>👤 交易者画像（AI 记忆）</h2><button class="btn ghost sm" data-close="profileModal">✕</button></div>
     <div class="modal-body">
       <div class="set-group">
+        <div class="form-row">
+          <button class="btn primary sm" id="btnPfSynthesize">🧠 由真实记录综合画像</button>
+          <span class="muted small" id="pfSynTs"></span>
+        </div>
+        <div id="pfAiSummary" class="md-block" style="margin:8px 0"></div>
         <div class="form-row"><input id="pfStyle" placeholder="交易风格"></div>
         <div class="form-row"><input id="pfRisk" placeholder="风险偏好"></div>
         <div class="form-row">

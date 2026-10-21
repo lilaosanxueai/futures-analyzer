@@ -1302,6 +1302,13 @@ async def fetch_quote(symbol: str) -> dict:
 
 # ---------------------------------------------------------------- API：行情
 
+# 核心品种池：成交量 Top20 且有夜盘的品种（应用户要求精简品种全集——
+# 白盘-only 玉米/鸡蛋/生猪/苹果等与流动性靠后品种全部移出下拉/热度榜）
+CORE_VARIETIES = ["RB", "MA", "SA", "TA", "M", "P", "I", "EG", "PP", "FG",
+                  "AG", "SR", "Y", "V", "L", "RM", "RU", "HC", "SC", "AU"]
+_CORE_SET = set(CORE_VARIETIES)
+
+
 @app.get("/api/main-list")
 async def main_list():
     directory = await get_directory()
@@ -1314,6 +1321,7 @@ async def main_list():
             "pyf": _py_full(v["name"]),
         }
         for sym, v in sorted(directory.items())
+        if _variety_prefix(sym) in _CORE_SET
     ]
     return {"ok": True, "items": items}
 
@@ -1469,9 +1477,7 @@ async def hot_rank():
                 directory = await get_directory(3600)
             except Exception:
                 directory = {}
-            syms = sorted(
-                p + "0" for p in _PREFIX_CN
-                if p + "0" not in _INTL_HIST_MAP and not _CFFEX_PAT.match(p + "0"))
+            syms = [p + "0" for p in CORE_VARIETIES]
             for i in range(0, len(syms), 20):
                 batch = syms[i:i + 20]
                 # 坑（v1 教训）：httpx params 会把逗号编码成 %2C 被新浪拒绝——必须原始 URL 拼接
@@ -3422,12 +3428,31 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
     return out
 
 
+_LAZY_NOTES = ("看涨", "看跌", "感觉", "抄底", "追涨", "杀跌", "赌", "试试", "蒙", "直觉", "朋友说", "听说", "群里")
+
+
+def _note_insufficient(note: str) -> str:
+    """开仓理由充分性校验：≥10 字且不含空话关键词；返回原因（空串=通过）"""
+    n = (note or "").strip()
+    if not n:
+        return "未填写开仓理由"
+    if len(n) < 10:
+        return f"理由太短（{len(n)} 字，至少 10 字）——写清这笔靠什么赚钱（供需/资金/位置）"
+    hit = next((k for k in _LAZY_NOTES if k in n), None)
+    if hit and len(n) < 20:
+        return f"理由含空话「{hit}」且无具体逻辑——供需/资金/位置，至少说清一样"
+    return ""
+
+
 @app.post("/api/trades")
 async def add_trade(body: TradeIn):
-    """记一笔交易（带开仓闸门）：接飞刀/亏损加仓/幻想反弹/逆资金/追涨先拦截——
+    """记一笔交易（带开仓闸门）：理由必须充分；接飞刀/亏损加仓/幻想反弹/逆资金/追涨先拦截——
     返回 blocked=true 与 blockers，前端红色风险确认；force=1 二次确认后放行并留违规标记"""
     if body.direction not in ("long", "short"):
         raise HTTPException(status_code=400, detail="direction 仅支持 long/short")
+    bad_note = _note_insufficient(body.note)
+    if bad_note:
+        raise HTTPException(status_code=400, detail="开仓理由不充分：" + bad_note)
     symbol = body.symbol.strip().upper()
     trades = _load_trades()
     now_ms = int(datetime.now().timestamp() * 1000)
@@ -5051,6 +5076,77 @@ class ProfileUpdate(BaseModel):
 @app.get("/api/profile")
 async def get_profile():
     return {"ok": True, "profile": _load_profile()}
+
+
+@app.post("/api/profile/synthesize")
+async def synthesize_profile():
+    """AI 综合画像：从真实记录（交易+缺陷画像+拦截情绪+心得）推导交易风格/风险偏好/教训——
+    手填是自我认知，AI 综合是数据认知；两者都进上下文，教练两头对照"""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
+    if len(trades) < 3:
+        raise HTTPException(status_code=400, detail="记录不足 3 笔——先记几笔真实交易或导入交割单，画像才有据可依")
+    flaws = _flaw_profile()
+    shield = await shield_status()
+    gate = _load_gate_log()
+    from collections import Counter
+    gate_moods = Counter(g.get("mood") for g in gate if g.get("mood"))
+    open_moods = Counter(t.get("mood") for t in trades if t.get("mood"))
+    exit_moods = Counter(t.get("exit_mood") for t in closed if t.get("exit_mood"))
+    wins = [float(t["result_pts"]) for t in closed if float(t["result_pts"]) > 0]
+    losses = [float(t["result_pts"]) for t in closed if float(t["result_pts"]) < 0]
+    by_sym: dict[str, list] = {}
+    for t in closed:
+        by_sym.setdefault(t["symbol"], []).append(float(t["result_pts"]))
+    notes = _load_notes()[-20:]
+
+    lines = [
+        f"- 交易 {len(trades)} 笔（已平 {len(closed)}）：胜率 {len(wins) / len(closed) * 100:.0f}%"
+        if closed else f"- 交易 {len(trades)} 笔（已平 0）",
+        (f"- 平均盈利 {sum(wins) / len(wins):+.0f} vs 平均亏损 {sum(losses) / len(losses):+.0f} 点"
+         if wins and losses else ""),
+        f"- 开仓情绪分布：{dict(open_moods) if open_moods else '无违规情绪样本'}",
+        f"- 平仓定性分布：{dict(exit_moods) if exit_moods else '无'}",
+        f"- 闸门拦截 {len(gate)} 次（{dict(gate_moods) if gate_moods else '无'}），纪律连胜 {shield.get('streak', 0)} 天",
+        f"- 品种盈亏：{'；'.join(f'{s} {sum(v):+.0f}点/{len(v)}笔' for s, v in sorted(by_sym.items(), key=lambda kv: sum(kv[1]))[:6])}",
+    ]
+    if flaws:
+        lines.append("- 缺陷画像：" + "；".join(f"{f['name']}（{f['evidence']}）" for f in flaws[:5]))
+    if notes:
+        lines.append("- 近期心得摘录：" + "；".join((n.get("title") or n.get("content", "")[:30]) for n in notes[:8]))
+    prompt = f"""你是反幻想交易教练。基于以下这位期货交易者的真实记录（全部由数据得出，无自我描述），综合推导他的交易者画像：
+
+{chr(10).join(ln for ln in lines if ln)}
+
+输出（Markdown，400 字内）：
+**交易风格**：一句话（基于数据的行为模式，如"化工品种短线情绪交易者，追涨FOMO主导"）
+**风险偏好**：一句话（由仓位/止损/扛单数据推断的实际风险倾向，不是自以为的）
+**核心教训**：3-5 条（每条对应一条数据证据，可执行）
+**教练总评**：两三句——他最大的敌人是谁，最先该改的一件事是什么
+
+要求：每句结论都必须能对应到上面的数据；数据不足的维度明说"样本不足"；不迎合、不编造。结尾注明不构成投资建议。"""
+    report = await _llm_text_retry(prompt, max_tokens=1600)
+
+    p = _load_profile()
+    p["ai_summary"] = report
+    p["ai_summary_ts"] = int(datetime.now().timestamp() * 1000)
+    try:
+        import re as _re
+        m = _re.search(r"交易风格[^\n：:]*[：:]\s*([^\n]+)", report)
+        if m:
+            p["style"] = m.group(1).strip()[:100]
+        m = _re.search(r"风险偏好[^\n：:]*[：:]\s*([^\n]+)", report)
+        if m:
+            p["risk_preference"] = m.group(1).strip()[:50]
+        for lm in _re.finditer(r"^\s*(?:[-*]\s*)?(\S[^\n]{8,80})$", report.split("核心教训")[-1].split("**教练总评**")[0], _re.M):
+            txt = lm.group(1).strip().lstrip("-* ").strip()
+            if txt and not any(txt[:12] in x for x in p.get("lessons", [])):
+                p.setdefault("lessons", []).append(txt[:150])
+        p["lessons"] = p["lessons"][-20:]
+    except Exception:
+        pass
+    _save_profile(p)
+    return {"ok": True, "profile": p}
 
 
 @app.post("/api/profile")
