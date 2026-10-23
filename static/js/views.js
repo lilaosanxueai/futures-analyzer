@@ -124,6 +124,38 @@ ${(s.variety_profile || "").split("｜").filter(Boolean).length > 1 ? `
         </div>
       </div>` : ""}
 
+      ${(() => {
+        const intra = s.intraday || {};
+        const items = [
+          { label: "5 分钟", v: intra.chg5m },
+          { label: "15 分钟", v: intra.chg15m },
+          { label: "30 分钟", v: intra.chg30m },
+        ].filter((x) => x.v != null);
+        if (items.length < 2) return "";
+        const allUp = items.every((x) => x.v > 0);
+        const allDown = items.every((x) => x.v < 0);
+        const mixed = !allUp && !allDown;
+        const verdict = allUp ? "🔴 多周期共振向上" : allDown ? "🟢 多周期共振向下" : "🟡 多周期分歧（观望）";
+        const bars = items.map((x) => {
+          const w = Math.min(100, Math.abs(x.v) * 120);   // 0.83% → 100px
+          const left = x.v > 0 ? 50 : 50 - w;
+          return '<div style="display:flex;align-items:center;gap:8px;font-size:12px">' +
+            '<span style="flex:0 0 55px;color:var(--muted)">' + x.label + "</span>" +
+            '<div style="flex:1;height:14px;background:var(--panel-2);border-radius:7px;position:relative;overflow:hidden">' +
+            '<div style="position:absolute;left:' + left + "%;width:" + w + "%;height:100%;border-radius:7px;background:" +
+            (x.v > 0 ? "var(--up)" : "var(--down)") + '"></div>' +
+            '<div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--border)"></div>' +
+            "</div>" +
+            '<span style="flex:0 0 55px;text-align:right" class="' + (x.v > 0 ? "num-up" : "num-down") + '">' +
+            (x.v > 0 ? "+" : "") + x.v.toFixed(2) + "%</span></div>";
+        }).join("");
+        return '<div class="card" id="mtfCard"><div class="card-head"><h2>📐 多周期共振 <span class="muted small">5 / 15 / 30 分钟动能</span></h2></div>' +
+          '<div style="padding:8px 14px;display:flex;flex-direction:column;gap:6px">' + bars +
+          '<div style="margin-top:6px;font-weight:600;color:var(--text-strong)">' + verdict + "</div>" +
+          (mixed ? '<div class="mini-note">多周期不一致=动能未形成共识，突破方向待确认——超短宜观望等共振</div>' :
+                   '<div class="mini-note">三周期同向=动能共识已形成，顺势方向操作盈亏比更优；逆共振方向=送钱</div>') +
+          "</div></div>";
+      })()}
       <div class="card" id="intradayCard">
         <div class="card-head"><h2>日内分时走势 <span class="muted small">1 分钟线 · 黄线=均价 · 虚线=昨结</span></h2><span class="muted small" id="intradayTime"></span></div>
         <canvas id="intradayChart" class="mini-chart" style="height:200px"></canvas>
@@ -432,12 +464,41 @@ ${(() => {
         el.innerHTML = '<div class="empty">✅ 当前无未决问题——继续保持：有止损、不逆势、不超频</div>';
         return;
       }
-      el.innerHTML = d.issues.map((i) =>
-        '<div class="diag-item sev-' + i.sev + '">' +
+      el.innerHTML = d.issues.map((i) => {
+        let action = "";
+        if (i.id === "D02" && i.trade_id) {
+          action = '<button class="btn danger sm" data-fix="mktclose" data-tid="' + i.trade_id + '">💰 立即平仓</button>';
+        } else if (i.id === "D01" && i.trade_id) {
+          action = '<button class="btn sm" data-fix="setstop" data-tid="' + i.trade_id + '">🔧 补设止损</button>';
+        }
+        return '<div class="diag-item sev-' + i.sev + '">' +
         '<div class="d-title"><span class="badge ' + (i.sev === "fatal" ? "fatal" : i.sev === "warn" ? "warn" : "info") + '">' +
         (i.sev === "fatal" ? "致命" : i.sev === "warn" ? "警告" : "提示") + "</span><b>" + esc(i.title) + "</b></div>" +
         '<div class="d-evi">' + esc(i.evidence) + "</div>" +
-        '<div class="d-adv">→ ' + esc(i.advice) + "</div></div>").join("");
+        '<div class="d-adv">→ ' + esc(i.advice) + "</div>" +
+        (action ? '<div style="margin-top:6px">' + action + "</div>" : "") +
+        "</div>";
+      }).join("");
+      $$("#diagBody [data-fix]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          const tid = b.getAttribute("data-tid");
+          const fix = b.getAttribute("data-fix");
+          if (fix === "mktclose") {
+            const trades = await api("/api/trades");
+            const t = (trades.items || []).find((x) => x.id === tid);
+            if (!t || !t.live) { alert("实时价未就绪"); return; }
+            if (!confirm("按 " + t.live.price + " 市价平仓？（浮动 " + (t.live.pnl_pts > 0 ? "+" : "") + t.live.pnl_pts + " 点）")) return;
+            await api("/api/trades/" + tid, { method: "PATCH", body: JSON.stringify({ exit: t.live.price }) });
+            loadDiagnosis(); loadTrades(); loadStats();
+          } else if (fix === "setstop") {
+            const p = prompt("补设止损点数：", "20");
+            if (p === null || isNaN(parseFloat(p))) return;
+            await api("/api/trades/" + tid, { method: "PATCH", body: JSON.stringify({ note: "止损计划 " + p + " 点（待手动执行）" }) });
+            alert("已记录止损计划——请在实际交易软件中设置硬止损");
+            loadDiagnosis();
+          }
+        });
+      });
     } catch (e) {
       el.innerHTML = '<div class="empty">诊断失败：' + esc(e.message) + "</div>";
     }
@@ -555,6 +616,7 @@ ${(() => {
         if (t.status === "open") {
           actions =
             '<button class="link-btn" data-act="care" data-id="' + t.id + '" title="AI 持仓体检">🩺</button>' +
+            '<button class="link-btn" data-act="mktclose" data-id="' + t.id + '" title="按当前市价一键平仓">💰</button>' +
             '<button class="link-btn" data-act="close" data-id="' + t.id + '">了结</button>' +
             '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
         } else {
@@ -610,6 +672,20 @@ ${(() => {
             }
             return;
           }
+          if (act === "mktclose") {
+            // 💰 一键市价平仓：取当前实时价自动填入
+            if (!confirm("按当前市价一键平仓？")) return;
+            const lv = t.live || {};
+            if (lv.price == null) { alert("实时价未就绪，稍后再试"); return; }
+            const sign = t.direction === "long" ? 1 : -1;
+            const pnl = sign * (lv.price - t.entry);
+            if (!confirm(`平仓价 ${lv.price}，浮动 ${pnl > 0 ? "+" : ""}${pnl.toFixed(1)} 点。确认？`)) return;
+            try {
+              await api("/api/trades/" + id, { method: "PATCH", body: JSON.stringify({ exit: lv.price }) });
+              loadTrades(); loadStats(); loadDiagnosis();
+            } catch (err) { alert("平仓失败：" + err.message); }
+            return;
+          }
           if (act === "del") {
             if (!confirm("删除这条记录？")) return;
             await api("/api/trades/" + id, { method: "DELETE" });
@@ -645,13 +721,14 @@ ${(() => {
   }
 
   // 开仓表单实时风险金额：点数 → 真金白银的痛感前置
-  let _mults = null, _acctSize = 0;
+  let _mults = null, _acctSize = 0, _feeRef = {};
   async function ensureMults() {
     if (_mults) return;
     try {
       const d = await api("/api/multipliers");
       _mults = d.multipliers || {};
       _acctSize = d.account_size || 0;
+      _feeRef = d.fee_ref || {};
     } catch (e) { /* ignore */ }
   }
   function updateRiskPreview() {
@@ -664,8 +741,10 @@ ${(() => {
     const lots = parseFloat($("#tfLots").value) || 0;
     if (!sym || !m || stop <= 0 || lots <= 0) { el.textContent = ""; return; }
     const risk = stop * m * lots;
+    const fee = (_feeRef[pfx] || m * 0.4) * lots;
     let txt = "💸 本笔满打亏损：¥" + risk.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) +
-      "（止损 " + stop + " 点 × " + m + " 元/点 × " + lots + " 手）";
+      "（止损 " + stop + " 点 × " + m + " 元/点 × " + lots + " 手）" +
+      " + 手续费约 ¥" + fee.toFixed(0) + " = ¥" + (risk + fee).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
     if (_acctSize > 0) {
       const pct = risk / _acctSize * 100;
       txt += "，占账户 " + pct.toFixed(2) + "%" + (pct > 1 ? " ⚠ 超单笔风险预算" : "");
@@ -675,6 +754,48 @@ ${(() => {
     el.textContent = txt;
     el.style.color = risk > 0 && _acctSize > 0 && risk / _acctSize * 100 > 1 ? "var(--danger)" : "";
   }
+  // ⚡ 一键模拟：现价入场 + ATR 建议止损 + 2:1 目标 + 建议手数（基于账户风险预算）
+  $("#btnSimSetup").addEventListener("click", async () => {
+    const sym = $("#tfSymbol").value;
+    if (!sym) { alert("先选品种"); return; }
+    const btn = $("#btnSimSetup");
+    btn.disabled = true; btn.textContent = "⏳";
+    try {
+      const [wd, md] = await Promise.all([
+        api("/api/watchlist?symbols=" + encodeURIComponent(sym)),
+        api("/api/multipliers"),
+      ]);
+      const q = (wd.quotes || [])[0];
+      if (!q || q.last == null) { alert("行情未就绪"); return; }
+      $("#tfEntry").value = q.last;
+      // ATR 建议止损：从博弈快照取日内波幅的 30%（近似 ATR），兜底用现价的 1%
+      const ps = FA.state.psych[sym];
+      const dayRange = ps && ps.intraday ? (ps.intraday.day_high - ps.intraday.day_low) : q.last * 0.01;
+      const atrProxy = Math.max(dayRange * 0.3, q.last * 0.004);
+      const stop = Math.round(atrProxy * 10) / 10;
+      $("#tfStop").value = stop;
+      $("#tfTarget").value = Math.round(stop * 2 * 10) / 10;
+      // 建议手数：风险预算 ÷ 单手风险
+      const acct = md.account_size || 0;
+      const mult = (md.multipliers || {})[sym.replace(/0$/, "")] || 0;
+      if (acct > 0 && mult > 0 && stop > 0) {
+        const budget = acct * 0.01;
+        const perLot = stop * mult;
+        $("#tfLots").value = Math.max(1, Math.floor(budget / perLot));
+      }
+      // 理由模板（待用户补充）
+      if (!$("#tfNote").value.trim()) {
+        $("#tfNote").value = "现价入场，止损" + stop + "点（日内波幅30%），目标" + (stop * 2).toFixed(1) + "点（2:1）——理由：";
+      }
+      ensureMults().then(updateRiskPreview);
+      btn.textContent = "✅ 已填入";
+      setTimeout(() => { btn.textContent = "⚡ 一键模拟"; btn.disabled = false; }, 2000);
+    } catch (e) {
+      alert("失败：" + e.message);
+      btn.textContent = "⚡ 一键模拟"; btn.disabled = false;
+    }
+  });
+
   async function autoFillPrice() {
     const sym = $("#tfSymbol").value;
     if (!sym) return;

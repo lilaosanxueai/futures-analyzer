@@ -22,7 +22,10 @@
     <span id="clock" class="clock">--:--:--</span>
   </div>
   <div class="top-right">
-    <button class="btn ghost" id="btnTheme" title="切换皮肤">🎨</button>
+    <div style="position:relative">
+      <button class="btn ghost" id="btnTheme" title="切换皮肤">🎨</button>
+      <div class="theme-pop hidden" id="themePop"></div>
+    </div>
     <button class="btn ghost" id="btnProfile" title="交易者画像（AI 记忆）">👤 画像</button>
     <button class="btn ghost" id="btnSelfcheck" title="系统自检">🩺 自检</button>
     <button class="btn ghost" id="btnReport" title="晨/夜报">📋 简报</button>
@@ -30,7 +33,9 @@
   </div>
 </header>
 
-<nav class="tabs">
+    <div id="staleWarn" class="hidden" style="position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:100;background:var(--danger);color:#fff;padding:4px 16px;border-radius:0 0 8px 8px;font-size:12px;font-weight:600">⚠ 行情数据延迟 &gt;30 秒（数据源故障中，自动恢复）</div>
+
+    <nav class="tabs">
   <button class="tab active" data-view="work">工作台</button>
   <button class="tab" data-view="psych">品种博弈</button>
   <button class="tab" data-view="trades">交易诊断</button>
@@ -193,6 +198,7 @@
             </div>
             <div class="form-row">
               <input id="tfNote" placeholder="开仓理由（写给诊断引擎和未来的自己）">
+              <button type="button" class="btn ghost sm" id="btnSimSetup" title="自动填入现价+ATR建议止损+2:1目标+建议手数">⚡ 一键模拟</button>
               <button type="submit" class="btn primary">记入日志</button>
             </div>
             <div class="mini-note" id="riskPreview" style="margin-top:6px"></div>
@@ -228,7 +234,8 @@
           <form id="noteForm" class="note-form">
             <div class="form-row">
               <input id="nfTitle" placeholder="标题（可空）">
-              <input id="nfSymbol" placeholder="品种 如 SA0（可空）" style="max-width:150px">
+              <input id="nfSymbol" placeholder="品种 如 SA0（可空，限核心 22 品种）" style="max-width:180px" list="coreSymbolList">
+              <datalist id="coreSymbolList"></datalist>
             </div>
             <textarea id="nfContent" rows="3" placeholder="今天踩了什么坑 / 看透了什么" required></textarea>
             <div class="form-row">

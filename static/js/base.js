@@ -61,30 +61,38 @@
     psychSymbol: "",
   };
 
-  // ---------- 皮肤切换（深夜蓝/纯黑/浅色/墨绿，localStorage 持久化 + 防闪烁恢复在 index.html 内联脚本） ----------
+  // ---------- 皮肤（4 套主题，色卡选择器 + localStorage + 防闪烁恢复在 index.html 内联脚本） ----------
   const THEMES = [
-    { id: "default", name: "深夜蓝" },
-    { id: "black", name: "纯黑" },
-    { id: "light", name: "浅色" },
-    { id: "green", name: "墨绿" },
+    { id: "default", name: "深夜蓝", bg: "#0d1117", panel: "#1c2330", accent: "#3b82f6" },
+    { id: "black", name: "纯黑", bg: "#000000", panel: "#141414", accent: "#3b82f6" },
+    { id: "light", name: "浅色", bg: "#f3f5f9", panel: "#ffffff", accent: "#2563eb" },
+    { id: "green", name: "墨绿", bg: "#0b1512", panel: "#16291f", accent: "#2fbf71" },
   ];
   function applyTheme(id) {
     if (id && id !== "default") document.documentElement.setAttribute("data-theme", id);
     else document.documentElement.removeAttribute("data-theme");
     try { localStorage.setItem("fa_theme", id); } catch (e) { /* ignore */ }
-    const btn = $("#btnTheme");
-    if (btn) {
-      const cur = THEMES.find((t) => t.id === id) || THEMES[0];
-      btn.title = "皮肤：" + cur.name + "（点击切换）";
+    const pop = $("#themePop");
+    if (pop) {
+      pop.innerHTML = THEMES.map((t) =>
+        '<div class="theme-item' + (t.id === id ? " active" : "") + '" data-t="' + t.id + '">' +
+        '<span class="theme-swatch"><i style="background:' + t.bg + '"></i><i style="background:' + t.panel + '"></i><i style="background:' + t.accent + '"></i></span>' +
+        '<span>' + t.name + "</span></div>").join("");
+      $$(".theme-item", pop).forEach((el) => {
+        el.addEventListener("click", () => { applyTheme(el.getAttribute("data-t")); });
+      });
     }
   }
   applyTheme(LS.get("fa_theme", "default"));
   const themeBtn = $("#btnTheme");
   if (themeBtn) {
-    themeBtn.addEventListener("click", () => {
-      const cur = LS.get("fa_theme", "default");
-      const idx = THEMES.findIndex((t) => t.id === cur);
-      applyTheme(THEMES[(idx + 1 + THEMES.length) % THEMES.length].id);
+    themeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      $("#themePop").classList.toggle("hidden");
+    });
+    document.addEventListener("click", (e) => {
+      const pop = $("#themePop");
+      if (pop && !pop.classList.contains("hidden") && !pop.contains(e.target)) pop.classList.add("hidden");
     });
   }
 
@@ -97,20 +105,31 @@
 
   // ---------- 自选行情轮询 ----------
   let quoteTimer = null;
+  let lastQuoteTs = 0;
   async function pollQuotes() {
     const syms = FA.watch();
     if (!syms.length) { $("#watchBody").innerHTML = '<tr><td colspan="6" class="empty">点击「＋ 添加」加入自选品种</td></tr>'; return; }
     try {
       const d = await FA.api("/api/watchlist?symbols=" + encodeURIComponent(syms.join(",")));
+      lastQuoteTs = Date.now();
       const ms = $("#marketStatus");
       if (ms) {
         ms.textContent = d.market_open ? "● 交易中" : "○ 休市";
         ms.className = "chip " + (d.market_open ? "open" : "closed");
       }
+      // 数据延迟检测（>30 秒无新数据 → 可见警告）
+      const staleEl = $("#staleWarn");
+      if (staleEl) staleEl.classList.add("hidden");
       d.quotes.forEach((q) => { FA.state.quotes[q.symbol] = q; });
       renderWatch();
       FA.emit && FA.emit("quotes");
-    } catch (e) { /* 静默，下轮重试 */ }
+    } catch (e) {
+      // 静默重试；但连续失败 >30 秒时显示延迟警告
+      if (Date.now() - lastQuoteTs > 30000) {
+        const staleEl = $("#staleWarn");
+        if (staleEl) staleEl.classList.remove("hidden");
+      }
+    }
   }
   FA.pollQuotes = pollQuotes;
 
@@ -160,6 +179,24 @@
       });
     });
   }
+  // ---------- 分时图客户端回退（分钟源故障时用 5 秒轮询现价逐点画线） ----------
+  FA.intradayFallback = {};   // symbol -> [{t:"HH:MM:SS", p:price}]
+  const origRenderWatch = renderWatch;
+  renderWatch = function () {
+    origRenderWatch();
+    // 每 5 秒轮询后，把现价喂给回退缓冲
+    Object.keys(FA.state.quotes).forEach((sym) => {
+      const q = FA.state.quotes[sym];
+      if (q && q.last != null) {
+        const buf = FA.intradayFallback[sym] = FA.intradayFallback[sym] || [];
+        const now = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+        if (!buf.length || buf[buf.length - 1].p !== q.last) {
+          buf.push({ t: now, p: q.last });
+          if (buf.length > 600) buf.shift();   // 保留最近 50 分钟
+        }
+      }
+    });
+  };
   FA.renderWatch = renderWatch;
 
   // ---------- 心理快照轮询（低频，错峰） ----------
@@ -182,6 +219,13 @@
     try {
       const d = await FA.api("/api/main-list");
       FA.state.dirItems = d.items || [];
+      // 自选看板对齐核心品种池：目录（=核心池）之外的旧自选自动移除
+      const coreSet = new Set(FA.state.dirItems.map((it) => it.symbol));
+      const w = FA.watch().filter((s) => coreSet.has(s));
+      if (w.length !== FA.watch().length) {
+        FA.setWatch(w);
+        if (w.length) pollQuotes();
+      }
     } catch (e) { /* 目录失败不阻塞 */ }
     fillSymbolSelects();
     if (!FA.state.dirItems.length) setTimeout(loadDirectory, 60000);  // 目录未就绪/失败退避中，1 分钟后自动重试
@@ -215,6 +259,12 @@
           return '<option value="' + s + '">' + s + " " + FA.esc(it ? it.name : "") + "</option>";
         }).join("");
       if (cur) chatSel.value = cur;
+    }
+    // 心得页品种候选（datalist）：同样只给核心池
+    const dl = $("#coreSymbolList");
+    if (dl) {
+      dl.innerHTML = items.map((it) =>
+        '<option value="' + it.symbol + '">' + FA.esc(it.name) + "</option>").join("");
     }
   }
   FA.fillSymbolSelects = fillSymbolSelects;

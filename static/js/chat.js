@@ -46,6 +46,51 @@
     div.className = "msg " + (role === "user" ? "user" : "ai");
     const who = role === "user" ? "我" : "反幻想教练" + (ts ? " · " + new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "");
     div.innerHTML = '<div class="who">' + esc(who) + '</div><div class="bubble">' + (role === "user" ? esc(text) : md(text)) + "</div>";
+    // AI 回复后追加上下文行动按钮（把教练建议变成可执行动作）
+    if (role === "assistant" && text) {
+      const act = document.createElement("div");
+      act.className = "chat-actions";
+      const sym = $("#chatSymbol").value || "";
+      act.innerHTML =
+        '<button class="btn ghost sm" data-ca="save" title="存为心得（复盘素材）">📝 存心得</button>' +
+        (sym ? '<button class="btn ghost sm" data-ca="alert" title="对该品种设价格预警">🔔 预警</button>' +
+               '<button class="btn ghost sm" data-ca="sim" title="跳到模拟开仓（带入当前品种）">⚡ 模拟</button>' : "");
+      div.appendChild(act);
+      $$("button", act).forEach((b) => {
+        b.addEventListener("click", async () => {
+          const ca = b.getAttribute("data-ca");
+          if (ca === "save") {
+            const title = text.slice(0, 30).replace(/\n/g, " ");
+            try {
+              await api("/api/notes", { method: "POST", body: JSON.stringify({
+                title: "教练：" + title, content: text.slice(0, 500), symbol: sym || null, tags: "AI 对话",
+              }) });
+              b.textContent = "✅ 已存";
+            } catch (e) { alert("保存失败：" + e.message); }
+          } else if (ca === "alert" && sym) {
+            const q = FA.state.quotes[sym];
+            const px = q ? q.last : null;
+            const p = prompt("预警价位（升破/跌破自动按当前方向判断）：", px || "");
+            if (p === null) return;
+            const price = parseFloat(p);
+            if (isNaN(price)) return;
+            const dir = q && q.change_pct > 0 ? "above" : "below";
+            try {
+              await api("/api/alerts", { method: "POST", body: JSON.stringify({
+                symbol: sym, price: price, dir: dir, note: "教练对话后设置",
+              }) });
+              alert("已设预警：" + sym + (dir === "above" ? " 升破 " : " 跌破 ") + price);
+              FA.pollShield && FA.pollShield();
+            } catch (e) { alert("设置失败：" + e.message); }
+          } else if (ca === "sim" && sym) {
+            const tab = document.querySelector('.tab[data-view="trades"]');
+            if (tab) tab.click();
+            const sel = $("#tfSymbol");
+            if (sel) { sel.value = sym; sel.dispatchEvent(new Event("change")); }
+          }
+        });
+      });
+    }
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
     return div.querySelector(".bubble");

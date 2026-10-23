@@ -533,7 +533,96 @@ def intraday_flow(minute: list[dict]) -> dict:
             out["state"] = "减仓下行"
         else:
             out["state"] = "量价均衡"
+
+    # ---- 日内超短增强：时段节奏谱 + 模式识别 ----
+    out["rhythm"] = _session_rhythm(today, out)
+    out["pattern"] = _intraday_pattern(today, out, last)
     return out
+
+
+def _session_rhythm(today: list[dict], intra: dict) -> Optional[dict]:
+    """时段节奏谱：把当日切成 30 分钟块，找最大波动/最大量能/方向翻转的时段"""
+    if len(today) < 30:
+        return None
+    blocks: dict[str, list] = {}
+    for r in today:
+        dt = str(r.get("datetime", ""))
+        if len(dt) >= 16:
+            key = dt[11:13] + ":" + ("00" if int(dt[14:16]) < 30 else "30")
+            blocks.setdefault(key, []).append(r)
+    if not blocks:
+        return None
+    block_stats = []
+    for key, rs in sorted(blocks.items()):
+        if not rs:
+            continue
+        rng = max(float(r.get("high") or r["close"]) for r in rs) - min(float(r.get("low") or r["close"]) for r in rs)
+        vol = sum(float(r.get("volume") or 0) for r in rs)
+        direction = 1 if float(rs[-1]["close"]) >= float(rs[0]["open"]) else -1
+        block_stats.append({"t": key, "range": round(rng, 1), "vol": int(vol), "dir": direction})
+    if not block_stats:
+        return None
+    max_rng = max(block_stats, key=lambda b: b["range"])
+    max_vol = max(block_stats, key=lambda b: b["vol"])
+    flips = sum(1 for i in range(1, len(block_stats)) if block_stats[i]["dir"] != block_stats[i - 1]["dir"])
+    total_range = intra.get("day_high", 0) - intra.get("day_low", 0)
+    return {
+        "blocks": block_stats,
+        "best_block": max_rng["t"],
+        "best_range": max_rng["range"],
+        "range_pct": round(max_rng["range"] / total_range * 100, 0) if total_range else None,
+        "heaviest": max_vol["t"],
+        "flips": flips,
+        "label": (
+            f"{max_rng['t']} 时段波动最大（{max_rng['range']}点，占总波幅{max_rng['range'] / total_range * 100:.0f}%）"
+            if total_range else ""
+        ) + (f"；方向翻转 {flips} 次（{'频繁=震荡市' if flips >= 4 else '适中'}）" if flips else ""),
+    }
+
+
+def _intraday_pattern(today: list[dict], intra: dict, last: float) -> Optional[dict]:
+    """日内超短模式识别：V 反 / 开盘驱动 / VWAP 衰减 / 尾盘异动"""
+    if len(today) < 30 or not intra.get("vwap"):
+        return None
+    opens = today[:15]
+    if not opens:
+        return None
+    open_price = float(opens[0]["open"])
+    day_hi, day_lo = intra.get("day_high"), intra.get("day_low")
+    vwap = intra["vwap"]
+    out = {"tag": None, "evidence": "", "action": ""}
+    # V 反：盘中大跌后从低点反弹超半程
+    if day_lo and day_hi and open_price:
+        bounce = last - day_lo
+        drop = open_price - day_lo
+        if drop > 0 and bounce > drop * 0.6 and last < open_price:
+            out.update({"tag": "V-reversal",
+                        "evidence": f"开盘 {open_price} → 低点 {day_lo}（跌 {drop:.0f} 点）→ 现价 {last}（反弹 {(bounce / drop * 100):.0f}%）",
+                        "action": "V 反确认需站上 VWAP；未上 VWAP 的反弹=空头回补陷阱"})
+    # 开盘驱动：前 30 分钟贡献了 >60% 波幅
+    rhythm = intra.get("rhythm") or {}
+    if not out["tag"] and rhythm.get("best_block") and str(rhythm.get("best_block", "")).endswith("00") \
+            and int(str(rhythm.get("best_block", "00:00"))[:2]) <= 10:
+        out.update({"tag": "Open-Drive",
+                    "evidence": f"早盘 {rhythm.get('best_block')} 贡献 {rhythm.get('range_pct', 0):.0f}% 波幅",
+                    "action": "开盘驱动日：全天方向大概率早盘已定，午后多为回抽确认"})
+    # VWAP 衰减：多次触碰 VWAP 无法穿越
+    if not out["tag"] and intra.get("vwap_dev") is not None and abs(intra["vwap_dev"]) < 0.15 \
+            and intra.get("chg15m") is not None and intra["chg15m"] * (1 if last > vwap else -1) < 0:
+        out.update({"tag": "VWAP-Fade",
+                    "evidence": f"现价 {last} 贴 VWAP {vwap}（偏离 {intra['vwap_dev']:+.2f}%）但 15 分钟动能 {intra['chg15m']:+.2f}% 反向",
+                    "action": "VWAP 衰减模式：反复触碰不破=中枢吸/抛，突破方向即日内主方向"})
+    # 尾盘异动：最后 30 分钟有异常量能或方向
+    if not out["tag"] and len(today) >= 30:
+        tail = today[-30:]
+        tail_vol = sum(float(r.get("volume") or 0) for r in tail)
+        body_vol = sum(float(r.get("volume") or 0) for r in today[:-30])
+        if body_vol > 0 and tail_vol / (body_vol / max(1, len(today) - 30)) > 2.5:
+            direction = "拉升" if float(tail[-1]["close"]) > float(tail[0]["open"]) else "下杀"
+            out.update({"tag": "Late-Spike",
+                        "evidence": f"尾盘 30 分钟量能达日均 2.5× 以上，方向{direction}",
+                        "action": "尾盘异动：次日开盘惯性延续概率高，注意隔夜跳空方向"})
+    return out if out["tag"] else None
 
 
 # ---------------------------------------------------------------- 行情阶段判定

@@ -1311,7 +1311,12 @@ _CORE_SET = set(CORE_VARIETIES)
 
 @app.get("/api/main-list")
 async def main_list():
-    directory = await get_directory()
+    """品种目录（Core16）。新浪目录源限流时用静态内置清单兜底——
+    名称/代码/拼音/交易所全部预置，搜索添加永不因数据源故障瘫痪。"""
+    try:
+        directory = await get_directory()
+    except Exception:
+        directory = {}
     items = [
         {
             "symbol": sym,
@@ -1323,6 +1328,21 @@ async def main_list():
         for sym, v in sorted(directory.items())
         if _variety_prefix(sym) in _CORE_SET
     ]
+    if not items:
+        # 静态兜底：名称/代码/拼音/交易所写死，目录源挂了也能搜能加
+        _STATIC_CORE = {
+            "A0": ("豆一", "DCE"), "AG0": ("白银", "SHFE"), "AU0": ("黄金", "SHFE"),
+            "C0": ("玉米", "DCE"), "FG0": ("玻璃", "CZCE"), "I0": ("铁矿石", "DCE"),
+            "M0": ("豆粕", "DCE"), "MA0": ("甲醇", "CZCE"), "RB0": ("螺纹钢", "SHFE"),
+            "RM0": ("菜粕", "CZCE"), "SA0": ("纯碱", "CZCE"), "SC0": ("原油", "INE"),
+            "SR0": ("白糖", "CZCE"), "TA0": ("PTA", "CZCE"), "V0": ("PVC", "DCE"),
+            "Y0": ("豆油", "DCE"),
+        }
+        items = [
+            {"symbol": sym, "name": nm, "exchange": ex,
+             "py": _py_initials(nm), "pyf": _py_full(nm)}
+            for sym, (nm, ex) in sorted(_STATIC_CORE.items())
+        ]
     return {"ok": True, "items": items}
 
 
@@ -1915,6 +1935,10 @@ async def ai_chat(body: ChatIn):
               + ("\n\n" + flaw if flaw else "")
               + ("\n\n" + position if position else "")
               + ("\n\n" + context if context else ""))
+    # 上下文瘦身：超限时从尾部截断（快照/要闻/席位是低优先级，画像/持仓在高优先级前面不受影响）
+    MAX_SYS_CHARS = 6000
+    if len(system) > MAX_SYS_CHARS:
+        system = system[:MAX_SYS_CHARS] + "\n\n（上下文因长度限制截断——最新数据已包含，更早的辅助信息省略）"
     messages = _build_api_messages(body.messages, system)
 
     import logging
@@ -4022,10 +4046,12 @@ async def discipline_config_get():
 
 @app.get("/api/multipliers")
 async def multipliers():
-    """合约乘数表 + 账户权益（前端开仓表单实时风险金额计算用）"""
+    """合约乘数表 + 账户权益 + 常见品种手续费参考（前端风险金额与手续费预览用）"""
     d = load_config()["discipline"]
+    fee_ref = {p: round(m * 0.4, 1) for p, m in CONTRACT_MULTIPLIER.items()}   # 粗估：开+平双边约 0.4 元/点/手
     return {"ok": True, "multipliers": dict(CONTRACT_MULTIPLIER),
-            "account_size": float(d.get("account_size") or 0)}
+            "account_size": float(d.get("account_size") or 0),
+            "fee_ref": fee_ref}
 
 
 # ---------------------------------------------------------------- 散户缺陷画像（真实交易数据驱动）
