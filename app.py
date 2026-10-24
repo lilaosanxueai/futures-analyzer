@@ -2054,17 +2054,24 @@ async def _llm_text(prompt: str, max_tokens: int = 1600) -> str:
         raise HTTPException(status_code=400, detail="尚未配置 API Key，请先在「⚙ AI 设置」中配置")
     last = {"code": 502, "detail": "AI 调用失败"}
     for idx, cand in enumerate(candidates):
-        async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.post(
-                f"{cand['base_url']}/chat/completions",
-                headers={"Authorization": f"Bearer {cand['api_key']}"},
-                json={
-                    "model": cand["model"],
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.5,
-                    "max_tokens": max(max_output_for(cand["model"]), max_tokens),
-                },
-            )
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                resp = await client.post(
+                    f"{cand['base_url']}/chat/completions",
+                    headers={"Authorization": f"Bearer {cand['api_key']}"},
+                    json={
+                        "model": cand["model"],
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.5,
+                        "max_tokens": max(max_output_for(cand["model"]), max_tokens),
+                    },
+                )
+        except httpx.HTTPError as e:
+            # 网络层异常（上游断连/超时/连接重置）：计入失败原因并尝试下一家候选
+            last = {"code": 502, "detail": f"{cand['provider']} 网络异常：{type(e).__name__}"}
+            logger.info(f"[llm-text] {cand['provider']} 网络异常 {type(e).__name__}，切换候选")
+            _note_provider_fail(cand["provider"])
+            continue
         if resp.status_code == 200:
             try:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
