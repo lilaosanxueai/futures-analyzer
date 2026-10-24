@@ -1195,8 +1195,19 @@ def _seat_text(sym: str, s: dict, day_chg_pct: Optional[float] = None) -> str:
 
 
 async def _seat_blk(symbol: str, day_chg_pct: Optional[float] = None) -> str:
+    """席位注入块（AI 体检/快评用）：缓存优先快速返回，冷启动 8 秒超时跳过——
+    盘后日更数据不值得为它拖慢 AI 响应（下一轮调用自然有缓存）"""
     try:
-        return _seat_text(symbol, await _seat_data(symbol), day_chg_pct)
+        loop_now = asyncio.get_event_loop().time()
+        cached = _SEAT_CACHE.get(symbol)
+        if cached and cached[1]:
+            return _seat_text(symbol, cached[1], day_chg_pct)
+        # 冷启动：限时拉取
+        try:
+            data = await asyncio.wait_for(_seat_data(symbol), timeout=8)
+            return _seat_text(symbol, data, day_chg_pct)
+        except (asyncio.TimeoutError, Exception):
+            return ""
     except Exception:
         return ""
 
@@ -2233,7 +2244,7 @@ _MONITOR = {
     "watch": set(),     # 前端自选注册
     "last_check": None,
 }
-MONITOR_INTERVAL = 30.0
+MONITOR_INTERVAL = 15.0   # 盯盘提速：夜盘实时性（原 30s；hq 快路径单品种 ~0.2s，16 品种轮询压力可控）
 MONITOR_COOLDOWN = 900.0
 MONITOR_MAX_EVENTS = 100
 

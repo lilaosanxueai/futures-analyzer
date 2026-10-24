@@ -739,20 +739,27 @@ ${(() => {
     const m = _mults[pfx];
     const stop = parseFloat($("#tfStop").value) || 0;
     const lots = parseFloat($("#tfLots").value) || 0;
+    const target = parseFloat($("#tfTarget").value) || 0;
     if (!sym || !m || stop <= 0 || lots <= 0) { el.textContent = ""; return; }
     const risk = stop * m * lots;
     const fee = (_feeRef[pfx] || m * 0.4) * lots;
     let txt = "💸 本笔满打亏损：¥" + risk.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) +
       "（止损 " + stop + " 点 × " + m + " 元/点 × " + lots + " 手）" +
       " + 手续费约 ¥" + fee.toFixed(0) + " = ¥" + (risk + fee).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+    if (target > 0) {
+      const rr = (target / stop).toFixed(1);
+      const rrCls = rr >= 2 ? "num-up" : rr < 1 ? "num-down" : "";
+      txt += "｜盈亏比 <b class='" + rrCls + "'>" + target + ":" + stop + "（" + rr + "R）</b>" +
+        (rr < 1.5 ? " ⚠ 目标过近，低于 1.5R 的单不值得开" : rr >= 2 ? " ✅ ≥2R 达标" : "");
+    }
     if (_acctSize > 0) {
       const pct = risk / _acctSize * 100;
-      txt += "，占账户 " + pct.toFixed(2) + "%" + (pct > 1 ? " ⚠ 超单笔风险预算" : "");
+      txt += "｜占账户 " + pct.toFixed(2) + "%" + (pct > 1 ? " ⚠ 超单笔风险预算" : "");
     } else {
       txt += "（设置里填账户权益后显示占比）";
     }
-    el.textContent = txt;
-    el.style.color = risk > 0 && _acctSize > 0 && risk / _acctSize * 100 > 1 ? "var(--danger)" : "";
+    el.innerHTML = txt;
+    el.style.color = "";
   }
   // ⚡ 一键模拟：现价入场 + ATR 建议止损 + 2:1 目标 + 建议手数（基于账户风险预算）
   $("#btnSimSetup").addEventListener("click", async () => {
@@ -809,7 +816,7 @@ ${(() => {
     } catch (e) { /* ignore */ }
   }
   $("#tfSymbol").addEventListener("change", autoFillPrice);
-  ["tfStop", "tfLots"].forEach((id) => {
+  ["tfStop", "tfLots", "tfTarget"].forEach((id) => {
     const el = $("#" + id);
     if (el) {
       el.addEventListener("change", () => { ensureMults().then(updateRiskPreview); });
