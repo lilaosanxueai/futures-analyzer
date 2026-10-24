@@ -434,16 +434,19 @@
             ' <a class="link-btn danger" data-del-alert="' + a.id + '">删</a>').join("　") + "</div>";
         } catch (e) { /* ignore */ }
       }
-      // 自动模拟开关 + 战绩
+      // 自动模拟开关 + 战绩 + 信号漏斗
       let simLine = "";
       try {
         const sim = await FA.api("/api/auto-sim");
         const st = sim.stats || {};
         const t = st.today || {};
-        simLine = '<div class="mini-note" style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">' +
+        const fn = st.funnel || {};
+        const fnTxt = fn.scans ? ' <span class="muted">漏斗: ' + fn.scans + "扫→" + (fn.resonance || 0) + "共振→" +
+          (fn.funding || 0) + "顺资→" + (fn.opened || 0) + "开" + (fn.gate_blocked ? "（闸拦" + fn.gate_blocked + "）" : "") + "</span>" : "";
+        simLine = '<div class="mini-note" style="grid-column:1/-1;display:flex;flex-direction:column;gap:2px">' +
           '<span>🤖 自动模拟 <label style="cursor:pointer"><input type="checkbox" id="simToggle"' + (sim.enabled ? " checked" : "") + '> 启用</label>' +
           (t.count ? ' 今日 ' + t.count + ' 笔 · 胜率 ' + t.win_rate + '% · <b class="' + (t.total_pts > 0 ? "num-up" : t.total_pts < 0 ? "num-down" : "") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</b>' : "（今日暂无平仓）") +
-          ' <span class="muted">持仓 ' + (st.open_count || 0) + '</span></span></div>';
+          ' <span class="muted">持仓 ' + (st.open_count || 0) + "</span>" + fnTxt + "</span></div>";
       } catch (e) { /* ignore */ }
       grid.innerHTML =
         simLine +

@@ -1128,6 +1128,23 @@ ATR 动态止损 + 2:1 目标 + 尾盘强平。与用户手动记录分离（aut
 
 AUTO_SIM_FILE = BASE_DIR / "auto_trades.json"
 _auto_sim_state: dict = {"running": False, "last_open": {}, "day_pnl": {}, "boot_ts": 0}
+# 信号诊断计数：每天扫描了多少次、各关卡通关/卡关数量——调阈值看数据不看感觉
+_sig_diag: dict = {"date": "", "scans": 0, "resonance": 0, "funding": 0, "filter": 0,
+                   "gate_blocked": 0, "cooldown": 0, "opened": 0}
+
+
+def _sig_diag_tick() -> None:
+    """跨日自动清零"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _sig_diag["date"] != today:
+        saved = {k: v for k, v in _sig_diag.items() if k != "date"}
+        if _sig_diag["date"] and any(saved.values()):
+            import logging
+            logging.getLogger("uvicorn.error").info(
+                f"[auto-sim] {_sig_diag['date']} 信号漏斗：扫描{saved['scans']} → 共振{saved['resonance']}"
+                f" → 顺资金{saved['funding']} → 过滤{saved['filter']} → 闸门拦{saved['gate_blocked']} → 开仓{saved['opened']}")
+        _sig_diag.update({"date": today, "scans": 0, "resonance": 0, "funding": 0,
+                          "filter": 0, "gate_blocked": 0, "cooldown": 0, "opened": 0})
 
 
 def _load_auto_trades() -> list[dict]:
@@ -1183,6 +1200,37 @@ def _auto_sim_signal(snap: dict) -> Optional[dict]:
     return {"direction": direction, "stop": round(stop, 1), "target": round(stop * 2, 1)}
 
 
+def _auto_sim_signal_diag(snap: dict) -> tuple[Optional[dict], str]:
+    """带关卡回报的信号判定：返回 (信号或None, 卡关卡名)——漏斗统计用"""
+    intra = snap.get("intraday") or {}
+    c5, c15, c30 = intra.get("chg5m"), intra.get("chg15m"), intra.get("chg30m")
+    if c5 is None or c15 is None or c30 is None:
+        return None, "nodata"
+    if c5 > 0 and c15 > 0.08 and c30 > 0:
+        direction = "long"
+    elif c5 < 0 and c15 < -0.08 and c30 < 0:
+        direction = "short"
+    else:
+        return None, "resonance"
+    cap5 = (snap.get("capital") or {}).get("state5")
+    if direction == "long" and cap5 != "增仓上行":
+        return None, "funding"
+    if direction == "short" and cap5 != "增仓下行":
+        return None, "funding"
+    pat = intra.get("pattern") or {}
+    if pat.get("tag") == "V-reversal" and direction == "long":
+        return None, "filter"
+    retail = ((snap.get("parties") or {}).get("retail") or {})
+    if (retail.get("trap_risk") or 0) >= 75:
+        return None, "filter"
+    last = snap.get("last")
+    rng = (intra.get("day_high") or 0) - (intra.get("day_low") or 0)
+    if not last or rng <= 0:
+        return None, "nodata"
+    stop = max(rng * 0.3, last * 0.004)
+    return {"direction": direction, "stop": round(stop, 1), "target": round(stop * 2, 1)}, "ok"
+
+
 async def auto_sim_loop():
     """自动模拟主循环：交易时段每 30 秒扫描自选，信号+闸门→模拟开仓；触损/触盈/尾盘→平仓。"""
     await asyncio.sleep(60)
@@ -1233,7 +1281,18 @@ async def auto_sim_loop():
                 loop_now = asyncio.get_event_loop().time()
                 if loop_now - _auto_sim_state["last_open"].get(sym, -1e9) < 15 * 60:
                     continue   # 同品种 15 分钟冷却
-                sig = _auto_sim_signal(snap)
+                _sig_diag_tick()
+                _sig_diag["scans"] += 1
+                sig, stage = _auto_sim_signal_diag(snap)
+                if stage == "resonance" or stage == "nodata":
+                    continue
+                _sig_diag["resonance"] += 1
+                if stage == "funding":
+                    continue
+                _sig_diag["funding"] += 1
+                if stage == "filter":
+                    continue
+                _sig_diag["filter"] += 1
                 if not sig:
                     continue
                 # 走闸门（模拟同样受纪律约束——被拦即弃）
@@ -1241,8 +1300,10 @@ async def auto_sim_loop():
                         "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1}
                 blockers = _entry_gate(mock, snap, last, [t for t in trades if t.get("status") == "open"])
                 if blockers:
-                    continue   # 被闸门拦截的信号不入场（统计进拦截日志不污染用户数据）
+                    _sig_diag["gate_blocked"] += 1
+                    continue   # 被闸门拦截的信号不入场
                 now_ms = int(now.timestamp() * 1000)
+                _sig_diag["opened"] += 1
                 trades.append({
                     "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": now.strftime("%Y-%m-%d"),
                     "symbol": sym, "direction": sig["direction"], "entry": last,
@@ -1281,6 +1342,7 @@ def _auto_sim_stats() -> dict:
                 "total_pts": round(sum(pts), 1)}
     return {"today": _s(today_closed), "total": _s(closed),
             "open_count": sum(1 for t in trades if t.get("status") == "open"),
+            "funnel": dict(_sig_diag) if _sig_diag.get("date") == today else {"date": today},
             "trades": [t for t in trades if t.get("date") == today][-10:]}
 
 
