@@ -446,7 +446,9 @@
         simLine = '<div class="mini-note" style="grid-column:1/-1;display:flex;flex-direction:column;gap:2px">' +
           '<span>🤖 自动模拟 <label style="cursor:pointer"><input type="checkbox" id="simToggle"' + (sim.enabled ? " checked" : "") + '> 启用</label>' +
           (t.count ? ' 今日 ' + t.count + ' 笔 · 胜率 ' + t.win_rate + '% · <b class="' + (t.total_pts > 0 ? "num-up" : t.total_pts < 0 ? "num-down" : "") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</b>' : "（今日暂无平仓）") +
-          ' <span class="muted">持仓 ' + (st.open_count || 0) + "</span>" + fnTxt + "</span></div>";
+          ' <span class="muted">持仓 ' + (st.open_count || 0) + "</span>" + fnTxt +
+          ' <a class="link-btn" id="simBtBtn">📊 策略回测</a></span>' +
+          '<div id="simBtBody" class="hidden" style="margin-top:4px"></div></div>';
       } catch (e) { /* ignore */ }
       grid.innerHTML =
         simLine +
@@ -468,6 +470,31 @@
             await FA.api("/api/auto-sim", { method: "POST", body: JSON.stringify({ enabled: simTgl.checked }) });
             pollShield();
           } catch (e) { alert("设置失败：" + e.message); simTgl.checked = !simTgl.checked; }
+        });
+      }
+      const simBtBtn = $("#simBtBtn");
+      if (simBtBtn) {
+        simBtBtn.addEventListener("click", async () => {
+          const body = $("#simBtBody");
+          body.classList.remove("hidden");
+          body.innerHTML = '<span class="muted small">回测计算中（拉取自选品种历史，首次约 10-30 秒）…</span>';
+          try {
+            const d = await FA.api("/api/auto-sim/backtest");
+            const bt = d.backtest || {};
+            if (!bt.n) {
+              body.innerHTML = '<span class="muted small">样本不足</span>';
+              return;
+            }
+            const cls = bt.exp_pct < 0 ? "num-down" : "num-up";
+            body.innerHTML =
+              '<span class="small">近两个月 15 分钟口径：' + bt.n + ' 笔 · 胜率 <b>' + bt.win_rate + '%</b> · 期望 <b class="' + cls + '">' +
+              (bt.exp_pct > 0 ? "+" : "") + bt.exp_pct + '%/笔</b> · 均持 ' + bt.avg_bars + ' bar · 最差 ' + bt.worst + '% / 最好 +' + bt.best + '%' +
+              '<br>多 ' + (bt.long_n || 0) + ' 笔(胜率' + (bt.long_wr != null ? bt.long_wr + "%" : "--") + '，期望' + (bt.long_exp > 0 ? "+" : "") + (bt.long_exp != null ? bt.long_exp : "--") + '%)' +
+              ' ｜ 空 ' + (bt.short_n || 0) + ' 笔(胜率' + (bt.short_wr != null ? bt.short_wr + "%" : "--") + '，期望' + (bt.short_exp > 0 ? "+" : "") + (bt.short_exp != null ? bt.short_exp : "--") + '%)' +
+              ' <span class="muted">品种: ' + (bt.universe || []).join(",") + '</span></span>';
+          } catch (e) {
+            body.innerHTML = '<span class="muted small">回测失败：' + FA.esc(e.message) + "</span>";
+          }
         });
       }
     } catch (e) { /* ignore */ }

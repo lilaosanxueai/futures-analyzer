@@ -1353,6 +1353,145 @@ async def auto_sim_get():
             "stats": _auto_sim_stats()}
 
 
+_sim_bt_cache: dict = {"key": None, "ts": 0.0, "result": {}}
+
+
+def _sim_bt_run(mb_map: dict[str, list], daily_map: dict[str, list]) -> dict:
+    """历史重演自动模拟信号（15 分钟线口径近似）：
+    入场=当前 bar 有向(≥0.08%) 且与 2-bar 走势同向（共振近似）+ 当日日线资金增仓同向（顺资金）；
+    出场=触损(当日已走波幅的30%)/触盈(2:1)/当日末bar强平。统计期望/胜率/持仓bar数。"""
+    agg = {"n": 0, "win": 0, "ret_sum": 0.0, "bars_held": 0, "worst": 0.0, "best": 0.0,
+           "by_dir": {"long": [0, 0, 0.0], "short": [0, 0, 0.0]}}   # [n, win, ret_sum]
+    for sym, bars in mb_map.items():
+        dly = daily_map.get(sym) or []
+        # 日线资金状态按日期索引
+        cap_by_date = {}
+        if len(dly) >= 25:
+            for i in range(5, len(dly)):
+                d = str(dly[i].get("date", ""))[:10]
+                o5 = dly[i].get("oi") or 0
+                o0 = dly[i - 5].get("oi") or 0
+                c1 = dly[i].get("close") or 0
+                c0 = dly[i - 5].get("close") or 0
+                if not (o0 and c0):
+                    continue
+                adding = (o5 / o0 - 1) * 100 > 1
+                if adding and c1 > c0:
+                    cap_by_date[d] = "增仓上行"
+                elif adding and c1 < c0:
+                    cap_by_date[d] = "增仓下行"
+        # 按 bar 扫描（15 分钟线）
+        by_day: dict[str, list] = {}
+        for b in bars:
+            by_day.setdefault(str(b["datetime"])[:10], []).append(b)
+        for day, dbars in by_day.items():
+            if len(dbars) < 10:
+                continue
+            cap = cap_by_date.get(day)
+            day_hi, day_lo = max(x["high"] for x in dbars), min(x["low"] for x in dbars)
+            rng = day_hi - day_lo
+            if rng <= 0:
+                continue
+            stop_dist = max(rng * 0.3, dbars[0]["close"] * 0.004)
+            i = 2
+            while i < len(dbars) - 1:
+                b0, b1, b2 = dbars[i], dbars[i - 1], dbars[i - 2]
+                chg = (b0["close"] / b2["close"] - 1) * 100
+                bar_dir = 1 if b0["close"] >= b0["open"] else -1
+                if abs(chg) < 0.08 or (1 if b0["close"] >= b2["close"] else -1) != bar_dir:
+                    i += 1
+                    continue
+                direction = bar_dir
+                if direction == 1 and cap != "增仓上行":
+                    i += 1
+                    continue
+                if direction == -1 and cap != "增仓下行":
+                    i += 1
+                    continue
+                entry = b0["close"]
+                sign = direction
+                stop_p = stop_dist
+                target_p = stop_dist * 2
+                exit_px, reason, held = None, None, 0
+                for j in range(i + 1, len(dbars)):
+                    held += 1
+                    lo_, hi_ = dbars[j]["low"], dbars[j]["high"]
+                    against = lo_ if sign > 0 else hi_
+                    favor = hi_ if sign > 0 else lo_
+                    if abs(against - entry) >= stop_p:
+                        exit_px, reason = entry - sign * stop_p, "stop"
+                        break
+                    if abs(favor - entry) >= target_p:
+                        exit_px, reason = entry + sign * target_p, "target"
+                        break
+                if exit_px is None:
+                    if i + 1 < len(dbars):
+                        exit_px, reason = dbars[-1]["close"], "eod"
+                        held = len(dbars) - 1 - i
+                    else:
+                        i += 1
+                        continue
+                ret = (exit_px / entry - 1) * 100 * sign
+                agg["n"] += 1
+                agg["win"] += 1 if ret > 0 else 0
+                agg["ret_sum"] += ret
+                agg["bars_held"] += held
+                agg["worst"] = min(agg["worst"], ret)
+                agg["best"] = max(agg["best"], ret)
+                dd = "long" if sign > 0 else "short"
+                agg["by_dir"][dd][0] += 1
+                agg["by_dir"][dd][1] += 1 if ret > 0 else 0
+                agg["by_dir"][dd][2] += ret
+                i += 8   # 冷却 2 小时（8 根 15 分钟 bar）
+    n = agg["n"]
+    if not n:
+        return {"n": 0}
+    bd = agg["by_dir"]
+    return {
+        "n": n, "win_rate": round(agg["win"] / n * 100, 1),
+        "exp_pct": round(agg["ret_sum"] / n, 3),
+        "avg_bars": round(agg["bars_held"] / n, 1),
+        "worst": round(agg["worst"], 2), "best": round(agg["best"], 2),
+        "long_n": bd["long"][0], "long_wr": round(bd["long"][1] / bd["long"][0] * 100, 1) if bd["long"][0] else None,
+        "long_exp": round(bd["long"][2] / bd["long"][0], 3) if bd["long"][0] else None,
+        "short_n": bd["short"][0], "short_wr": round(bd["short"][1] / bd["short"][0] * 100, 1) if bd["short"][0] else None,
+        "short_exp": round(bd["short"][2] / bd["short"][0], 3) if bd["short"][0] else None,
+    }
+
+
+async def _ensure_sim_bt(symbols: list) -> dict:
+    key = tuple(sorted(symbols))
+    loop_now = asyncio.get_event_loop().time()
+    if _sim_bt_cache["key"] == key and loop_now - _sim_bt_cache["ts"] < 86400:
+        return _sim_bt_cache["result"]
+    mb_map, daily_map = {}, {}
+    for s in symbols:
+        try:
+            rows = await get_minute(s, "15")
+            mb = [{"datetime": str(r.get("datetime", "")), "open": float(r.get("open") or 0),
+                   "high": float(r.get("high") or 0), "low": float(r.get("low") or 0),
+                   "close": float(r.get("close") or 0)} for r in rows if r.get("close")]
+            if len(mb) > 100:
+                mb_map[s] = mb
+        except Exception:
+            pass
+        try:
+            daily_map[s] = await _daily_bars_for(s)
+        except Exception:
+            daily_map[s] = []
+    result = await asyncio.to_thread(_sim_bt_run, mb_map, daily_map)
+    result["universe"] = sorted(mb_map.keys())
+    _sim_bt_cache.update({"key": key, "ts": loop_now, "result": result})
+    return result
+
+
+@app.get("/api/auto-sim/backtest")
+async def auto_sim_backtest():
+    """自动模拟信号历史回测（自选品种，24h 缓存）——策略期望的先验证据"""
+    syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})[:6]
+    return {"ok": True, "backtest": await _ensure_sim_bt(syms)}
+
+
 @app.post("/api/auto-sim")
 async def auto_sim_toggle(body: dict):
     cfg = load_config()
@@ -5577,7 +5716,7 @@ async def _generate_report() -> str:
                          and t.get("date") == yd and t.get("result_pts") is not None]
             my_pts = sum(float(t["result_pts"]) for t in my_closed) if my_closed else None
             parts.append(
-                f"【昨日纪律对照】🤖 系统模拟：{sim_today['count']} 笔、胜率 {sim_today.get('win_rate', 0)}%、"
+                f"【昨日纪律对照（模拟为纪律参照而非盈利策略）】🤖 系统模拟：{sim_today['count']} 笔、胜率 {sim_today.get('win_rate', 0)}%、"
                 f"{sim_today['total_pts']:+.1f} 点"
                 + (f" vs 👤 手动操作：{len(my_closed)} 笔、{my_pts:+.1f} 点" if my_closed else "（手动无平仓）")
                 + ("——差距就是纪律的价格" if my_closed and my_pts is not None and my_pts < sim_today["total_pts"] else "")
