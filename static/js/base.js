@@ -434,7 +434,19 @@
             ' <a class="link-btn danger" data-del-alert="' + a.id + '">删</a>').join("　") + "</div>";
         } catch (e) { /* ignore */ }
       }
+      // 自动模拟开关 + 战绩
+      let simLine = "";
+      try {
+        const sim = await FA.api("/api/auto-sim");
+        const st = sim.stats || {};
+        const t = st.today || {};
+        simLine = '<div class="mini-note" style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">' +
+          '<span>🤖 自动模拟 <label style="cursor:pointer"><input type="checkbox" id="simToggle"' + (sim.enabled ? " checked" : "") + '> 启用</label>' +
+          (t.count ? ' 今日 ' + t.count + ' 笔 · 胜率 ' + t.win_rate + '% · <b class="' + (t.total_pts > 0 ? "num-up" : t.total_pts < 0 ? "num-down" : "") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</b>' : "（今日暂无平仓）") +
+          ' <span class="muted">持仓 ' + (st.open_count || 0) + '</span></span></div>';
+      } catch (e) { /* ignore */ }
       grid.innerHTML =
+        simLine +
         cell(d.blocked_today, "今日闸门拦截", "num-down") +
         cell(d.forced_today, "今日强行违规", d.forced_today ? "num-up" : "") +
         cell((d.exposure_pct == null ? "--" : d.exposure_pct + "%"), "持仓风险敞口", expCls) +
@@ -446,6 +458,15 @@
           pollShield();
         });
       });
+      const simTgl = $("#simToggle");
+      if (simTgl) {
+        simTgl.addEventListener("change", async () => {
+          try {
+            await FA.api("/api/auto-sim", { method: "POST", body: JSON.stringify({ enabled: simTgl.checked }) });
+            pollShield();
+          } catch (e) { alert("设置失败：" + e.message); simTgl.checked = !simTgl.checked; }
+        });
+      }
     } catch (e) { /* ignore */ }
   }
   FA.pollShield = pollShield;

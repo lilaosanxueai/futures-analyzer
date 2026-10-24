@@ -148,6 +148,9 @@ DEFAULT_CONFIG = {
         "sensitivity": 1.0,          # 阈值倍率：0.5 灵敏 / 1 标准 / 2 迟钝
         "focus": ["SC0", "AU0"],
     },
+    "auto_sim": {
+        "enabled": False,            # 自动模拟引擎（日内高频·纯规则）
+    },
     # 风控参数（诊断引擎的预警阈值，用户按自身账户设定，AI 不代定）
     "discipline": {
         "account_size": 0.0,       # 账户权益（0=未设置，风险类检查跳过）
@@ -291,6 +294,7 @@ async def _warmup():
 async def lifespan(_app):
     warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
+    autosim_task = asyncio.create_task(auto_sim_loop())
     trail_task = asyncio.create_task(trail_loop())
     psych_task = asyncio.create_task(psych_watch_loop())
     diagnose_task = asyncio.create_task(diagnose_loop())
@@ -298,7 +302,7 @@ async def lifespan(_app):
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
-    for t in (warmup_task, monitor_task, trail_task, psych_task, diagnose_task,
+    for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
               care_task, report_task, selfcheck_task):
         t.cancel()
 
@@ -1114,6 +1118,185 @@ async def gate_backtest(symbols: str = ""):
     stats = await _ensure_gate_bt(syms)
     return {"ok": True, "stats": stats,
             "unbacktestable": [{"code": c, "note": "持仓/账户状态类规则，依赖你的交易记录，无市场回测"} for c in _BT_UNBACKTESTABLE]}
+
+
+# ---------------------------------------------------------------- 自动模拟引擎（日内高频·纯规则·零 AI 消耗）
+
+"""系统自己按纪律跑日内模拟：开仓信号=多周期共振+顺资金方向，全程过闸门，
+ATR 动态止损 + 2:1 目标 + 尾盘强平。与用户手动记录分离（auto_trades.json），
+每日结算"系统战绩 vs 手动操作"——纪律的价值用数字呈现。"""
+
+AUTO_SIM_FILE = BASE_DIR / "auto_trades.json"
+_auto_sim_state: dict = {"running": False, "last_open": {}, "day_pnl": {}, "boot_ts": 0}
+
+
+def _load_auto_trades() -> list[dict]:
+    if AUTO_SIM_FILE.exists():
+        try:
+            return json.loads(AUTO_SIM_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_auto_trades(items: list[dict]) -> None:
+    try:
+        AUTO_SIM_FILE.write_text(json.dumps(items[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _auto_sim_signal(snap: dict) -> Optional[dict]:
+    """纯规则开仓信号（不调 LLM）：多周期共振 + 顺 5 日资金 + 模式不反向。
+    返回 {direction, stop, target} 或 None。"""
+    intra = snap.get("intraday") or {}
+    c5, c15, c30 = intra.get("chg5m"), intra.get("chg15m"), intra.get("chg30m")
+    if c5 is None or c15 is None or c30 is None:
+        return None
+    # 多周期共振（5/15/30 全同向且 15 分钟动能 ≥0.08%——过滤噪音）
+    if c5 > 0 and c15 > 0.08 and c30 > 0:
+        direction = "long"
+    elif c5 < 0 and c15 < -0.08 and c30 < 0:
+        direction = "short"
+    else:
+        return None
+    # 顺 5 日资金方向（增仓上行只多 / 增仓下行只空；减仓状态不入场）
+    cap5 = (snap.get("capital") or {}).get("state5")
+    if direction == "long" and cap5 != "增仓上行":
+        return None
+    if direction == "short" and cap5 != "增仓下行":
+        return None
+    # 模式识别不反向（V 反中不做反向单、VWAP 衰减等确认）
+    pat = intra.get("pattern") or {}
+    if pat.get("tag") == "V-reversal" and direction == "long":
+        return None
+    # 陷阱指数过高不入场（拥挤区）
+    retail = ((snap.get("parties") or {}).get("retail") or {})
+    if (retail.get("trap_risk") or 0) >= 75:
+        return None
+    # ATR 动态止损 + 2:1 目标
+    rng = (intra.get("day_high") or snap.get("last") or 0) - (intra.get("day_low") or snap.get("last") or 0)
+    last = snap.get("last")
+    if not last or rng <= 0:
+        return None
+    stop = max(rng * 0.3, last * 0.004)
+    return {"direction": direction, "stop": round(stop, 1), "target": round(stop * 2, 1)}
+
+
+async def auto_sim_loop():
+    """自动模拟主循环：交易时段每 30 秒扫描自选，信号+闸门→模拟开仓；触损/触盈/尾盘→平仓。"""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            cfg = load_config()
+            if not (cfg.get("auto_sim") or {}).get("enabled"):
+                await asyncio.sleep(30)
+                continue
+            now = datetime.now()
+            if not is_trading_time(now):
+                # 收盘后清当日缓存
+                _auto_sim_state["last_open"] = {}
+                await asyncio.sleep(60)
+                continue
+            hhmm = now.strftime("%H:%M")
+            # 尾盘强平窗口：日盘 14:50+ / 夜盘 22:50+（除 SC/AU/AG 至 02:20）
+            force_close = (hhmm >= "14:50" and hhmm < "15:00") or (hhmm >= "22:50" and hhmm < "23:00")
+            trades = _load_auto_trades()
+            syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})
+            for sym in syms[:6]:   # 最多盯 6 个自选
+                try:
+                    snap = await psych_snapshot(sym)
+                except Exception:
+                    continue
+                if not snap or snap.get("last") is None:
+                    continue
+                last = snap["last"]
+                # ---- 持仓管理 ----
+                for t in trades:
+                    if t.get("status") != "open" or t["symbol"] != sym:
+                        continue
+                    sign = 1 if t["direction"] == "long" else -1
+                    pnl = sign * (last - t["entry"])
+                    if pnl <= -t["stop_points"]:            # 触损
+                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                 closed_ts=int(now.timestamp() * 1000), exit_mood="止损执行", close_reason="stop")
+                    elif pnl >= t["target_points"]:         # 触盈
+                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                 closed_ts=int(now.timestamp() * 1000), exit_mood="按计划兑现", close_reason="target")
+                    elif force_close:                        # 尾盘强平
+                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                 closed_ts=int(now.timestamp() * 1000), exit_mood="尾盘清仓", close_reason="eod")
+                # ---- 开仓 ----
+                has_open = any(t.get("status") == "open" and t["symbol"] == sym for t in trades)
+                if has_open or force_close:
+                    continue
+                loop_now = asyncio.get_event_loop().time()
+                if loop_now - _auto_sim_state["last_open"].get(sym, -1e9) < 15 * 60:
+                    continue   # 同品种 15 分钟冷却
+                sig = _auto_sim_signal(snap)
+                if not sig:
+                    continue
+                # 走闸门（模拟同样受纪律约束——被拦即弃）
+                mock = {"symbol": sym, "direction": sig["direction"], "entry": last,
+                        "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1}
+                blockers = _entry_gate(mock, snap, last, [t for t in trades if t.get("status") == "open"])
+                if blockers:
+                    continue   # 被闸门拦截的信号不入场（统计进拦截日志不污染用户数据）
+                now_ms = int(now.timestamp() * 1000)
+                trades.append({
+                    "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": now.strftime("%Y-%m-%d"),
+                    "symbol": sym, "direction": sig["direction"], "entry": last,
+                    "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
+                    "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
+                    "note": "自动模拟：多周期共振+顺资金", "mood": "系统纪律",
+                    "source": "auto", "trail": None,
+                })
+                _auto_sim_state["last_open"][sym] = loop_now
+                _emit_event({
+                    "id": f"autosim-{now_ms}-{sym}", "ts": now_ms, "kind": "diag",
+                    "etype": "AUTO_SIM", "level": "info", "symbol": sym, "name": "",
+                    "dir": "up" if sig["direction"] == "long" else "down", "price": last,
+                    "text": f"🤖 模拟开仓：{sym} {'多' if sig['direction'] == 'long' else '空'} @ {last}，"
+                            f"止损 {sig['stop']} 目标 {sig['target']}（共振+顺资金）",
+                    "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                })
+            _save_auto_trades(trades)
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
+def _auto_sim_stats() -> dict:
+    """模拟战绩：今日 + 累计"""
+    trades = _load_auto_trades()
+    today = datetime.now().strftime("%Y-%m-%d")
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
+    today_closed = [t for t in closed if t.get("date") == today]
+    def _s(items):
+        if not items:
+            return {"count": 0}
+        pts = [float(t["result_pts"]) for t in items]
+        wins = [p for p in pts if p > 0]
+        return {"count": len(items), "win_rate": round(len(wins) / len(items) * 100, 1),
+                "total_pts": round(sum(pts), 1)}
+    return {"today": _s(today_closed), "total": _s(closed),
+            "open_count": sum(1 for t in trades if t.get("status") == "open"),
+            "trades": [t for t in trades if t.get("date") == today][-10:]}
+
+
+@app.get("/api/auto-sim")
+async def auto_sim_get():
+    cfg = load_config()
+    return {"ok": True, "enabled": (cfg.get("auto_sim") or {}).get("enabled", False),
+            "stats": _auto_sim_stats()}
+
+
+@app.post("/api/auto-sim")
+async def auto_sim_toggle(body: dict):
+    cfg = load_config()
+    cfg.setdefault("auto_sim", {})["enabled"] = bool(body.get("enabled"))
+    save_config(cfg)
+    return {"ok": True, "enabled": cfg["auto_sim"]["enabled"]}
 
 
 # ---------------------------------------------------------------- 主力席位追踪（资金偏好的实锤）
@@ -5323,6 +5506,22 @@ async def _generate_report() -> str:
         pass
 
     # 昨日执行回顾（闸门/违规/平仓定性的每日闭环，晨报最有用）
+    try:
+        # 自动模拟 vs 手动对比（系统纪律的价值用数字呈现）
+        sim = _auto_sim_stats()
+        sim_today = sim.get("today", {})
+        if sim_today.get("count"):
+            my_closed = [t for t in _load_trades() if t.get("status") == "closed"
+                         and t.get("date") == yd and t.get("result_pts") is not None]
+            my_pts = sum(float(t["result_pts"]) for t in my_closed) if my_closed else None
+            parts.append(
+                f"【昨日纪律对照】🤖 系统模拟：{sim_today['count']} 笔、胜率 {sim_today.get('win_rate', 0)}%、"
+                f"{sim_today['total_pts']:+.1f} 点"
+                + (f" vs 👤 手动操作：{len(my_closed)} 笔、{my_pts:+.1f} 点" if my_closed else "（手动无平仓）")
+                + ("——差距就是纪律的价格" if my_closed and my_pts is not None and my_pts < sim_today["total_pts"] else "")
+            )
+    except Exception:
+        pass
     try:
         yd = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
