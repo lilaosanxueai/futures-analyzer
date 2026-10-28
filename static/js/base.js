@@ -151,10 +151,15 @@
     return '<span class="badge ' + cls + '">' + st + "</span>";
   }
 
+  let _watchSig = "";
   function renderWatch() {
     const body = $("#watchBody");
     if (!body) return;
     const syms = FA.watch();
+    // 数据指纹没变就不重绘：省掉 5 秒一轮的整表 innerHTML 重建与事件重绑
+    const sig = JSON.stringify([syms, syms.map((s) => FA.state.quotes[s] || 0), syms.map((s) => FA.state.psych[s] || 0)]);
+    if (sig === _watchSig) return;
+    _watchSig = sig;
     const rows = syms.map((sym) => {
       const q = FA.state.quotes[sym];
       const p = FA.state.psych[sym];

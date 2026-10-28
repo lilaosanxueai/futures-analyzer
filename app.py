@@ -25,6 +25,7 @@ from typing import Optional
 import akshare as ak
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -309,6 +310,21 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="期货心理博弈分析助手", lifespan=lifespan)
+# 大 JSON（交易记录/报告/复盘）走 gzip；本机环回也省解析与传输内存
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+@app.middleware("http")
+async def _static_cache_headers(request: Request, call_next):
+    """带 ?v= 版本号的静态资源允许浏览器长缓存（版本号变更即新 URL）；
+    index.html 本身不缓存，保证版本号引用即时生效。"""
+    resp = await call_next(request)
+    p = request.url.path
+    if p.startswith("/static/"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif p == "/" or p.endswith(".html"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # ---------------------------------------------------------------- 行情基础层
@@ -3119,31 +3135,46 @@ async def _psych_check(sym: str) -> None:
 TRADES_FILE = BASE_DIR / "trades.json"
 
 
+_TRADES_CACHE = {"mt": 0.0, "data": []}
+
+
 def _load_trades() -> list[dict]:
-    if TRADES_FILE.exists():
-        try:
-            return json.loads(TRADES_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return []
+    """trades.json 带_mtime 缓存：多路由高频调用，避免每次全文件解析（~700KB×N）。
+    写入方（增删改）都会紧跟 _save_trades 更新缓存，外部改动靠 mtime 自动失效。"""
+    try:
+        mt = TRADES_FILE.stat().st_mtime
+        if mt == _TRADES_CACHE["mt"]:
+            return _TRADES_CACHE["data"]
+        data = json.loads(TRADES_FILE.read_text(encoding="utf-8"))
+        _TRADES_CACHE.update(mt=mt, data=data)
+        return data
+    except Exception:
+        return _TRADES_CACHE.get("data") or []
 
 
 GATE_LOG_FILE = BASE_DIR / "gate_log.json"
 
 
+_GATE_LOG_CACHE = {"mt": 0.0, "data": []}
+
+
 def _load_gate_log() -> list[dict]:
-    """开仓闸门拦截记录（被拦下的尝试——防线战果，也是行为模式的证据）"""
-    if GATE_LOG_FILE.exists():
-        try:
-            return json.loads(GATE_LOG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return []
+    """开仓闸门拦截记录（被拦下的尝试——防线战果，也是行为模式的证据）。mtime 缓存同 trades。"""
+    try:
+        mt = GATE_LOG_FILE.stat().st_mtime
+        if mt == _GATE_LOG_CACHE["mt"]:
+            return _GATE_LOG_CACHE["data"]
+        data = json.loads(GATE_LOG_FILE.read_text(encoding="utf-8"))
+        _GATE_LOG_CACHE.update(mt=mt, data=data)
+        return data
+    except Exception:
+        return _GATE_LOG_CACHE.get("data") or []
 
 
 def _save_gate_log(items: list[dict]) -> None:
     try:
         GATE_LOG_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
+        _GATE_LOG_CACHE.update(mt=GATE_LOG_FILE.stat().st_mtime, data=items[-200:])
     except Exception:
         pass
 
@@ -3151,6 +3182,7 @@ def _save_gate_log(items: list[dict]) -> None:
 def _save_trades(trades: list[dict]) -> None:
     try:
         TRADES_FILE.write_text(json.dumps(trades, ensure_ascii=False, indent=2), encoding="utf-8")
+        _TRADES_CACHE.update(mt=TRADES_FILE.stat().st_mtime, data=trades)
     except Exception:
         pass
 
@@ -4685,7 +4717,6 @@ async def del_trade(trade_id: str):
 @app.get("/api/trades")
 async def get_trades(source: str = ""):
     """交易记录。source=real 只看手动+导入（真实交易），source=auto 只看模拟，空=全部"""
-    all_items = _load_trades() + (["__SEP__"] if False else [])
     items_all = list(reversed(_load_trades()))
     if source == "real":
         items_all = [t for t in items_all if t.get("source") != "auto"]

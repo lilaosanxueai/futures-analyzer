@@ -605,7 +605,12 @@ ${(() => {
     try {
       const d = await api("/api/trades?source=real");
       if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无记录：用上方表单记第一笔</td></tr>'; return; }
-      body.innerHTML = d.items.map((t) => {
+      // 持仓置顶（可操作的最优先），其余保持接口序（新入库在前）；分页渲染防几百行一次性铺满
+      FA.state.tradesShown = FA.state.tradesShown || 80;
+      const opens = d.items.filter((x) => x.status === "open").sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      const ordered = opens.concat(d.items.filter((x) => x.status !== "open"));
+      const shown = ordered.slice(0, FA.state.tradesShown);
+      body.innerHTML = shown.map((t) => {
         const isLong = t.direction === "long";
         let pnlHtml, actions;
         if (t.status === "open" && t.live) {
@@ -637,11 +642,17 @@ ${(() => {
           '<td class="r">' + (t.target_points || "--") + "</td>" +
           '<td class="r">' + pnlHtml + "</td>" +
           "<td>" + actions + "</td></tr>";
-      }).join("");
+      }).join("") +
+        (ordered.length > shown.length
+          ? '<tr><td colspan="8" style="text-align:center"><button class="link-btn" id="btnTradesMore">📊 加载更多（已显 ' + shown.length + " / " + ordered.length + " 笔）</button></td></tr>"
+          : "");
       drawEquity(d.items || []);
       $$("#tradesBody .link-btn").forEach((b) => {
+        if (b.id === "btnTradesMore") return;
         b.addEventListener("click", async () => {
           const id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
+          const t = ordered.find((x) => x.id === id);  // 行数据按 id 现查（旧实现引用泄漏的外层 t，属隐患）
+          if (!t) return;
           if (act === "care") {
             $("#tradeCareModal").classList.remove("hidden");
             $("#careTitle").textContent = id;
@@ -714,6 +725,8 @@ ${(() => {
           loadTrades(); loadStats(); loadDiagnosis();
         });
       });
+      const moreBtn = $("#btnTradesMore");
+      if (moreBtn) moreBtn.addEventListener("click", () => { FA.state.tradesShown += 80; loadTrades(); });
     } catch (e) {
       body.innerHTML = '<tr><td colspan="8" class="empty">加载失败：' + esc(e.message) + "</td></tr>";
     }
