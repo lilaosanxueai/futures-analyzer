@@ -64,16 +64,11 @@
   // ---------- 皮肤（4 套主题，色卡选择器 + localStorage + 防闪烁恢复在 index.html 内联脚本） ----------
   const THEMES = [
     { id: "default", name: "深夜蓝", bg: "#0d1117", panel: "#1c2330", accent: "#3b82f6" },
-    { id: "black", name: "纯黑", bg: "#000000", panel: "#141414", accent: "#3b82f6" },
     { id: "light", name: "浅色", bg: "#f3f5f9", panel: "#ffffff", accent: "#2563eb" },
     { id: "warm", name: "暖白纸面", bg: "#faf8f4", panel: "#f2efe8", accent: "#b8720a" },
     { id: "cool", name: "冷灰蓝", bg: "#f0f4f8", panel: "#e6edf5", accent: "#0a6ebd" },
+    { id: "mint", name: "薄荷绿", bg: "#f0f8f3", panel: "#e4f1ea", accent: "#0e9f6e" },
     { id: "cream", name: "羊皮纸", bg: "#f7f2e8", panel: "#efe8dc", accent: "#8b6c2a" },
-    { id: "green", name: "墨绿", bg: "#0b1512", panel: "#16291f", accent: "#2fbf71" },
-    { id: "amber", name: "琥珀", bg: "#141008", panel: "#282016", accent: "#f5a623" },
-    { id: "ocean", name: "深海蓝", bg: "#061420", panel: "#0e2a40", accent: "#38bdf8" },
-    { id: "rose", name: "暗玫红", bg: "#140810", panel: "#2c1424", accent: "#ec4899" },
-    { id: "sepia", name: "纸墨复古", bg: "#1a1712", panel: "#302a20", accent: "#c4956a" },
   ];
   function applyTheme(id) {
     if (id && id !== "default") document.documentElement.setAttribute("data-theme", id);
