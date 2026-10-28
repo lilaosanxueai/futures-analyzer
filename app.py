@@ -3743,14 +3743,16 @@ def _diagnose_global(trades: list) -> list[dict]:
                           f"今日已开 {len(today_trades)} 笔（上限 {daily_max}）",
                           "频繁交易=手续费+情绪双杀。今日停止开新仓。"))
 
-    # 报复性交易：亏损了结后 30 分钟内立刻开新仓
+    # 报复性交易：亏损了结后 30 分钟内立刻开新仓（只看实时记录——
+    # 导入的历史交割单是密集日内交易，拿来当"报复交易"证据是永久误报）
+    live_trades = [t for t in trades if t.get("source") != "import"]
     closed_sorted = sorted(
-        [t for t in trades if t.get("status") == "closed" and t.get("closed_ts")],
+        [t for t in live_trades if t.get("status") == "closed" and t.get("closed_ts")],
         key=lambda t: t["closed_ts"])
     for c in reversed(closed_sorted[-8:]):
         if (c.get("result_pts") or 0) >= 0:
             continue
-        for t in trades:
+        for t in live_trades:
             if t.get("ts") and t["ts"] > c["closed_ts"] and t["ts"] - c["closed_ts"] < 30 * 60 * 1000:
                 out.append(_issue("D06", "warn", "疑似报复性交易",
                                   f"{c['symbol']} 亏损了结后 {((t['ts'] - c['closed_ts']) / 60000):.0f} 分钟即开新仓 {t['symbol']}",
@@ -3765,10 +3767,10 @@ def _diagnose_global(trades: list) -> list[dict]:
                           "、".join(f"{t['symbol']} {t['result_pts']:+.0f}点" for t in recent),
                           "连亏说明节奏或方向感出了问题（往往正值逆势期）。停手半日，用「品种博弈」页重看资金方向。"))
 
-    # 相关品种组同向堆仓（隐形杠杆）
+    # 相关品种组同向堆仓（隐形杠杆，只看实时持仓——导入历史仓位不是当下的杠杆）
     group_hits: dict[str, list] = {}
     for t in trades:
-        if t.get("status") != "open":
+        if t.get("status") != "open" or t.get("source") == "import":
             continue
         pfx = _variety_prefix(t["symbol"])
         for g, members in CORR_GROUPS.items():
@@ -3819,15 +3821,18 @@ _DIAG = {"issues": [], "ts": 0.0, "seen": {}, "running": False}
 
 
 async def _diagnosis_scan(push: bool = False) -> list[dict]:
-    """全量诊断：持仓逐笔 + 群体问题。push=True 时新 fatal 问题进事件流+飞书。"""
+    """全量诊断：持仓逐笔 + 群体问题。push=True 时新 fatal 问题进事件流+飞书。
+    结算单导入的历史仓位（source=import）只做对账，不参与实时诊断与推送——
+    它们天然没有止损/情绪字段，逐笔诊断只会制造"无止损"误报轰炸。"""
     trades = _load_trades()
     issues: list[dict] = []
-    open_trades = [t for t in trades if t.get("status") == "open"]
-    missing = sorted({t["symbol"] for t in open_trades
+    live_open = [t for t in trades if t.get("status") == "open" and t.get("source") != "import"]
+    imp_open = [t for t in trades if t.get("status") == "open" and t.get("source") == "import"]
+    missing = sorted({t["symbol"] for t in live_open
                       if not (_quote_cache.get(t["symbol"], (0, {}))[1] or {}).get("last")})
     if missing:
         await asyncio.gather(*[fetch_quote(s) for s in missing], return_exceptions=True)
-    for t in open_trades:
+    for t in live_open:
         snap = None
         price = None
         try:
@@ -3837,6 +3842,15 @@ async def _diagnosis_scan(push: bool = False) -> list[dict]:
         ts_, q = _quote_cache.get(t["symbol"], (0, {}))
         price = (q or {}).get("last")  # 取不到时仍诊断（D01/D07 等不依赖现价，仅 D02/D03 跳过）
         issues.extend(await _diagnose_trade(t, snap, price))
+    if imp_open:
+        cnt: dict[str, int] = {}
+        for t in imp_open:
+            cnt[t["symbol"]] = cnt.get(t["symbol"], 0) + 1
+        syms_txt = "、".join(f"{s}×{c}" for s, c in sorted(cnt.items(), key=lambda kv: -kv[1]))
+        issues.append(_issue(
+            "D18", "info", "导入持仓不参与实时诊断",
+            f"{len(imp_open)} 笔结算单导入的历史仓位（{syms_txt}）",
+            "历史对账仓位，天然无止损/情绪字段，不诊断、不推送。若实际已了结，在日志中平仓落账即可。"))
     issues.extend(_diagnose_global(trades))
     sev_rank = {"fatal": 0, "warn": 1, "info": 2}
     issues.sort(key=lambda x: sev_rank.get(x["sev"], 3))
@@ -3891,7 +3905,7 @@ async def auto_care_loop():
                 await asyncio.sleep(60)
                 continue
             loop_now = asyncio.get_event_loop().time()
-            for t in [x for x in _load_trades() if x.get("status") == "open"]:
+            for t in [x for x in _load_trades() if x.get("status") == "open" and x.get("source") != "import"]:
                 if loop_now - _CARE_COOLDOWN.get(t["id"], -1e9) < 4 * 3600:
                     continue
                 stop = t.get("stop_points")
@@ -4411,6 +4425,8 @@ async def shield_status():
     for t in trades:
         if t.get("status") != "open":
             continue
+        if t.get("source") == "import":
+            continue  # 历史对账仓位不入盾：无止损字段属正常，不该计为风险敞口
         open_n += 1
         m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
         stop = t.get("stop_points")
