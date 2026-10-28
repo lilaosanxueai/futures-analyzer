@@ -71,9 +71,11 @@
     { id: "cream", name: "羊皮纸", bg: "#f7f2e8", panel: "#efe8dc", accent: "#8b6c2a" },
   ];
   function applyTheme(id) {
-    if (id && id !== "default") document.documentElement.setAttribute("data-theme", id);
+    // 白名单校验：历史遗留的已删主题 id（rose/sepia 等）自动回落默认
+    const known = THEMES.some((t) => t.id === id);
+    if (id && known && id !== "default") document.documentElement.setAttribute("data-theme", id);
     else document.documentElement.removeAttribute("data-theme");
-    try { localStorage.setItem("fa_theme", id); } catch (e) { /* ignore */ }
+    try { localStorage.setItem("fa_theme", known ? id : "default"); } catch (e) { /* ignore */ }
     const pop = $("#themePop");
     if (pop) {
       pop.innerHTML = THEMES.map((t) =>
