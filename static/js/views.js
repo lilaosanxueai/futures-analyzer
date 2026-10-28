@@ -12,7 +12,9 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "trades") { loadTrades(); loadStats(); loadDiagnosis(); }
+      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); }
+      if (v === "sim") { loadSimTrades(); loadSimStats(); }
+      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); }
       if (v === "notes") loadNotes();
     });
   });
@@ -508,7 +510,7 @@ ${(() => {
   async function loadStats() {
     const el = $("#statsBody");
     try {
-      const d = await api("/api/trades/stats");
+      const d = await api("/api/trades/stats?source=real");
       const o = d.overview || {}, b = d.behavior || {};
       el.innerHTML =
         '<div class="stat-grid">' +
@@ -597,10 +599,11 @@ ${(() => {
     ctx.fillText("累计点数（" + closed.length + " 笔已平）", 34, h - 4);
   }
 
+  // 真实/模拟交易拆分：各自独立加载
   async function loadTrades() {
     const body = $("#tradesBody");
     try {
-      const d = await api("/api/trades");
+      const d = await api("/api/trades?source=real");
       if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无记录：用上方表单记第一笔</td></tr>'; return; }
       body.innerHTML = d.items.map((t) => {
         const isLong = t.direction === "long";
@@ -1182,6 +1185,177 @@ ${(() => {
       alert("已存入飞书《AI 复盘报告》");
     } catch (e) { alert("保存失败：" + e.message); }
   });
+
+  // 模拟交易页
+  async function loadSimTrades() {
+    const body = $("#simTradesBody");
+    if (!body) return;
+    try {
+      const d = await api("/api/trades?source=auto");
+      if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无模拟交易——自动引擎在跑，信号触发后自动记录；或用左侧表单手动模拟</td></tr>'; return; }
+      body.innerHTML = d.items.map((t) => {
+        const isLong = t.direction === "long";
+        let pnlHtml;
+        if (t.status === "open" && t.live) {
+          const p = t.live.pnl_pts;
+          pnlHtml = '<span class="' + pctCls(p) + '">' + (p > 0 ? "+" : "") + p + '点</span><br><span class="muted small">@' + fmtNum(t.live.price) + "</span>";
+        } else if (t.result_pts != null) {
+          pnlHtml = '<span class="' + pctCls(t.result_pts) + '">' + (t.result_pts > 0 ? "+" : "") + t.result_pts + "点</span>";
+        } else {
+          pnlHtml = '<span class="muted">--</span>';
+        }
+        const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + "</span>" : "";
+        return "<tr><td>" + esc(t.date) + "</td><td><b>" + esc(t.symbol) + "</b>" + note + "</td>" +
+          '<td><span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + "</span> " + (t.lots || 1) + "手</td>" +
+          '<td class="r">' + fmtNum(t.entry) + '</td><td class="r">' + (t.stop_points || "--") + '</td><td class="r">' + (t.target_points || "--") + '</td>' +
+          '<td class="r">' + pnlHtml + '</td><td><button class="link-btn danger" data-del="' + t.id + '">删</button></td></tr>';
+      }).join("");
+      $$("#simTradesBody [data-del]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          if (!confirm("删除？")) return;
+          await api("/api/trades/" + b.getAttribute("data-del"), { method: "DELETE" });
+          loadSimTrades();
+        });
+      });
+    } catch (e) {
+      body.innerHTML = '<tr><td colspan="8" class="empty">加载失败：' + esc(e.message) + "</td></tr>";
+    }
+  }
+  async function loadSimStats() {
+    const el = $("#simStatsBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/auto-sim");
+      const st = d.stats || {};
+      const t = st.today || {};
+      const fn = st.funnel || {};
+      el.innerHTML = '<div class="kv-list">' +
+        '<div class="kv"><span class="k">今日战绩</span><span class="v">' + (t.count ? t.count + ' 笔 · 胜率 ' + t.win_rate + '% · <b class="' + (t.total_pts > 0 ? "num-up" : "num-down") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</b>' : "暂无平仓") + "</span></div>" +
+        '<div class="kv"><span class="k">持仓中</span><span class="v">' + (st.open_count || 0) + " 笔</span></div>" +
+        (fn.scans ? '<div class="kv"><span class="k">信号漏斗</span><span class="v">' + fn.scans + "扫→" + (fn.resonance || 0) + "共振→" + (fn.opened || 0) + "开</span></div>" : "") +
+        '<div class="kv"><span class="k">引擎状态</span><span class="v">' + (d.enabled ? "✅ 运行中" : "⛔ 未启用") + '</span></div></div>';
+    } catch (e) { /* ignore */ }
+  }
+
+  // 交易人格分析页
+  async function loadMineRules() {
+    const el = $("#mineBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/mine-rules");
+      const rules = d.rules || [];
+      el.innerHTML = rules.length
+        ? rules.map((r) =>
+          '<div class="flaw-item"><div class="f-head"><b>' + esc(r.rule.slice(0, 50)) + "</b></div>" +
+          '<div class="f-evi">' + esc(r.evidence) + '</div>' +
+          '<div class="f-anti">💡 ' + esc(r.action) + "</div></div>").join("")
+        : '<div class="empty">记录不足 5 笔——导入交割单后自动挖掘</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">加载失败</div>'; }
+    const eq = $("#exitQBody");
+    if (eq) {
+      try {
+        const d = await api("/api/mine-rules");
+        const items = d.exit_quality || [];
+        const qc = {};
+        items.forEach((q) => { qc[q.quality] = (qc[q.quality] || 0) + 1; });
+        eq.innerHTML = Object.entries(qc).map(([k, v]) =>
+          '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v"><b>' + v + "</b> 笔</span></div>").join("") || '<div class="empty">暂无平仓记录</div>';
+      } catch (e) { /* ignore */ }
+    }
+  }
+  async function loadProfileSummary() {
+    const el = $("#pfSummaryBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/profile");
+      const p = d.profile || {};
+      el.innerHTML = (p.ai_summary ? md(p.ai_summary) : '<div class="empty">点击「🧠 AI 综合画像」从真实记录推导你的交易风格</div>') +
+        (p.style ? '<div class="kv"><span class="k">风格</span><span class="v">' + esc(p.style) + "</span></div>" : "") +
+        (p.risk_preference ? '<div class="kv"><span class="k">风险偏好</span><span class="v">' + esc(p.risk_preference) + "</span></div>" : "");
+    } catch (e) { /* ignore */ }
+  }
+
+  // AI 综合画像按钮（人格页）
+  const btnPf2 = $("#btnPfSynthesize2");
+  if (btnPf2) {
+    btnPf2.addEventListener("click", async () => {
+      btnPf2.disabled = true; btnPf2.textContent = "🧠 分析中…";
+      try { await api("/api/profile/synthesize", { method: "POST" }); loadProfileSummary(); }
+      catch (e) { alert("失败：" + e.message); }
+      btnPf2.disabled = false; btnPf2.textContent = "🧠 AI 综合画像";
+    });
+  }
+
+  // 导入功能（真实交易页顶部的导入卡）：csv/txt 走文本路径，xlsx/xls 走 base64 Excel 端点
+  function importApiFile(dryRun) {
+    const f = $("#importFile").files[0];
+    if (!f) return Promise.reject(new Error("未选择文件"));
+    const name = f.name.toLowerCase();
+    if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+      return f.arrayBuffer().then((buf) => {
+        let binary = "";
+        const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        const b64 = btoa(binary);
+        return fetch("/api/trades/import/xlsx?dry_run=" + dryRun, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: b64 }),
+        }).then((res) => res.json().then((d) => {
+          if (!res.ok || d.ok === false) throw new Error(d.detail || ("HTTP " + res.status));
+          return d;
+        }));
+      });
+    }
+    return f.arrayBuffer().then((buf) => {
+      let text;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+      catch (e) { text = new TextDecoder("gbk").decode(buf); }
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
+    });
+  }
+  function renderImportPreview(d) {
+    const p = $("#importPreview");
+    p.classList.remove("hidden");
+    const rows = (d.closed_preview || []).map((t) =>
+      "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.symbol) + "</td><td>" + (t.direction === "long" ? "多" : "空") +
+      '</td><td class="r">' + t.lots + '</td><td class="r">' + t.entry + "→" + t.exit + '</td><td class="r ' + (t.result_pts > 0 ? "num-up" : "num-down") + '">' + (t.result_pts > 0 ? "+" : "") + t.result_pts + "</td></tr>").join("");
+    const openRows = (d.open_preview || []).map((t) =>
+      '<div class="mini-note">未平仓：[' + esc(t.date) + "] " + esc(t.symbol) + " " + (t.direction === "long" ? "多" : "空") + " " + t.lots + "手 @ " + t.entry + "</div>").join("");
+    p.innerHTML = "<div class='mini-note'>识别成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔</div>" +
+      (rows ? "<table class='table'><tbody>" + rows + "</tbody></table>" : "") + openRows +
+      ((d.errors || []).length ? "<div class='mini-note' style='color:var(--danger)'>" + esc(d.errors.join("；")) + "</div>" : "");
+    $("#btnImportCommit").disabled = !((d.closed_count || 0) + (d.open_count || 0));
+  }
+  const impFile = $("#importFile");
+  if (impFile) {
+    impFile.addEventListener("change", async () => {
+      try { renderImportPreview(await importApiFile(1)); } catch (e) { alert("解析失败：" + e.message); }
+    });
+  }
+  const impCheck = $("#btnImportCheck");
+  if (impCheck) {
+    impCheck.addEventListener("click", async () => {
+      const text = $("#importText").value.trim();
+      if (!text) { alert("请粘贴流水或选择文件"); return; }
+      try { renderImportPreview(await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: 1 }) })); }
+      catch (e) { alert("解析失败：" + e.message); }
+    });
+  }
+  const impCommit = $("#btnImportCommit");
+  if (impCommit) {
+    impCommit.addEventListener("click", async () => {
+      const useFile = $("#importFile").files[0] && !$("#importText").value.trim();
+      const d = useFile
+        ? await importApiFile(0)
+        : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
+      alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+      $("#importText").value = ""; $("#importFile").value = "";
+      $("#importPreview").classList.add("hidden");
+      loadTrades(); loadStats(); loadDiagnosis(); loadFlaws();
+    });
+  }
 
   // CSV 导出
   $("#btnExportCsv").addEventListener("click", () => {

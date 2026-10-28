@@ -23,7 +23,7 @@ from typing import Optional
 
 import akshare as ak
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -3507,6 +3507,88 @@ async def trades_import(body: TradeImportIn):
     return payload
 
 
+@app.post("/api/trades/import/xlsx")
+async def trades_import_xlsx(request: Request, dry_run: int = 1):
+    """Excel 交割单导入（.xlsx/.xls）：服务端解析为行文本后走同一管线。
+    遍历所有 sheet，取第一个含表头关键词（合约/成交）的表。"""
+    import base64
+    body_raw = await request.body()
+    try:
+        payload = json.loads(body_raw)
+        data_b64 = payload.get("data", "")
+        dry_run = payload.get("dry_run", dry_run)
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体需为 JSON {data: base64, dry_run}")
+    if not data_b64:
+        raise HTTPException(status_code=400, detail="缺少文件数据")
+    try:
+        raw = base64.b64decode(data_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="文件数据解码失败")
+
+    rows_text = []
+    try:
+        import io
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        parsed = False
+        for ws in wb.worksheets:
+            head_cells = [str(c.value or "") for c in next(ws.iter_rows(min_row=1, max_row=1))[:20]]
+            if not any(("合约" in h or "成交" in h or "品种" in h) for h in head_cells):
+                continue
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if v is None else str(v) for v in row]
+                if any(cells):
+                    rows_text.append("\t".join(cells))
+            parsed = True
+            break
+        wb.close()
+        if not parsed:
+            raise HTTPException(status_code=400, detail="未找到含「合约/成交」表头的 sheet")
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 尝试旧版 .xls（xlrd）
+        try:
+            import xlrd
+            wb = xlrd.open_workbook(file_contents=raw)
+            parsed = False
+            for ws in wb.sheets():
+                if ws.nrows < 2:
+                    continue
+                head = [str(ws.cell_value(0, c)) for c in range(ws.ncols)]
+                if not any(("合约" in h or "成交" in h or "品种" in h) for h in head):
+                    continue
+                for r in range(ws.nrows):
+                    cells = ["" if ws.cell_value(r, c) is None else str(ws.cell_value(r, c)) for c in range(ws.ncols)]
+                    rows_text.append("\t".join(cells))
+                parsed = True
+                break
+            if not parsed:
+                raise HTTPException(status_code=400, detail="Excel 中未找到交割单表头（需含 合约/成交/品种 列）")
+        except HTTPException:
+            raise
+        except Exception as e2:
+            raise HTTPException(status_code=400, detail=f"Excel 解析失败：{type(e2).__name__}（请另存为 .xlsx 或 CSV）")
+
+    text = "\n".join(rows_text)
+    fills, errors = _parse_fills(text)
+    if not fills:
+        raise HTTPException(status_code=400, detail="；".join(errors) or "Excel 中未解析出成交")
+    closed, opened, unmatched = _pair_fills(fills)
+    result = _import_payload(fills, closed, opened, unmatched, errors)
+    if dry_run:
+        return result
+    trades = _load_trades()
+    exist_ids = {t.get("id") for t in trades}
+    new_items = [t for t in closed + opened if t["id"] not in exist_ids]
+    trades.extend(new_items)
+    _save_trades(trades)
+    result["added"] = len(new_items)
+    result["skipped_dup"] = len(closed) + len(opened) - len(new_items)
+    return result
+
+
 class TradeIn(BaseModel):
     symbol: str
     direction: str  # long / short
@@ -4436,8 +4518,15 @@ async def del_trade(trade_id: str):
 
 
 @app.get("/api/trades")
-async def get_trades():
-    items = list(reversed(_load_trades()))
+async def get_trades(source: str = ""):
+    """交易记录。source=real 只看手动+导入（真实交易），source=auto 只看模拟，空=全部"""
+    all_items = _load_trades() + (["__SEP__"] if False else [])
+    items_all = list(reversed(_load_trades()))
+    if source == "real":
+        items_all = [t for t in items_all if t.get("source") != "auto"]
+    elif source == "auto":
+        items_all = [t for t in items_all if t.get("source") == "auto"]
+    items = items_all
     # 缓存未命中的持仓品种并行补拉行情（串行最坏 N×0.5s；fetch_quote 自带 5s 缓存回填）
     missing = sorted({t["symbol"] for t in items
                       if t.get("status") == "open"
@@ -4558,9 +4647,13 @@ async def shield_weekly():
 
 
 @app.get("/api/trades/stats")
-async def trades_stats():
-    """复盘统计：总览 + 分品种 + 行为画像（散户病计数）"""
+async def trades_stats(source: str = ""):
+    """复盘统计：总览 + 分品种 + 行为画像（散户病计数）。source 过滤同 /api/trades"""
     trades = _load_trades()
+    if source == "real":
+        trades = [t for t in trades if t.get("source") != "auto"]
+    elif source == "auto":
+        trades = [t for t in trades if t.get("source") == "auto"]
     closed = [t for t in trades if t["status"] == "closed" and t.get("result_pts") is not None]
 
     def _summary(items):
@@ -5195,6 +5288,18 @@ async def ai_trade_review(body: TradeReviewIn):
     if sym_rows:
         stat_lines.append("分品种（累计点数）："
                           + "、".join(f"{s} {sum(v):+.0f}点/{len(v)}笔" for s, v in sym_rows))
+
+    # 盈亏比审计：你的系统实际在怎么赚钱/亏钱
+    if wins and losses:
+        avg_w = sum(wins) / len(wins)
+        avg_l = abs(sum(losses) / len(losses))
+        ratio = avg_w / avg_l if avg_l else float("inf")
+        if ratio < 0.8:
+            stat_lines.append(f"- ⚠ 盈亏比严重倒挂：平均赚 {avg_w:.0f} vs 平均亏 {avg_l:.0f}（比值 {ratio:.2f}）"
+                            f"——你需要胜率 >{1 / (1 + ratio) * 100:.0f}% 才打平，当前 {len(wins) / len(pts) * 100:.0f}%"
+                            "——系统性的赚小赔大")
+        elif ratio >= 1.5:
+            stat_lines.append(f"- ✅ 盈亏比健康：{ratio:.2f}（赚 {avg_w:.0f} vs 亏 {avg_l:.0f}）——保持")
 
     # 违规单 vs 正常单绩效对比（强行通过闸门的单，成绩单不会说谎）
     forced_closed = [t for t in closed if t.get("violation")]
