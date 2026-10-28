@@ -416,25 +416,8 @@
   </div>
 </div>
 
-<!-- 交割单导入弹窗 -->
-<div class="modal-mask hidden" id="importModal">
-  <div class="modal wide">
-    <div class="modal-head"><h2>📥 导入交割单</h2><button class="btn ghost sm" data-close="importModal">✕</button></div>
-    <div class="modal-body">
-      <div class="mini-note" style="margin-bottom:8px">
-        从期货公司 App / 网上营业厅导出「成交流水 / 交割单」（CSV 文件，或直接在 Excel 里选中区域复制粘贴到下面）。
-        需包含列：成交日期、成交时间、合约、买卖、开平、成交价、成交量（手续费可选）。重复导入自动去重。
-      </div>
-      <input type="file" id="importFile" accept=".csv,.txt" style="margin-bottom:8px">
-      <textarea id="importText" rows="8" placeholder="或把成交流水粘贴到这里（Excel 选中区域 Ctrl+C，此处 Ctrl+V）…"></textarea>
-      <div id="importPreview" class="hidden" style="margin-top:10px"></div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn" id="btnImportCheck">解析预览</button>
-      <button class="btn primary" id="btnImportCommit" disabled>确认导入</button>
-    </div>
-  </div>
-</div>
+<!-- （旧导入弹窗已移除——导入功能已升级为真实交易页顶部大卡片） -->
+
 
 <!-- 历史交易复盘弹窗 -->
 <div class="modal-mask hidden" id="tradeReviewModal">
@@ -486,8 +469,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261016a"></script>
-<script src="/static/js/views.js?v=20261016a"></script>
-<script src="/static/js/chat.js?v=20261016a"></script>
+<script src="/static/js/base.js?v=20261024a"></script>
+<script src="/static/js/views.js?v=20261024a"></script>
+<script src="/static/js/chat.js?v=20261024a"></script>
 </body>
 </html>

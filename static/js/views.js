@@ -1379,36 +1379,49 @@ ${(() => {
   const impFile = $("#importFile");
   if (impFile) {
     impFile.addEventListener("change", async () => {
-      try { renderMultiImportPreview(await importFiles(1)); } catch (e) { alert("解析失败：" + e.message); }
+      const btn = $("#btnImportCheck");
+      const n = impFile.files.length;
+      btn.disabled = true; btn.textContent = "⏳ 解析中(" + n + " 文件)…";
+      try { renderMultiImportPreview(await importFiles(1)); }
+      catch (e) { alert("解析失败：" + e.message); }
+      btn.disabled = false; btn.textContent = "解析预览";
     });
   }
   const impCheck = $("#btnImportCheck");
   if (impCheck) {
     impCheck.addEventListener("click", async () => {
       const text = $("#importText").value.trim();
-      if (!text) { alert("请粘贴流水或选择文件"); return; }
+      if (!text && !impFile.files.length) { alert("请粘贴流水或选择文件"); return; }
+      impCheck.disabled = true; impCheck.textContent = "⏳ 解析中…";
       try { renderMultiImportPreview(await importFiles(1)); }
       catch (e) { alert("解析失败：" + e.message); }
+      impCheck.disabled = false; impCheck.textContent = "解析预览";
     });
   }
   const impCommit = $("#btnImportCommit");
   if (impCommit) {
     impCommit.addEventListener("click", async () => {
-      const useFiles = $("#importFile").files.length > 0;
-      const d = useFiles
-        ? await importFiles(0)
-        : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
-      if (useFiles) {
-        renderMultiImportPreview(d);
-        const t = d.totals;
-        const fails = d.results.filter((r) => !r.ok).length;
-        alert("多文件导入完成：新增 " + (t.added || 0) + " 笔（重复跳过 " + (t.dup || 0) + " 笔）" +
-          (fails ? "\n⚠ " + fails + " 个文件解析失败（见预览区红色提示）" : ""));
-      } else {
-        alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+      impCommit.disabled = true; impCommit.textContent = "⏳ 导入中…";
+      try {
+        const useFiles = impFile.files.length > 0;
+        const d = useFiles
+          ? await importFiles(0)
+          : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
+        if (useFiles) {
+          renderMultiImportPreview(d);
+          const t = d.totals;
+          const fails = d.results.filter((r) => !r.ok).length;
+          alert("多文件导入完成：新增 " + (t.added || 0) + " 笔（重复跳过 " + (t.dup || 0) + " 笔）" +
+            (fails ? "\n⚠ " + fails + " 个文件解析失败（见预览区红色提示）" : ""));
+        } else {
+          alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+        }
+        $("#importText").value = ""; impFile.value = "";
+        loadTrades(); loadStats(); loadDiagnosis(); loadFlaws();
+      } catch (e) {
+        alert("导入失败：" + e.message);
       }
-      $("#importText").value = ""; $("#importFile").value = "";
-      loadTrades(); loadStats(); loadDiagnosis(); loadFlaws();
+      impCommit.disabled = false; impCommit.textContent = "确认导入";
     });
   }
 
