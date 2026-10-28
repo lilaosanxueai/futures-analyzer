@@ -14,6 +14,7 @@ AI 对话：OpenAI 兼容接口（智谱 GLM / DeepSeek / 自定义端点），K
 import asyncio
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime, timedelta
@@ -5452,6 +5453,9 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _feishu_token = {"token": "", "expire_at": 0.0}
 
 
+_symbol_review_cache: dict[tuple, tuple[float, dict]] = {}
+
+
 @app.get("/api/symbol-review/{symbol}")
 async def symbol_review(symbol: str, days: int = 0):
     """分品种深度复盘：该品种全部真实交易 + 盘面回放 + 情绪/出场质量 → AI 个性化报告"""
@@ -5465,6 +5469,12 @@ async def symbol_review(symbol: str, days: int = 0):
     if len(closed) < 3:
         raise HTTPException(status_code=400, detail=f"{sym} 样本不足（{len(closed)} 笔已平仓，至少 3 笔）")
     closed.sort(key=lambda t: (t.get("closed_ts") or t.get("ts") or 0))
+
+    # 30 分钟缓存：报告生成约 40 秒（回放+LLM），重复请求直接回放；交易笔数变化即失效
+    ck = (sym, days, len(closed))
+    hit = _symbol_review_cache.get(ck)
+    if hit and time.time() - hit[0] < 1800:
+        return {**hit[1], "cached": True}
 
     pts = [float(t["result_pts"]) for t in closed]
     wins = [p for p in pts if p > 0]
@@ -5559,8 +5569,10 @@ async def symbol_review(symbol: str, days: int = 0):
 要求：每句结论引用具体数值；样本不足的维度明说；不编造。结尾注明不构成投资建议。"""
 
     report = await _llm_text_retry(prompt, max_tokens=2800)
-    return {"ok": True, "symbol": sym, "trades": len(closed),
-            "total_pts": round(sum(pts), 1), "report": report}
+    result = {"ok": True, "symbol": sym, "trades": len(closed),
+              "total_pts": round(sum(pts), 1), "report": report}
+    _symbol_review_cache[ck] = (time.time(), result)
+    return result
 
 
 def scope_txt(days: int) -> str:
