@@ -41,12 +41,74 @@ html[data-theme="light"] {
   --primary: #2563eb; --primary-dim: #1d4ed8;
   --up: #d92d2d; --down: #15803d; --danger: #dc2626; --chart-grid: #dde3ec;
 }
+html[data-theme="warm"] {   /* 暖白纸面：米白底暖灰字，日间长时间不刺眼 */
+  color-scheme: light;
+  --line-soft: #e8e0d4;
+  --mask: rgba(50, 40, 30, .30);
+  --shadow: rgba(60, 50, 30, .14);
+  --bg: #faf8f4; --panel: #fffef9; --panel-2: #f2efe8;
+  --border: #ddd6c8; --text: #3a3528; --text-strong: #1a180f; --muted: #8a8270;
+  --primary: #b8720a; --primary-dim: #96600a; --accent: #d4920a;
+  --up: #c03528; --down: #1e7a3c; --danger: #c03528; --warn: #b8720a; --chart-grid: #e8e0d4;
+}
+html[data-theme="cool"] {   /* 冷灰蓝：冷白底蓝灰字，理性氛围 */
+  color-scheme: light;
+  --line-soft: #d4dde8;
+  --mask: rgba(20, 35, 55, .32);
+  --shadow: rgba(20, 35, 55, .12);
+  --bg: #f0f4f8; --panel: #ffffff; --panel-2: #e6edf5;
+  --border: #c8d4e0; --text: #283040; --text-strong: #0a1220; --muted: #688098;
+  --primary: #0a6ebd; --primary-dim: #085896;
+  --up: #c42828; --down: #106e36; --danger: #c42828; --chart-grid: #d4dde8;
+}
+html[data-theme="cream"] {  /* 米黄羊皮纸：最柔和的浅色，长时间复盘不疲劳 */
+  color-scheme: light;
+  --line-soft: #e2d9c8;
+  --mask: rgba(60, 50, 35, .28);
+  --shadow: rgba(60, 50, 35, .12);
+  --bg: #f7f2e8; --panel: #fdfaf3; --panel-2: #efe8dc;
+  --border: #ddd2be; --text: #353020; --text-strong: #181510; --muted: #827a68;
+  --primary: #8b6c2a; --primary-dim: #6e5520; --accent: #a08230;
+  --up: #b03020; --down: #2a7a3a; --danger: #b03020; --chart-grid: #e2d9c8;
+}
 html[data-theme="green"] {
   color-scheme: dark;
   --line-soft: rgba(36, 64, 47, .7);
   --bg: #0b1512; --panel: #10201a; --panel-2: #16291f;
   --border: #24402f; --text: #d2e3d8; --text-strong: #f2fbf5; --muted: #7f9a89;
   --primary: #2fbf71; --primary-dim: #1f9d5c; --chart-grid: #1d3328;
+}
+
+/* ---- 新增 4 套 ---- */
+html[data-theme="amber"] {   /* 琥珀暗金：暖色调，夜间盯盘不刺眼 */
+  color-scheme: dark;
+  --line-soft: rgba(75, 58, 30, .6);
+  --bg: #141008; --panel: #1e1810; --panel-2: #282016;
+  --border: #4a3c24; --text: #e8dcc8; --text-strong: #fff8ec; --muted: #a09070;
+  --primary: #f5a623; --primary-dim: #c47f0f; --up: #ff6b4a; --down: #7ec688;
+  --accent: #ffd700; --chart-grid: #2e2416;
+}
+html[data-theme="ocean"] {   /* 深海蓝：冷色低饱和，安静看盘 */
+  color-scheme: dark;
+  --line-soft: rgba(30, 55, 80, .6);
+  --bg: #061420; --panel: #0a1f30; --panel-2: #0e2a40;
+  --border: #1e3a54; --text: #c8dcf0; --text-strong: #ecf6ff; --muted: #6888a8;
+  --primary: #38bdf8; --primary-dim: #0284c7; --chart-grid: #123250;
+}
+html[data-theme="rose"] {   /* 暗玫红：情绪化配色，激进交易者 */
+  color-scheme: dark;
+  --line-soft: rgba(80, 30, 50, .6);
+  --bg: #140810; --panel: #200e1a; --panel-2: #2c1424;
+  --border: #502040; --text: #f0d0e0; --text-strong: #fff0f6; --muted: #a06880;
+  --primary: #ec4899; --primary-dim: #be185d; --chart-grid: #321828;
+}
+html[data-theme="sepia"] {  /* 纸墨复古：低刺激，长时间复盘 */
+  color-scheme: dark;
+  --line-soft: rgba(60, 55, 45, .6);
+  --bg: #1a1712; --panel: #242018; --panel-2: #302a20;
+  --border: #484030; --text: #d8cec0; --text-strong: #f5efe5; --muted: #908878;
+  --primary: #c4956a; --primary-dim: #a07850; --up: #e8746a; --down: #88b888;
+  --accent: #d4a574; --chart-grid: #2c2820;
 }
 
 /* 主题色卡选择器 */

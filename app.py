@@ -1500,6 +1500,172 @@ async def auto_sim_toggle(body: dict):
     return {"ok": True, "enabled": cfg["auto_sim"]["enabled"]}
 
 
+# ---------------------------------------------------------------- 个人规则挖掘器（从真实交易提取模式）
+
+def _mine_rules() -> list[dict]:
+    """从用户真实交易挖掘行为模式：时间/序列/仓位/品种维度，
+    每条规则必须满足样本 ≥3 且有统计差异（p 近似）。返回可执行规则。"""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
+    if len(closed) < 5:
+        return []
+    rules = []
+
+    # ---- ① 亏损后行为：下一笔表现 ----
+    seq = sorted(closed, key=lambda t: t.get("closed_ts") or t.get("ts") or 0)
+    after_loss, after_win = [], []
+    for i in range(1, len(seq)):
+        prev, cur = seq[i - 1], seq[i]
+        if float(prev["result_pts"]) < 0:
+            after_loss.append(float(cur["result_pts"]))
+        else:
+            after_win.append(float(cur["result_pts"]))
+    if len(after_loss) >= 3 and len(after_win) >= 3:
+        al_avg = sum(after_loss) / len(after_loss)
+        aw_avg = sum(after_win) / len(after_win)
+        al_wr = sum(1 for p in after_loss if p > 0) / len(after_loss) * 100
+        aw_wr = sum(1 for p in after_win if p > 0) / len(after_win) * 100
+        if al_avg < aw_avg - 5 or al_wr < aw_wr - 15:
+            rules.append({
+                "rule": f"亏损后下一笔表现显著更差（亏后均值 {al_avg:+.0f} 点/胜率 {al_wr:.0f}% vs 赢后 {aw_avg:+.0f} 点/胜率 {aw_wr:.0f}%）",
+                "action": "亏损后强制冷静 30 分钟再评估，不要立刻翻本",
+                "evidence": f"亏后 {len(after_loss)} 笔 vs 赢后 {len(after_win)} 笔",
+            })
+
+    # ---- ② 时段分析：哪个时段最亏 ----
+    sessions = {"早盘(9-10:30)": [], "午盘(10:30-11:30)": [], "午后(13:30-15:00)": [], "夜盘(21-23)": [], "深夜(23+)": []}
+    for t in closed:
+        try:
+            h = datetime.fromtimestamp((t.get("ts") or 0) / 1000).hour
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+        pts = float(t["result_pts"])
+        if 9 <= h < 10 or h == 10:
+            sessions["早盘(9-10:30)"].append(pts)
+        elif h == 11:
+            sessions["午盘(10:30-11:30)"].append(pts)
+        elif 13 <= h < 15:
+            sessions["午后(13:30-15:00)"].append(pts)
+        elif 21 <= h < 23:
+            sessions["夜盘(21-23)"].append(pts)
+        elif h >= 23 or h < 3:
+            sessions["深夜(23+)"].append(pts)
+    for name, pts in sessions.items():
+        if len(pts) >= 3:
+            avg = sum(pts) / len(pts)
+            wr = sum(1 for p in pts if p > 0) / len(pts) * 100
+            if avg < -10 or wr < 30:
+                rules.append({
+                    "rule": f"{name} 时段表现最差（{len(pts)} 笔，均值 {avg:+.0f} 点，胜率 {wr:.0f}%）",
+                    "action": f"考虑在 {name} 减少或停止开仓——这个时段你的判断力或情绪可能有问题",
+                    "evidence": f"{len(pts)} 笔样本",
+                })
+            elif avg > 10 and wr > 50:
+                rules.append({
+                    "rule": f"{name} 时段是你的优势时段（{len(pts)} 笔，均值 {avg:+.0f} 点，胜率 {wr:.0f}%）",
+                    "action": f"把交易集中在 {name}——数据说这个时段你做得更好",
+                    "evidence": f"{len(pts)} 笔样本",
+                })
+
+    # ---- ③ 仓位分析：大手数是否更差 ----
+    small = [t for t in closed if float(t.get("lots") or 1) == 1]
+    big = [t for t in closed if float(t.get("lots") or 1) >= 2]
+    if len(small) >= 3 and len(big) >= 3:
+        sm_avg = sum(float(t["result_pts"]) for t in small) / len(small)
+        bg_avg = sum(float(t["result_pts"]) for t in big) / len(big)
+        sm_wr = sum(1 for t in small if float(t["result_pts"]) > 0) / len(small) * 100
+        bg_wr = sum(1 for t in big if float(t["result_pts"]) > 0) / len(big) * 100
+        if bg_avg < sm_avg - 5 and bg_wr < sm_wr:
+            rules.append({
+                "rule": f"加大仓位时表现显著下降（≥2手 均值 {bg_avg:+.0f} 点/胜率 {bg_wr:.0f}% vs 1手 {sm_avg:+.0f} 点/胜率 {sm_wr:.0f}%）",
+                "action": "大手数交易时你在赌不是在算——仓位加大前问自己：这笔逻辑比 1 手的单更强吗？",
+                "evidence": f"小仓 {len(small)} 笔 vs 大仓 {len(big)} 笔",
+            })
+
+    # ---- ④ 方向偏好：你是不是只适合做一个方向 ----
+    longs = [t for t in closed if t["direction"] == "long"]
+    shorts = [t for t in closed if t["direction"] == "short"]
+    for dir_name, items in (("做多", longs), ("做空", shorts)):
+        other = shorts if dir_name == "做多" else longs
+        if len(items) >= 3 and len(other) >= 3:
+            my_avg = sum(float(t["result_pts"]) for t in items) / len(items)
+            ot_avg = sum(float(t["result_pts"]) for t in other) / len(other)
+            my_wr = sum(1 for t in items if float(t["result_pts"]) > 0) / len(items) * 100
+            if my_avg < ot_avg - 10 and my_wr < 40:
+                other_name = "做空" if dir_name == "做多" else "做多"
+                rules.append({
+                    "rule": f"{dir_name}显著弱于{other_name}（{dir_name} {my_avg:+.0f} 点/胜率 {my_wr:.0f}% vs {other_name} {ot_avg:+.0f} 点）",
+                    "action": f"数据说你不擅长{dir_name}——减少{dir_name}频率，或只在极强逻辑下才{dir_name}",
+                    "evidence": f"{dir_name} {len(items)} 笔 vs {other_name} {len(other)} 笔",
+                })
+
+    # ---- ⑤ MFE 兑现率模式 ----
+    mfe_ratios = []
+    for t in closed:
+        if t.get("hold_min") is not None and t.get("result_pts") is not None and float(t["result_pts"]) > 0:
+            mfe_ratios.append((t["symbol"], float(t["result_pts"])))
+    if len(mfe_ratios) >= 3:
+        avg_win = sum(v for _, v in mfe_ratios) / len(mfe_ratios)
+        rules.append({
+            "rule": f"平均盈利 {avg_win:+.0f} 点——你的赢单赚多少",
+            "action": f"如果同时平均亏损 > {abs(avg_win):.0f} 点，盈亏比倒挂是最大问题——赢单至少要拿 {abs(avg_win) * 1.5:.0f} 点才值得",
+            "evidence": f"{len(mfe_ratios)} 笔盈利单",
+        })
+
+    return rules
+
+
+def _mine_context() -> str:
+    """挖掘结果注入 AI 上下文"""
+    rules = _mine_rules()
+    if not rules:
+        return ""
+    lines = [f"- {r['rule']} → {r['action']}（{r['evidence']}）" for r in rules]
+    return ("【从你的真实交易挖掘出的个性化规则（AI 分析与建议必须优先针对这些发现）】\n"
+            + "\n".join(lines))
+
+
+# ---------------------------------------------------------------- 出场质量分析
+
+def _exit_quality() -> list[dict]:
+    """出场质量分析：利润回吐率 / 出场后走势 / 拿早代价"""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed"
+              and t.get("result_pts") is not None and t.get("exit") is not None]
+    if not closed:
+        return []
+    out = []
+    for t in closed:
+        sign = 1 if t["direction"] == "long" else -1
+        res = float(t["result_pts"])
+        hold = t.get("hold_min") or 0
+        if res > 0:
+            # 盈利单的兑现质量
+            if res < 10:
+                quality = "过早离场（赚 <10 点就跑，恐惧兑现）"
+            elif res < 30:
+                quality = "正常兑现"
+            else:
+                quality = "让利润奔跑 ✅"
+        elif res > -20:
+            quality = "小亏离场（止损纪律正常）"
+        elif res > -50:
+            quality = "较大亏损（止损偏晚或未设）"
+        else:
+            quality = "严重亏损（扛单或无止损）⚠"
+        out.append({
+            "symbol": t["symbol"], "direction": t["direction"],
+            "result_pts": res, "hold_min": hold, "quality": quality,
+            "mood": t.get("mood") or "", "exit_mood": t.get("exit_mood") or "",
+        })
+    return out
+
+
+@app.get("/api/mine-rules")
+async def mine_rules_api():
+    return {"ok": True, "rules": _mine_rules(), "exit_quality": _exit_quality()[:10]}
+
+
 # ---------------------------------------------------------------- 主力席位追踪（资金偏好的实锤）
 
 _SEAT_CACHE: dict[str, tuple[float, dict]] = {}
@@ -5054,6 +5220,20 @@ async def ai_trade_review(body: TradeReviewIn):
             parts.append(f"{mo} {sum(pts_):+.0f}点/{len(pts_)}笔（胜率 {len(wins_) / len(pts_) * 100:.0f}%）")
         stat_lines.append("- 情绪画像（开仓时闸门推断的主导情绪，按累计点数升序=最伤钱的在前）：" + "、".join(parts))
 
+    # 个人规则挖掘（从真实交易提取的个性化模式）
+    mined = _mine_rules()
+    for r in mined:
+        stat_lines.append(f"- 📋 个性化发现：{r['rule']}")
+
+    # 出场质量分布
+    eq = _exit_quality()
+    if eq:
+        q_counts: dict[str, int] = {}
+        for q in eq:
+            q_counts[q["quality"]] = q_counts.get(q["quality"], 0) + 1
+        q_txt = "、".join(f"{k} {v} 笔" for k, v in sorted(q_counts.items(), key=lambda x: -x[1]))
+        stat_lines.append(f"- 出场质量分布：{q_txt}")
+
     # 盘面回放：预载涉及品种的日线（V8 队列串行，但每品种 30 分钟缓存，只拉一次）
     # 与 15 分钟线（约 2 个月覆盖——持有窗口在其内的交易 MFE/MAE 用日内精度）
     symbols_involved = sorted({t["symbol"] for t in closed})
@@ -5114,12 +5294,12 @@ async def ai_trade_review(body: TradeReviewIn):
 【当前持仓】
 {chr(10).join(hold_lines) if hold_lines else "无持仓"}
 
-请以反幻想交易教练视角生成历史交易复盘报告（Markdown，## 分节，1000 字内）：
+请以反幻想交易教练视角生成历史交易复盘报告（Markdown，## 分节，1200 字内）：
 
 一、行为模式画像：用具体交易举证——追涨杀跌/抄底扛单/频繁交易/报复性交易/持亏砍盈；哪个品种、哪个方向在反复送钱（用分品种统计说话）。盈亏比与持仓时长对比（盈利单 vs 亏损单）是处置效应的硬证据，有数据必须引用。
-二、决策质量审计（盘面回放）：入场快照的 ⚠ 标签逐类清算——追涨杀跌位入场几笔？逆 5 日资金方向开仓几笔、这些单的结果如何？逆势抄底摸顶的单付出了什么代价？浮盈兑现率低+拿早判定=该赚的没赚到，持有期浮亏极值深=实际扛单深度远超表面止损。
-三、人性定律归因：每条行为模式点名支配它的人性定律（损失厌恶/处置效应/锚定/近因外推/踏空焦虑/公平世界幻觉/确认偏误/控制幻觉）。
-四、做对的事：数据能支撑的肯定（顺资金方向的单、拿住的高兑现单、有纪律的离场）。
+二、个性化规则清算：若上下文带「📋 个性化发现」，逐条展开——哪条是最大的出血点、对应的 action 是否可立即执行。这是你独有的数据，比任何通用建议都值钱。
+三、出场质量审计：出场质量分布——过早离场（恐惧兑现）占多少、让利润奔跑占多少、严重亏损（扛单）占多少；这是执行纪律的温度计。
+四、人性定律归因：每条行为模式点名支配它的人性定律（损失厌恶/处置效应/锚定/近因外推/踏空焦虑/公平世界幻觉/确认偏误/控制幻觉）。
 五、改进建议：3~5 条可执行建议，逐条对应上述发现，给具体数字标准（如"只顺 5 日资金方向开仓"、"浮盈回撤过半即离场"）。
 
 要求：所有论断引用具体数值与日期；数据缺失明说；不编造。结尾注明不构成投资建议。"""
