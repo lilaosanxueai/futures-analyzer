@@ -165,8 +165,8 @@
             期货公司 App 导出「成交流水/交割单」CSV → 选择文件或拖拽到此处<br>
             或直接从 Excel 复制粘贴到文本框 · 列名自动识别 · 重复导入自动去重
           </p>
-          <input type="file" id="importFile" accept=".csv,.txt,.xlsx,.xls" style="margin-bottom:8px;font-size:13px">
-          <div class="mini-note" style="margin-bottom:6px">支持 .csv / .txt / .xlsx / .xls</div>
+          <input type="file" id="importFile" accept=".csv,.txt,.xlsx,.xls" multiple style="margin-bottom:8px;font-size:13px">
+          <div class="mini-note" style="margin-bottom:6px">支持 .csv / .txt / .xlsx / .xls · 可一次选多个文件（逐个解析汇总）</div>
           <textarea id="importText" rows="4" placeholder="或把成交流水粘贴到这里（Excel 选中区域 Ctrl+C，此处 Ctrl+V）…" style="width:100%;font-size:12px"></textarea>
           <div style="display:flex;gap:8px;justify-content:center;margin-top:8px">
             <button class="btn" id="btnImportCheck">解析预览</button>

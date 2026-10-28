@@ -1286,34 +1286,82 @@ ${(() => {
     });
   }
 
-  // 导入功能（真实交易页顶部的导入卡）：csv/txt 走文本路径，xlsx/xls 走 base64 Excel 端点
-  function importApiFile(dryRun) {
-    const f = $("#importFile").files[0];
-    if (!f) return Promise.reject(new Error("未选择文件"));
+  // 导入功能（真实交易页顶部的导入卡）：支持多文件，csv/txt 走文本路径，xlsx/xls 走 base64 Excel 端点
+  async function importOneFile(f, dryRun) {
     const name = f.name.toLowerCase();
     if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-      return f.arrayBuffer().then((buf) => {
-        let binary = "";
-        const bytes = new Uint8Array(buf);
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        const b64 = btoa(binary);
-        return fetch("/api/trades/import/xlsx?dry_run=" + dryRun, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data: b64 }),
-        }).then((res) => res.json().then((d) => {
-          if (!res.ok || d.ok === false) throw new Error(d.detail || ("HTTP " + res.status));
-          return d;
-        }));
+      const buf = await f.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const r = await fetch("/api/trades/import/xlsx?dry_run=" + dryRun, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: btoa(binary) }),
       });
+      const d = await r.json();
+      if (!r.ok || d.ok === false) throw new Error(f.name + ": " + (d.detail || ("HTTP " + r.status)));
+      return d;
     }
-    return f.arrayBuffer().then((buf) => {
-      let text;
-      try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
-      catch (e) { text = new TextDecoder("gbk").decode(buf); }
-      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-      return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
+    const buf = await f.arrayBuffer();
+    let text;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+    catch (e) { text = new TextDecoder("gbk").decode(buf); }
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
+  }
+  async function importFiles(dryRun) {
+    const files = Array.from($("#importFile").files || []);
+    if (!files.length) throw new Error("未选择文件");
+    const results = [];
+    for (const f of files) {
+      try {
+        const d = await importOneFile(f, dryRun);
+        results.push({ file: f.name, ok: true, d });
+      } catch (e) {
+        results.push({ file: f.name, ok: false, error: e.message });
+      }
+    }
+    return { results,
+      totals: results.reduce((a, r) => r.ok ? {
+        fills: a.fills + (r.d.fills_count || 0),
+        closed: a.closed + (r.d.closed_count || 0),
+        open: a.open + (r.d.open_count || 0),
+        added: a.added + (r.d.added || 0),
+        dup: a.dup + (r.d.skipped_dup || 0),
+        errors: a.errors + (r.d.errors || []).length,
+      } : a, { fills: 0, closed: 0, open: 0, added: 0, dup: 0, errors: 0 }),
+    };
+  }
+  function renderMultiImportPreview(data) {
+    const p = $("#importPreview");
+    p.classList.remove("hidden");
+    let html = "";
+    data.results.forEach((r) => {
+      if (!r.ok) {
+        html += '<div class="mini-note" style="color:var(--danger)">❌ ' + esc(r.file) + "：" + esc(r.error) + "</div>";
+      } else {
+        const d = r.d;
+        html += '<div class="mini-note">📄 ' + esc(r.file) + "：成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔" +
+          ((d.errors || []).length ? " <span style='color:var(--danger)'>（" + d.errors.length + " 行未识别）</span>" : "") + "</div>";
+      }
     });
+    const t = data.totals;
+    html += '<div style="margin:8px 0;font-weight:600;color:var(--text-strong)">合计：闭环 ' + t.closed + " 笔 / 未平仓 " + t.open + " 笔（新增 " + (t.added != null ? t.added : "—") + "）</div>";
+    const rows = [];
+    data.results.forEach((r) => {
+      if (r.ok) (r.d.closed_preview || []).forEach((x) => rows.push(x));
+    });
+    if (rows.length) {
+      html += "<table class='table'><thead><tr><th>日期</th><th>品种</th><th>向</th><th class='r'>手</th><th class='r'>开→平</th><th class='r'>点数</th></tr></thead><tbody>" +
+        rows.slice(0, 15).map((x) =>
+          "<tr><td>" + esc(x.date) + "</td><td>" + esc(x.symbol) + "</td><td>" + (x.direction === "long" ? "多" : "空") +
+          '</td><td class="r">' + x.lots + '</td><td class="r">' + x.entry + "→" + x.exit +
+          '</td><td class="r ' + (x.result_pts > 0 ? "num-up" : "num-down") + '">' + (x.result_pts > 0 ? "+" : "") + x.result_pts + "</td></tr>").join("") + "</tbody></table>" +
+        (rows.length > 15 ? '<div class="mini-note">（仅显示前 15 笔，共 ' + rows.length + " 笔）</div>" : "");
+    }
+    p.innerHTML = html;
+    $("#btnImportCommit").disabled = !(t.closed + t.open);
   }
   function renderImportPreview(d) {
     const p = $("#importPreview");
@@ -1331,7 +1379,7 @@ ${(() => {
   const impFile = $("#importFile");
   if (impFile) {
     impFile.addEventListener("change", async () => {
-      try { renderImportPreview(await importApiFile(1)); } catch (e) { alert("解析失败：" + e.message); }
+      try { renderMultiImportPreview(await importFiles(1)); } catch (e) { alert("解析失败：" + e.message); }
     });
   }
   const impCheck = $("#btnImportCheck");
@@ -1339,20 +1387,27 @@ ${(() => {
     impCheck.addEventListener("click", async () => {
       const text = $("#importText").value.trim();
       if (!text) { alert("请粘贴流水或选择文件"); return; }
-      try { renderImportPreview(await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: 1 }) })); }
+      try { renderMultiImportPreview(await importFiles(1)); }
       catch (e) { alert("解析失败：" + e.message); }
     });
   }
   const impCommit = $("#btnImportCommit");
   if (impCommit) {
     impCommit.addEventListener("click", async () => {
-      const useFile = $("#importFile").files[0] && !$("#importText").value.trim();
-      const d = useFile
-        ? await importApiFile(0)
+      const useFiles = $("#importFile").files.length > 0;
+      const d = useFiles
+        ? await importFiles(0)
         : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
-      alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+      if (useFiles) {
+        renderMultiImportPreview(d);
+        const t = d.totals;
+        const fails = d.results.filter((r) => !r.ok).length;
+        alert("多文件导入完成：新增 " + (t.added || 0) + " 笔（重复跳过 " + (t.dup || 0) + " 笔）" +
+          (fails ? "\n⚠ " + fails + " 个文件解析失败（见预览区红色提示）" : ""));
+      } else {
+        alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
+      }
       $("#importText").value = ""; $("#importFile").value = "";
-      $("#importPreview").classList.add("hidden");
       loadTrades(); loadStats(); loadDiagnosis(); loadFlaws();
     });
   }
