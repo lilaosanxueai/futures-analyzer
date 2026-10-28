@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream"];var t=localStorage.getItem("fa_theme");if(t&&T.indexOf(t)>=0&&t!=="default")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261028e">
+<link rel="stylesheet" href="/static/style.css?v=20261028f">
 </head>
 <body>
 
@@ -173,6 +173,11 @@
             <button class="btn primary" id="btnImportCommit" disabled>确认导入</button>
           </div>
           <div id="importPreview" class="hidden" style="margin-top:10px;text-align:left"></div>
+        </div>
+
+        <div class="card hidden" id="settleCard" style="border:2px solid var(--warn)">
+          <div class="card-head"><h2>📦 导入持仓清算 <span class="muted small">结算单遗留的历史仓位 · 由你决定怎么出清</span></h2></div>
+          <div id="settleBody" style="padding:10px 14px"></div>
         </div>
 
         <div class="card">
@@ -508,8 +513,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261028e"></script>
-<script src="/static/js/views.js?v=20261028e"></script>
-<script src="/static/js/chat.js?v=20261028e"></script>
+<script src="/static/js/base.js?v=20261028f"></script>
+<script src="/static/js/views.js?v=20261028f"></script>
+<script src="/static/js/chat.js?v=20261028f"></script>
 </body>
 </html>

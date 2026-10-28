@@ -4424,6 +4424,86 @@ class TradePatch(BaseModel):
     status: Optional[str] = None
 
 
+class ImportSettleIn(BaseModel):
+    symbol: str
+    direction: str          # long / short
+    mode: str               # market=按现价 / price=指定价 / delete=从未持有
+    price: Optional[float] = None
+
+
+@app.get("/api/import-opens")
+async def import_opens():
+    """结算单导入的历史未平仓（对账尾巴）：按品种+方向分组，附现价与每手浮动"""
+    trades = _load_trades()
+    opens = [t for t in trades if t.get("status") == "open" and t.get("source") == "import"]
+    groups: dict[tuple, list] = {}
+    for t in opens:
+        groups.setdefault((t["symbol"], t.get("direction", "long")), []).append(t)
+    out = []
+    for (sym, side), ts in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        if not (_quote_cache.get(sym, (0, {}))[1] or {}).get("last"):
+            try:
+                await fetch_quote(sym)
+            except Exception:
+                pass
+        last = (_quote_cache.get(sym, (0, {}))[1] or {}).get("last")
+        lots = sum(float(t.get("lots") or 1) for t in ts)
+        avg_entry = sum(float(t["entry"]) * float(t.get("lots") or 1) for t in ts) / max(lots, 1e-9)
+        sign = 1 if side == "long" else -1
+        out.append({
+            "symbol": sym, "direction": side, "count": len(ts),
+            "lots": round(lots, 2), "avg_entry": round(avg_entry, 1), "last": last,
+            "float_pts_per_lot": round(sign * (last - avg_entry), 1) if last else None,
+            "oldest": min((t.get("date") or "") for t in ts),
+        })
+    return {"ok": True, "groups": out, "total": len(opens)}
+
+
+@app.post("/api/import-opens/settle")
+async def import_opens_settle(body: ImportSettleIn):
+    """批量出清一组导入历史仓位：market/price 了结入账（进统计），delete 删除记录"""
+    if body.mode not in ("market", "price", "delete"):
+        raise HTTPException(status_code=400, detail="mode 仅支持 market/price/delete")
+    if body.mode == "price" and not body.price:
+        raise HTTPException(status_code=400, detail="price 模式必须给出实际了结价")
+    if body.direction not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="direction 仅支持 long/short")
+    sym = body.symbol.strip().upper()
+    trades = _load_trades()
+    now_ms = int(datetime.now().timestamp() * 1000)
+    price = body.price
+    if body.mode == "market":
+        try:
+            price = (await fetch_quote(sym)).get("last")
+        except Exception:
+            price = None
+        if not price:
+            raise HTTPException(status_code=502, detail=f"{sym} 实时价获取失败——请改用「填价了结」")
+    sign = 1 if body.direction == "long" else -1
+    settled = removed = 0
+    keep: list[dict] = []
+    for t in trades:
+        if (t.get("status") == "open" and t.get("source") == "import"
+                and t["symbol"] == sym and t.get("direction") == body.direction):
+            if body.mode == "delete":
+                removed += 1
+                continue
+            px = float(price)
+            t["exit"] = px
+            t["result_pts"] = round(sign * (px - float(t["entry"])), 1)
+            t["status"] = "closed"
+            t["closed_ts"] = now_ms
+            t["note"] = ((t.get("note") or "") + "｜历史导入仓位清算").strip()[:200]
+            settled += 1
+        keep.append(t)
+    if not (settled or removed):
+        return {"ok": True, "settled": 0, "removed": 0, "note": "没有匹配的导入持仓"}
+    _save_trades(keep if body.mode == "delete" else trades)
+    _RISK_PROFILE_CACHE["ts"] = 0.0  # 战绩变化，实录风控画像立即失效重算
+    return {"ok": True, "mode": body.mode, "symbol": sym, "direction": body.direction,
+            "settled": settled, "removed": removed, "price": price}
+
+
 @app.post("/api/trades/{trade_id}/review")
 async def trade_review_one(trade_id: str):
     """持仓 AI 体检：原计划 + 当前博弈快照 → continue/reduce/exit 判定 + 生死价位 + 执行偏差"""

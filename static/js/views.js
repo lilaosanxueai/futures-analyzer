@@ -12,7 +12,7 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); }
+      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); loadSettle(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); }
       if (v === "notes") loadNotes();
@@ -600,6 +600,56 @@ ${(() => {
   }
 
   // 真实/模拟交易拆分：各自独立加载
+  // 导入持仓清算：结算单遗留的历史未平仓，分组出清（按现价/填价了结 或 删除）
+  async function loadSettle() {
+    const card = $("#settleCard"), body = $("#settleBody");
+    if (!card) return;
+    try {
+      const d = await api("/api/import-opens");
+      if (!d.total) { card.classList.add("hidden"); return; }
+      card.classList.remove("hidden");
+      body.innerHTML =
+        '<div class="mini-note" style="margin-bottom:8px">结算单导入期结束时仍未平仓的 <b>' + d.total +
+        '</b> 笔历史仓位。若实际早已了结→按现价/填价了结（结果入账统计）；从未实际持有→删除。留着会污染持仓视图。</div>' +
+        d.groups.map((g) => {
+          const flt = g.float_pts_per_lot == null ? "--" :
+            '<span class="' + (g.float_pts_per_lot > 0 ? "num-up" : "num-down") + '">' +
+            (g.float_pts_per_lot > 0 ? "+" : "") + g.float_pts_per_lot + " 点/手</span>";
+          return '<div class="flaw-item"><div class="f-head"><b>' + esc(g.symbol) + " " + (g.direction === "long" ? "多" : "空") + "</b> " +
+            g.count + " 笔 / " + g.lots + " 手 · 均价 " + g.avg_entry + "（自 " + esc(g.oldest) + "）· 现价 " + (g.last || "--") +
+            " · 浮动 " + flt + "</div>" +
+            '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
+            '<button class="btn sm" data-settle="market" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">💰 按现价了结</button>' +
+            '<button class="btn sm" data-settle="price" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">✏️ 填价了结</button>' +
+            '<button class="btn ghost sm" style="color:var(--danger)" data-settle="delete" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">🗑 从未持有，删除</button>' +
+            "</div></div>";
+        }).join("");
+      $$("#settleBody [data-settle]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          const mode = b.getAttribute("data-settle");
+          const sym = b.getAttribute("data-sym"), dir = b.getAttribute("data-dir");
+          let price = null;
+          if (mode === "price") {
+            const v = prompt(sym + "（" + (dir === "long" ? "多" : "空") + "）这组仓位的实际了结价：", "");
+            if (v === null) return;
+            if (isNaN(parseFloat(v))) { alert("价格无效"); return; }
+            price = parseFloat(v);
+          }
+          const msg = mode === "delete" ? "确认删除这组导入仓位记录？（从未实际持有）"
+            : mode === "market" ? "确认按当前现价了结这组仓位？（盈亏按现价入账统计）"
+            : "确认按 " + price + " 了结这组仓位？（盈亏入账统计）";
+          if (!confirm(msg)) return;
+          b.disabled = true;
+          try {
+            const r = await api("/api/import-opens/settle", { method: "POST", body: JSON.stringify({ symbol: sym, direction: dir, mode, price }) });
+            alert(mode === "delete" ? "已删除 " + r.removed + " 笔记录" : "已了结 " + r.settled + " 笔 @ " + r.price);
+            loadSettle(); loadTrades(); loadStats(); loadDiagnosis(); fillSymbolReviewOptions();
+          } catch (e) { alert("失败：" + e.message); b.disabled = false; }
+        });
+      });
+    } catch (e) { card.classList.add("hidden"); }
+  }
+
   async function loadTrades() {
     const body = $("#tradesBody");
     try {
