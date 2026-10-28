@@ -176,9 +176,18 @@
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>📊 行为统计</h2></div>
+          <div class="card-head"><h2>📊 行为统计</h2>
+            <div class="head-actions"><button class="btn ghost sm" id="btnRiskCfg">⚙ 风控参数</button></div>
+          </div>
           <div id="statsBody" class="stats-body"><div class="empty">加载中…</div></div>
           <canvas id="equityChart" class="mini-chart" style="height:120px"></canvas>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>🔔 我的价格预警</h2>
+            <div class="head-actions"><button class="btn ghost sm" id="btnAlertAdd">＋ 新增</button></div>
+          </div>
+          <div id="alertMgrBody" style="padding:8px 14px"><div class="empty">加载中…</div></div>
         </div>
 
         <div class="card">
@@ -186,6 +195,11 @@
             <div class="head-actions"><button class="btn ghost sm" id="btnDiagRefresh">↻ 重新诊断</button></div>
           </div>
           <div id="diagBody"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>📝 交易心得</h2></div>
+          <div id="notesEmbedBody"><div class="empty">加载中…</div></div>
         </div>
       </div>
 
@@ -215,6 +229,11 @@
         <div class="card">
           <div class="card-head"><h2>🤖 自动模拟引擎 <span class="muted small">系统纪律 vs 你的操作</span></h2></div>
           <div id="simStatsBody" class="stats-body"><div class="empty">加载中…</div></div>
+          <div style="padding:0 14px 10px"><button class="btn ghost sm" id="btnSimBt2">📊 策略回测</button></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>⚖ 纪律对照 <span class="muted small">同周期战绩对比</span></h2></div>
+          <div id="versusBody" style="padding:8px 14px"><div class="empty">加载中…</div></div>
         </div>
         <div class="card">
           <div class="card-head"><h2>＋ 记一笔模拟（开仓即检）</h2></div>
@@ -271,6 +290,10 @@
             <button class="btn ghost sm" id="btnPfSynthesize2">🧠 AI 综合画像</button>
           </div>
           <div id="pfSummaryBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+          <div style="padding:0 14px 10px;display:flex;gap:8px">
+            <input id="pfLesson2" placeholder="补充新教训" style="flex:1;font-size:12px">
+            <button class="btn ghost sm" id="btnPfLesson2">添加</button>
+          </div>
         </div>
       </div>
       <div class="trades-right">
@@ -281,6 +304,14 @@
         <div class="card">
           <div class="card-head"><h2>🚪 出场质量 <span class="muted small">执行纪律温度计</span></h2></div>
           <div id="exitQBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>🎭 情绪画像 <span class="muted small">什么心情在亏钱</span></h2></div>
+          <div id="moodBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>🏆 违规成绩单 <span class="muted small">强行 vs 听劝</span></h2></div>
+          <div id="violationBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
       </div>
     </div>
@@ -470,7 +501,7 @@
 </div>
 
 <script src="/static/js/base.js?v=20261024a"></script>
-<script src="/static/js/views.js?v=20261024a"></script>
+<script src="/static/js/views.js?v=20261024b"></script>
 <script src="/static/js/chat.js?v=20261024a"></script>
 </body>
 </html>

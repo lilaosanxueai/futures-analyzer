@@ -3599,6 +3599,7 @@ class TradeIn(BaseModel):
     date: str = ""
     note: str = ""
     force: int = 0  # 1=已在红色风险确认后仍要开仓（记录违规标记）
+    source: str = ""  # "auto"=模拟页手动记录（计入模拟 Tab），空=真实交易
 
 
 # ---- 诊断规则（开仓即检 + 持仓盯防，问题即时暴露） ----
@@ -4152,6 +4153,7 @@ async def add_trade(body: TradeIn):
         "closed_ts": None,
         "note": body.note.strip()[:200],
         "trail": _init_trail(body.entry, body.stop_points, body.target_points),
+        "source": "auto" if body.source == "auto" else None,  # 模拟页手动记录计入模拟 Tab
     }
     # 源头闸门：先取实时快照与现价，拦截致命模式
     try:

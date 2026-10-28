@@ -12,9 +12,9 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); }
-      if (v === "sim") { loadSimTrades(); loadSimStats(); }
-      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); }
+      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); }
+      if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); }
+      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); }
       if (v === "notes") loadNotes();
     });
   });
@@ -840,6 +840,7 @@ ${(() => {
       target_points: parseFloat($("#tfTarget").value) || 0,
       lots: parseFloat($("#tfLots").value) || 1,
       note: $("#tfNote").value,
+      source: "auto",  // 模拟页表单 = 模拟记录
     };
     if (!payload.symbol) { alert("请选择品种"); return; }
     // 开仓理由必须充分（前端先拦，后端同样校验）
@@ -1096,72 +1097,7 @@ ${(() => {
     } catch (e) { alert(e.message); }
   });
 
-  // ================================================================ 交割单导入 + 历史交易复盘
-
-  $("#btnImport").addEventListener("click", () => {
-    $("#importModal").classList.remove("hidden");
-    const p = $("#importPreview");
-    p.classList.add("hidden"); p.innerHTML = "";
-    $("#btnImportCommit").disabled = true;
-  });
-  function importApiFile(dryRun) {
-    const f = $("#importFile").files[0];
-    if (!f) return Promise.reject(new Error("未选择文件"));
-    // 本地解码（UTF-8 严格失败则按 GBK，浏览器原生支持）→ 走 JSON 文本接口，免去 multipart 依赖
-    return f.arrayBuffer().then((buf) => {
-      let text;
-      try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
-      catch (e) { text = new TextDecoder("gbk").decode(buf); }
-      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-      return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
-    });
-  }
-  function renderImportPreview(d) {
-    const p = $("#importPreview");
-    p.classList.remove("hidden");
-    const rows = (d.closed_preview || []).map((t) =>
-      "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.symbol) +
-      '<span class="muted small">(' + esc(t.contract) + ")</span></td><td>" + (t.direction === "long" ? "多" : "空") +
-      '</td><td class="r">' + t.lots + '</td><td class="r">' + t.entry + "→" + t.exit +
-      '</td><td class="r ' + (t.result_pts > 0 ? "num-up" : t.result_pts < 0 ? "num-down" : "") + '">' +
-      (t.result_pts > 0 ? "+" : "") + t.result_pts + "</td></tr>").join("");
-    const openRows = (d.open_preview || []).map((t) =>
-      "<div class='mini-note'>未平仓：[" + esc(t.date) + "] " + esc(t.symbol) + "(" + esc(t.contract) + ") " +
-      (t.direction === "long" ? "多" : "空") + " " + t.lots + "手 @ " + t.entry + "</div>").join("");
-    p.innerHTML =
-      "<div class='mini-note'>识别成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔" +
-      (d.unmatched_close ? " · <span style='color:var(--danger)'>" + d.unmatched_close + " 条平仓无对应开仓（流水可能不完整）</span>" : "") + "</div>" +
-      (rows ? "<table class='table'><thead><tr><th>日期</th><th>品种</th><th>向</th><th class='r'>手</th><th class='r'>开→平</th><th class='r'>点数</th></tr></thead><tbody>" + rows + "</tbody></table>" : "") +
-      openRows +
-      ((d.errors || []).length ? "<div class='mini-note' style='color:var(--danger)'>部分行未识别：" + esc(d.errors.join("；")) + "</div>" : "");
-    $("#btnImportCommit").disabled = !((d.closed_count || 0) + (d.open_count || 0));
-  }
-  $("#importFile").addEventListener("change", async () => {
-    try { renderImportPreview(await importApiFile(1)); }
-    catch (e) { alert("解析失败：" + e.message); }
-  });
-  $("#btnImportCheck").addEventListener("click", async () => {
-    const text = $("#importText").value.trim();
-    if (!text) { alert("请先粘贴成交流水，或选择 CSV 文件"); return; }
-    try {
-      renderImportPreview(await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: 1 }) }));
-    } catch (e) { alert("解析失败：" + e.message); }
-  });
-  $("#btnImportCommit").addEventListener("click", async () => {
-    const btn = $("#btnImportCommit");
-    btn.disabled = true; btn.textContent = "导入中…";
-    try {
-      const useFile = $("#importFile").files[0] && !$("#importText").value.trim();
-      const d = useFile
-        ? await importApiFile(0)
-        : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
-      alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
-      $("#importModal").classList.add("hidden");
-      $("#importText").value = ""; $("#importFile").value = "";
-      loadTrades(); loadStats();
-    } catch (e) { alert("导入失败：" + e.message); }
-    btn.textContent = "确认导入";
-  });
+  // ================================================================ 交割单导入（新版见下方多文件实现）+ 历史交易复盘
 
   $("#btnTradeReview").addEventListener("click", () => { $("#tradeReviewModal").classList.remove("hidden"); });
   $("#btnTradeReviewGo").addEventListener("click", async () => {
@@ -1186,7 +1122,27 @@ ${(() => {
     } catch (e) { alert("保存失败：" + e.message); }
   });
 
-  // 模拟交易页
+  // 模拟页：纪律对照（系统 vs 手动，同周期）
+  async function loadVersus() {
+    const el = $("#versusBody");
+    if (!el) return;
+    try {
+      const [sim, stats] = await Promise.all([
+        api("/api/auto-sim"),
+        api("/api/trades/stats?source=real"),
+      ]);
+      const simToday = (sim.stats || {}).today || {};
+      const ov = (stats || {}).overview || {};
+      el.innerHTML =
+        '<div class="kv"><span class="k">🤖 系统模拟</span><span class="v">' +
+        (simToday.count ? simToday.count + ' 笔 · 胜率 ' + simToday.win_rate + '% · <b class="' + (simToday.total_pts > 0 ? "num-up" : "num-down") + '">' + (simToday.total_pts > 0 ? "+" : "") + simToday.total_pts + '点</b>' : "今日无平仓") + "</span></div>" +
+        '<div class="kv"><span class="k">👤 你的操作（真实）</span><span class="v">' +
+        (ov.count ? ov.count + ' 笔 · 胜率 ' + (ov.win_rate != null ? ov.win_rate : "--") + '% · <b class="' + ((ov.total_pts || 0) > 0 ? "num-up" : "num-down") + '">' + ((ov.total_pts || 0) > 0 ? "+" : "") + ov.total_pts + '点</b>' : "无平仓记录") + "</span></div>" +
+        (simToday.count && ov.count ? '<div class="mini-note">差距就是纪律的价格——系统每单必设止损、尾盘强平、从不报复交易</div>' : "");
+    } catch (e) { /* ignore */ }
+  }
+
+  // 模拟页
   async function loadSimTrades() {
     const body = $("#simTradesBody");
     if (!body) return;
@@ -1424,6 +1380,142 @@ ${(() => {
       impCommit.disabled = false; impCommit.textContent = "确认导入";
     });
   }
+
+  // 交易人格分析页：情绪画像 + 违规成绩单
+  async function loadMoodAndViolation() {
+    const moodEl = $("#moodBody");
+    const violEl = $("#violationBody");
+    if (!moodEl || !violEl) return;
+    try {
+      const [tradesR, statsR] = await Promise.all([
+        api("/api/trades?source=real"),
+        api("/api/trades/stats?source=real"),
+      ]);
+      const items = tradesR.items || [];
+      const b = statsR.behavior || {};
+      // 情绪画像
+      const moodGroups = {};
+      items.forEach((t) => {
+        if (t.get) return;
+        if (t.mood && t.result_pts != null) {
+          moodGroups[t.mood] = moodGroups[t.mood] || [];
+          moodGroups[t.mood].push(t.result_pts);
+        }
+      });
+      const moodRows = Object.entries(moodGroups).sort((a, b) =>
+        a[1].reduce((x, y) => x + y, 0) - b[1].reduce((x, y) => x + y, 0));
+      moodEl.innerHTML = moodRows.length
+        ? moodRows.map(([mo, pts]) => {
+            const total = pts.reduce((x, y) => x + y, 0);
+            const wr = pts.filter((p) => p > 0).length / pts.length * 100;
+            return '<div class="kv"><span class="k">' + esc(mo) + " " + pts.length + ' 笔</span><span class="v"><b class="' + (total > 0 ? "num-up" : "num-down") + '">' + (total > 0 ? "+" : "") + total.toFixed(0) + '</b> 点 · 胜率 ' + wr.toFixed(0) + "%</span></div>";
+          }).join("") + '<div class="mini-note">按累计点数升序——最伤钱的情绪在最上</div>'
+        : '<div class="empty">暂无带情绪标记的平仓记录</div>';
+      // 违规成绩单
+      const forced = items.filter((t) => (t.violation || []).length && t.result_pts != null);
+      const clean = items.filter((t) => !(t.violation || []).length && t.result_pts != null);
+      const mini = (arr) => arr.length
+        ? arr.length + " 笔 · 胜率 " + (arr.filter((t) => t.result_pts > 0).length / arr.length * 100).toFixed(0) + "% · " +
+          (arr.reduce((x, t) => x + t.result_pts, 0) > 0 ? "+" : "") + arr.reduce((x, t) => x + t.result_pts, 0).toFixed(0) + " 点"
+        : "0 笔";
+      violEl.innerHTML = (forced.length || clean.length)
+        ? '<div class="kv"><span class="k">🚫 强行通过闸门</span><span class="v"><b class="num-down">' + mini(forced) + "</b></span></div>" +
+          '<div class="kv"><span class="k">✅ 听劝的正常单</span><span class="v">' + mini(clean) + "</span></div>" +
+          (forced.length ? '<div class="mini-note">数字不会说谎——闸门拦的就是统计上最亏钱的模式</div>' : '<div class="mini-note" style="color:var(--up)">零违规——继续保持</div>')
+        : '<div class="empty">暂无已平仓数据</div>';
+    } catch (e) { /* ignore */ }
+  }
+
+  // 真实交易页：预警管理
+  async function loadAlertMgr() {
+    const el = $("#alertMgrBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/alerts");
+      const items = d.items || [];
+      el.innerHTML = items.length
+        ? items.map((a) =>
+          '<div class="kv"><span class="k">🔔 ' + esc(a.symbol) + " " + (a.dir === "above" ? "升破" : "跌破") + " " + a.price +
+          '</span><span class="v">' + esc(a.note || "") +
+          ' <button class="link-btn danger" data-del-alert="' + a.id + '">删</button></span></div>').join("")
+        : '<div class="empty">暂无预警——持仓体检的生死线可一键设置</div>';
+      $$("#alertMgrBody [data-del-alert]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          try { await api("/api/alerts/" + b.getAttribute("data-del-alert"), { method: "DELETE" }); } catch (e) { /* ignore */ }
+          loadAlertMgr();
+        });
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // 真实交易页：风控参数快捷设置
+  $("#btnRiskCfg").addEventListener("click", async () => {
+    const d = await api("/api/discipline/config");
+    const dd = d.discipline || {};
+    const acct = prompt("账户权益（元，风险计算基数）：", dd.account_size || "");
+    if (acct === null) return;
+    const stop = prompt("日内停手线（总资金%，亏损达此比例当日停手）：", dd.daily_stop || 3);
+    if (stop === null) return;
+    const maxTr = prompt("日内开仓次数上限：", dd.daily_max_trades || 3);
+    if (maxTr === null) return;
+    const maxTotal = prompt("组合总风险上限（总资金%，全部持仓满打亏损之和）：", dd.max_total_risk || 3);
+    if (maxTotal === null) return;
+    await api("/api/discipline/config", { method: "POST", body: JSON.stringify({
+      account_size: parseFloat(acct) || 0, daily_stop: parseFloat(stop) || 3,
+      daily_max_trades: parseInt(maxTr) || 3, max_total_risk: parseFloat(maxTotal) || 3,
+    }) });
+    alert("已保存——刷新后风险预览/敞口/停手线全部生效");
+    loadStats();
+  });
+
+  // 真实交易页：心得嵌入（加载与新增）
+  async function loadNotesEmbed() {
+    const el = $("#notesEmbedBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/notes");
+      const items = (d.items || []).slice(0, 5);
+      el.innerHTML =
+        '<div style="padding:8px 14px;display:flex;gap:8px">' +
+        '<input id="neTitle" placeholder="标题" style="flex:0 0 120px;font-size:12px">' +
+        '<input id="neContent" placeholder="写下这次的心得…" style="flex:1;font-size:12px">' +
+        '<button class="btn ghost sm" id="neAdd">记</button></div>' +
+        (items.length ? items.map((n) =>
+          '<div class="note-item" style="margin:0 14px 8px"><div class="n-title">' + esc(n.title || "(无题)") +
+          '</div><div class="n-content">' + esc((n.content || "").slice(0, 80)) + "</div></div>").join("")
+        : '<div class="empty">暂无心得</div>');
+      const add = $("#neAdd");
+      if (add) {
+        add.addEventListener("click", async () => {
+          const title = $("#neTitle").value.trim(), content = $("#neContent").value.trim();
+          if (!content) { alert("心得内容不能为空"); return; }
+          await api("/api/notes", { method: "POST", body: JSON.stringify({ title, content }) });
+          $("#neTitle").value = ""; $("#neContent").value = "";
+          loadNotesEmbed();
+        });
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // 人格页：补充教训
+  const pfLessonBtn2 = $("#btnPfLesson2");
+  if (pfLessonBtn2) {
+    pfLessonBtn2.addEventListener("click", async () => {
+      const v = $("#pfLesson2").value.trim();
+      if (!v) return;
+      await api("/api/profile", { method: "POST", body: JSON.stringify({ add_lesson: v }) });
+      $("#pfLesson2").value = "";
+      loadProfileSummary();
+    });
+  }
+
+  // 模拟页：策略回测（复用弹窗）
+  const simBt2 = $("#btnSimBt2");
+  if (simBt2) {
+    simBt2.addEventListener("click", () => { $("#btnGateBt").click(); });
+  }
+
+  // 交易人格分析页：情绪画像 + 违规成绩单（占位结束）
 
   // CSV 导出
   $("#btnExportCsv").addEventListener("click", () => {
