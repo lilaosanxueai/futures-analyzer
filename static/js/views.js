@@ -13,7 +13,7 @@
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
       if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); loadSettle(); }
-      if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); }
+      if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); }
       if (v === "notes") loadNotes();
     });
@@ -1190,19 +1190,58 @@ ${(() => {
     const el = $("#versusBody");
     if (!el) return;
     try {
-      const [sim, stats] = await Promise.all([
+      const [sim, stats, risk] = await Promise.all([
         api("/api/auto-sim"),
         api("/api/trades/stats?source=real"),
+        api("/api/risk-profile"),
       ]);
       const simToday = (sim.stats || {}).today || {};
       const ov = (stats || {}).overview || {};
+      // 实盘战绩加持③：失血时段人机对照——同一钟点你亏，规则信号亏不亏
+      const simHours = {};
+      (sim.hour_stats || []).forEach((h) => { simHours[h.hour] = h; });
+      const hourRows = (risk.bad_hours || []).map((bh) => {
+        const sh = simHours[bh.hour];
+        const simTxt = sh
+          ? '规则信号 ' + sh.n + ' 笔 · 均 <span class="' + (sh.avg > 0 ? "num-up" : "num-down") + '">' + (sh.avg > 0 ? "+" : "") + sh.avg + '点</span>'
+          : "规则信号未在此时段开过仓";
+        const verdict = !sh ? "无样本" : sh.avg > 0 ? "时段没问题，是你的做法有问题" : sh.avg > bh.avg ? "时段偏难，但你亏得更多" : "这个时段本身就是毒";
+        return '<div class="flaw-item"><div class="f-head"><b>' + String(bh.hour).padStart(2, "0") + ":00</b> 你的实录 " +
+          bh.n + ' 笔 · 均 <span class="num-down">' + bh.avg + '点</span></div>' +
+          '<div class="f-evi">' + simTxt + '</div>' +
+          '<div class="f-anti">⚖ ' + verdict + "</div></div>";
+      }).join("");
       el.innerHTML =
         '<div class="kv"><span class="k">🤖 系统模拟</span><span class="v">' +
         (simToday.count ? simToday.count + ' 笔 · 胜率 ' + simToday.win_rate + '% · <b class="' + (simToday.total_pts > 0 ? "num-up" : "num-down") + '">' + (simToday.total_pts > 0 ? "+" : "") + simToday.total_pts + '点</b>' : "今日无平仓") + "</span></div>" +
         '<div class="kv"><span class="k">👤 你的操作（真实）</span><span class="v">' +
         (ov.count ? ov.count + ' 笔 · 胜率 ' + (ov.win_rate != null ? ov.win_rate : "--") + '% · <b class="' + ((ov.total_pts || 0) > 0 ? "num-up" : "num-down") + '">' + ((ov.total_pts || 0) > 0 ? "+" : "") + ov.total_pts + '点</b>' : "无平仓记录") + "</span></div>" +
-        (simToday.count && ov.count ? '<div class="mini-note">差距就是纪律的价格——系统每单必设止损、尾盘强平、从不报复交易</div>' : "");
+        (simToday.count && ov.count ? '<div class="mini-note">差距就是纪律的价格——系统每单必设止损、尾盘强平、从不报复交易</div>' : "") +
+        (hourRows ? '<div style="margin-top:8px"><b>⏰ 失血时段人机对照</b>' + hourRows + "</div>" : "");
     } catch (e) { /* ignore */ }
+  }
+
+  // 实盘战绩加持②：解禁试炼场——判停品种的模拟重建进度
+  async function loadTrial() {
+    const card = $("#trialCard"), body = $("#trialBody");
+    if (!card) return;
+    try {
+      const d = await api("/api/auto-sim");
+      const trials = d.trial || [];
+      if (!trials.length) { card.classList.add("hidden"); return; }
+      card.classList.remove("hidden");
+      body.innerHTML =
+        '<div class="mini-note" style="margin-bottom:8px">实盘被 G12 判停的品种，模拟引擎自动纳入试炼（1 手沙盒）。<b>解禁线：≥20 笔闭环 · 累计正期望 · 盈亏比≥0.8</b>——达标后在实盘开仓时的拦截提示会显示"已达解禁标准"。</div>' +
+        trials.map((t) => {
+          const pct = Math.min(100, Math.round(t.n / 20 * 100));
+          const bar = '<div style="background:var(--panel-2);border-radius:4px;height:10px;margin:6px 0"><div style="width:' + pct + '%;height:100%;border-radius:4px;background:var(--' + (t.total_pts > 0 ? "up" : "warn") + ')"></div></div>';
+          return '<div class="flaw-item"><div class="f-head"><b>' + esc(t.symbol) + '</b> ' +
+            (t.ready ? '<span class="badge fatal" style="background:var(--up);border-color:var(--up)">✅ 已达解禁标准</span>'
+              : '还需 ' + t.need + " 笔") + "</div>" + bar +
+            '<div class="f-evi">试炼 ' + t.n + '/20 笔 · 胜率 ' + t.win_rate + '% · 盈亏比 ' + (t.plr == null ? "—" : t.plr) +
+            ' · 累计 <span class="' + (t.total_pts > 0 ? "num-up" : "num-down") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</span></div></div>';
+        }).join("");
+    } catch (e) { card.classList.add("hidden"); }
   }
 
   // 模拟页

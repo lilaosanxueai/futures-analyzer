@@ -1173,6 +1173,44 @@ def _load_auto_trades() -> list[dict]:
     return []
 
 
+def _sim_trial_progress() -> list[dict]:
+    """判停品种的模拟试炼进度——真实战绩对模拟盘的加持闭环：
+    实盘判停的品种自动进模拟沙盒重建优势，攒够证据再谈解禁。
+    解禁标准（透明）：闭环模拟 ≥20 笔 且 累计正期望 且 盈亏比 ≥0.8。"""
+    rp = _risk_profile()
+    banned = [s for s, v in rp["symbols"].items() if v["verdict"] == "停"]
+    out = []
+    for s in banned:
+        cl = [t for t in _load_auto_trades()
+              if t.get("status") == "closed" and t.get("symbol") == s and t.get("result_pts") is not None]
+        pts = [float(t["result_pts"]) for t in cl]
+        wins = [p for p in pts if p > 0]
+        losses = [p for p in pts if p < 0]
+        avg_w = sum(wins) / len(wins) if wins else 0.0
+        avg_l = sum(losses) / len(losses) if losses else 0.0
+        plr = round(avg_w / abs(avg_l), 2) if avg_l else None
+        total = round(sum(pts), 1)
+        out.append({
+            "symbol": s, "n": len(pts), "total_pts": total,
+            "win_rate": round(len(wins) / len(pts) * 100, 1) if pts else 0.0,
+            "plr": plr, "ready": len(pts) >= 20 and total > 0 and (plr or 0) >= 0.8,
+            "need": max(0, 20 - len(pts)),
+        })
+    return out
+
+
+def _sim_hour_stats() -> list[dict]:
+    """模拟单按开仓钟点聚合（供「失血时段人机对照」：同一时段你亏，规则信号亏不亏）"""
+    hh: dict[int, list] = {}
+    for t in _load_auto_trades():
+        if t.get("status") != "closed" or t.get("result_pts") is None or not t.get("ts"):
+            continue
+        h = datetime.fromtimestamp(t["ts"] / 1000).hour
+        hh.setdefault(h, []).append(float(t["result_pts"]))
+    return [{"hour": h, "n": len(v), "avg": round(sum(v) / len(v), 1), "total": round(sum(v), 1)}
+            for h, v in sorted(hh.items())]
+
+
 def _save_auto_trades(items: list[dict]) -> None:
     try:
         AUTO_SIM_FILE.write_text(json.dumps(items[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1268,6 +1306,9 @@ async def auto_sim_loop():
             force_close = (hhmm >= "14:50" and hhmm < "15:00") or (hhmm >= "22:50" and hhmm < "23:00")
             trades = _load_auto_trades()
             syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})
+            # 实盘战绩加持①：判停品种自动进模拟试炼场（自选之外最多补 2 个，攒解禁证据）
+            trial_set = {t["symbol"] for t in _sim_trial_progress() if not t["ready"]}
+            syms = syms[:6] + sorted(s for s in trial_set if s not in syms)[:2]
             for sym in syms[:6]:   # 最多盯 6 个自选
                 try:
                     snap = await psych_snapshot(sym)
@@ -1326,7 +1367,8 @@ async def auto_sim_loop():
                     "symbol": sym, "direction": sig["direction"], "entry": last,
                     "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
                     "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
-                    "note": "自动模拟：多周期共振+顺资金", "mood": "系统纪律",
+                    "note": "自动模拟：解禁试炼（判停品种重建优势）" if sym in trial_set else "自动模拟：多周期共振+顺资金",
+                    "mood": "系统纪律",
                     "source": "auto", "trail": None,
                 })
                 _auto_sim_state["last_open"][sym] = loop_now
@@ -1367,7 +1409,9 @@ def _auto_sim_stats() -> dict:
 async def auto_sim_get():
     cfg = load_config()
     return {"ok": True, "enabled": (cfg.get("auto_sim") or {}).get("enabled", False),
-            "stats": _auto_sim_stats()}
+            "stats": _auto_sim_stats(),
+            "trial": _sim_trial_progress(),
+            "hour_stats": _sim_hour_stats()}
 
 
 _sim_bt_cache: dict = {"key": None, "ts": 0.0, "result": {}}
@@ -4280,25 +4324,30 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
                   f"已持有同方向 {len(losing)} 笔亏单（最差浮亏 {worst:+.1f} 点），此刻加仓=摊平",
                   "摊平是让亏损集中爆发的最快路径：亏单只减不加；加仓等它转盈后按新信号执行")
 
-    # ---- 实录风控：自己的历史战绩划出的红线（G12 品种/方向、G13 时段） ----
-    rp = _risk_profile(all_trades)
-    sv = rp["symbols"].get(sym)
-    if sv:
-        if sv["verdict"] == "停":
-            block("G12", "🚫 品种判停（实录风控）",
-                  f"{sym} 历史实亏 {sv['total']:+.0f} 点 / {sv['n']} 笔、胜率 {sv['win_rate']:.0f}%、盈亏比 {sv['plr']}",
-                  "数据不支持继续实盘这个品种：判停期间用模拟盘重建优势，连续 20 笔模拟正期望再谈解禁")
-        elif sv["dir_ban"] == ("long" if is_long else "short"):
-            dn, dp = (sv["long_n"], sv["long_pts"]) if is_long else (sv["short_n"], sv["short_pts"])
-            other = sv["short_pts"] if is_long else sv["long_pts"]
-            block("G12", "🚫 方向禁令（实录风控）",
-                  f"{sym} {'做多' if is_long else '做空'} {dn} 笔累计 {dp:+.0f} 点，反方向累计 {other:+.0f} 点",
-                  "你在这个品种的单方向上持续失血：禁该方向，要做只做统计上站得住的另一侧")
-    for bh in rp["bad_hours"]:
-        if bh["hour"] == datetime.now().hour:
-            block("G13", "⏰ 失血时段（实录风控）",
-                  f"历史 {bh['hour']:02d}:00 时段开仓 {bh['n']} 笔、平均 {bh['avg']:+.1f} 点、累计 {bh['total']:+.0f} 点",
-                  "这个钟点是你的统计送钱时段：错过不是损失，等下一个时段再评估")
+    # ---- 实录风控：自己的历史战绩划出的红线（G12 品种/方向、G13 时段）。
+    # 模拟单（source=auto）豁免——判停品种的模拟试炼场是官方指定的解禁通道 ----
+    if trade.get("source") != "auto":
+        rp = _risk_profile(all_trades)
+        sv = rp["symbols"].get(sym)
+        if sv:
+            if sv["verdict"] == "停":
+                tr = next((x for x in _sim_trial_progress() if x["symbol"] == sym), None)
+                tr_txt = (f"｜模拟试炼 {tr['n']}/20 笔、累计 {tr['total_pts']:+.0f} 点"
+                          f"（解禁线：≥20 笔·正期望·盈亏比≥0.8）") if tr else ""
+                block("G12", "🚫 品种判停（实录风控）",
+                      f"{sym} 历史实亏 {sv['total']:+.0f} 点 / {sv['n']} 笔、胜率 {sv['win_rate']:.0f}%、盈亏比 {sv['plr']}{tr_txt}",
+                      "数据不支持继续实盘这个品种：判停期间用模拟盘重建优势，连续 20 笔模拟正期望再谈解禁")
+            elif sv["dir_ban"] == ("long" if is_long else "short"):
+                dn, dp = (sv["long_n"], sv["long_pts"]) if is_long else (sv["short_n"], sv["short_pts"])
+                other = sv["short_pts"] if is_long else sv["long_pts"]
+                block("G12", "🚫 方向禁令（实录风控）",
+                      f"{sym} {'做多' if is_long else '做空'} {dn} 笔累计 {dp:+.0f} 点，反方向累计 {other:+.0f} 点",
+                      "你在这个品种的单方向上持续失血：禁该方向，要做只做统计上站得住的另一侧")
+        for bh in rp["bad_hours"]:
+            if bh["hour"] == datetime.now().hour:
+                block("G13", "⏰ 失血时段（实录风控）",
+                      f"历史 {bh['hour']:02d}:00 时段开仓 {bh['n']} 笔、平均 {bh['avg']:+.1f} 点、累计 {bh['total']:+.0f} 点",
+                      "这个钟点是你的统计送钱时段：错过不是损失，等下一个时段再评估")
     return out
 
 
