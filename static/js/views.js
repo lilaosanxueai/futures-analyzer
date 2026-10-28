@@ -1200,28 +1200,73 @@ ${(() => {
     if (!el) return;
     try {
       const d = await api("/api/risk-profile");
-      const syms = Object.values(d.symbols || {}).sort((a, b) => a.total - b.total);
+      const entries = Object.entries(d.symbols || {}).sort((a, b) => a[1].total - b[1].total);
+      const stops = entries.filter(([, v]) => v.verdict === "停");
+      const reduces = entries.filter(([, v]) => v.verdict === "减");
+      const winner = entries.filter(([, v]) => v.total > 0).sort((a, b) => b[1].total - a[1].total)[0];
+      const worstHour = (d.bad_hours || []).slice().sort((a, b) => a.total - b.total)[0];
+      const maxAbs = Math.max(1, ...entries.map(([, v]) => Math.abs(v.total)));
+
+      // 头条统计块
+      const stat = (label, val, cls) =>
+        '<div class="risk-stat"><b class="' + (cls || "") + '">' + val + "</b>" + esc(label) + "</div>";
+      let statsHtml = "";
+      if (stops.length) statsHtml += stat("判停品种（G12 拦截）", stops.map(([s]) => s).join("、"), "num-down");
+      if (reduces.length) statsHtml += stat("手数减半品种", reduces.length + " 个", "");
+      if (worstHour) statsHtml += stat("最失血时段 " + String(worstHour.hour).padStart(2, "0") + ":00",
+        worstHour.total + " 点/" + worstHour.n + " 笔", "num-down");
+      if (winner) statsHtml += stat("唯一正期望 " + winner[0], "+" + winner[1].total + " 点·盈亏比 " + winner[1].plr, "num-up");
+      const rv = d.revenge || {};
+      statsHtml += stat("报复交易实绩", rv.total + " 点/" + (rv.n || 0) + " 笔", (rv.total || 0) > 0 ? "num-up" : "num-down");
+
+      // 品种表：内嵌条形 + 判定行高亮 + 点击跳品种博弈
       const vBadge = (v) => v === "停" ? '<span class="badge fatal">停</span>'
         : v === "减" ? '<span class="badge warn">减半</span>' : '<span class="badge info">留</span>';
-      const rows = syms.map((s) => {
-        const key = Object.keys(d.symbols).find((k) => d.symbols[k] === s);
-        const dir = s.dir_ban
-          ? '<span style="color:var(--danger)">禁' + (s.dir_ban === "long" ? "多" : "空") + "</span>"
-          : (s.long_pts || 0) + "/" + (s.short_pts || 0);
-        return '<tr><td><b>' + esc(key) + "</b></td><td>" + s.n + "</td>" +
-          '<td><span class="' + (s.total > 0 ? "num-up" : "num-down") + '">' + (s.total > 0 ? "+" : "") + s.total + "</span></td>" +
-          "<td>" + s.win_rate + "%</td><td>" + (s.plr == null ? "—" : s.plr) + "</td><td>" + dir + "</td><td>" + vBadge(s.verdict) + "</td></tr>";
+      const rows = entries.map(([s, v]) => {
+        const w = Math.max(4, Math.round(Math.abs(v.total) / maxAbs * 72));
+        const bar = '<i class="risk-bar" style="width:' + w + 'px;background:var(--' + (v.total > 0 ? "up" : "down") + ')"></i>';
+        const dir = v.dir_ban
+          ? '<span style="color:var(--danger)">禁' + (v.dir_ban === "long" ? "多" : "空") + "</span>"
+          : v.long_pts + "/" + v.short_pts;
+        const rowCls = v.verdict === "停" ? "risk-stop" : v.verdict === "减" ? "risk-reduce" : "";
+        return '<tr class="risk-row ' + rowCls + '" data-sym="' + esc(s) + '"><td><b>' + esc(s) + "</b></td><td>" + v.n +
+          '</td><td style="white-space:nowrap">' + bar + '<span class="' + (v.total > 0 ? "num-up" : "num-down") + '">' +
+          (v.total > 0 ? "+" : "") + v.total + "</span></td><td>" + v.win_rate + "%</td><td>" + (v.plr == null ? "—" : v.plr) +
+          "</td><td>" + dir + "</td><td>" + vBadge(v.verdict) + "</td></tr>";
       }).join("");
-      const bh = (d.bad_hours || []).map((h) =>
-        '<span class="badge warn" style="margin:2px">' + String(h.hour).padStart(2, "0") + ":00（" + h.n + "笔 均" + h.avg + "点）</span>").join("");
-      const rv = d.revenge || {};
+
+      // 24 小时失血热力条（高度=|累计点|，红=赚绿=亏（红涨绿跌），⚠=G13 拦截时段）
+      const badSet = new Set((d.bad_hours || []).map((h) => h.hour));
+      const hMap = {};
+      (d.hour_stats || []).forEach((h) => { hMap[h.hour] = h; });
+      const maxH = Math.max(1, ...(d.hour_stats || []).map((h) => Math.abs(h.total)));
+      const cells = [];
+      for (let h = 0; h < 24; h++) {
+        const info = hMap[h];
+        const bad = badSet.has(h);
+        if (info) {
+          const hh = Math.max(3, Math.round(Math.abs(info.total) / maxH * 40));
+          cells.push('<div class="hour-cell' + (bad ? " bad" : "") + '" title="' + String(h).padStart(2, "0") +
+            ":00 · " + info.n + " 笔 · 均 " + info.avg + " · 累计 " + info.total + '">' +
+            '<i class="hour-bar" style="height:' + hh + "px;background:var(--" + (info.total > 0 ? "up" : "down") + ');opacity:' +
+            (bad ? "1" : "0.55") + '"></i><span class="hour-lab">' + (bad ? "⚠" : "") + h + "</span></div>");
+        } else {
+          cells.push('<div class="hour-cell" title="' + String(h).padStart(2, "0") + ':00 无交易"><span class="hour-lab">' + h + "</span></div>");
+        }
+      }
+
       el.innerHTML =
-        '<div class="mini-note" style="margin-bottom:8px">基于 <b>' + d.based_on + '</b> 笔已平仓真实记录自动推导 · 开仓时 G12/G13 自动执行</div>' +
+        '<div class="mini-note" style="margin-bottom:6px">基于 <b>' + d.based_on + '</b> 笔已平仓真实记录自动推导 · 开仓时 G12/G13 自动执行 · 点击品种行进入该品种博弈分析</div>' +
+        '<div class="risk-stats">' + statsHtml + "</div>" +
         '<table class="table"><thead><tr><th>品种</th><th>笔数</th><th>累计点</th><th>胜率</th><th>盈亏比</th><th>多/空点数</th><th>判定</th></tr></thead><tbody>' +
         (rows || '<tr><td colspan="7" class="empty">无数据</td></tr>') + "</tbody></table>" +
-        '<div style="margin-top:10px"><b>⏰ 失血时段（G13 拦截）</b><div style="margin:6px 0">' + (bh || '<span class="muted small">无——没有钟点达到"≥15笔且均亏≤-1点"的定性标准</span>') + "</div></div>" +
-        '<div style="margin-top:6px"><b>🩸 报复交易实绩</b>：亏损了结后 30 分钟内开仓 <b>' + (rv.n || 0) + '</b> 笔、合计 <span class="' + ((rv.total || 0) > 0 ? "num-up" : "num-down") + '">' + (rv.total > 0 ? "+" : "") + (rv.total || 0) + ' 点</span></div>' +
+        '<div style="margin-top:10px"><b>⏰ 24 小时盈亏分布</b><span class="muted small">（条高=累计点数·红盈绿亏·⚠=G13 拦截时段，悬停看明细）</span>' +
+        '<div class="hour-strip">' + cells.join("") + "</div></div>" +
         '<div class="mini-note" style="margin-top:8px">判定规则：' + esc(d.rules.stop + "；" + d.rules.reduce + "；" + d.rules.dir_ban + "；" + d.rules.bad_hour) + "</div>";
+
+      $$("#riskBody tr.risk-row").forEach((tr) => {
+        tr.addEventListener("click", () => FA.openPsych(tr.getAttribute("data-sym")));
+      });
     } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
   }
 

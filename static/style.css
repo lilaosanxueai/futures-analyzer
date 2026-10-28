@@ -467,3 +467,20 @@ main { padding: 14px 18px 30px; max-width: 1720px; margin: 0 auto; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------- 实录风控卡（历史战绩驱动） ---------------- */
+.risk-stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+.risk-stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 11px; color: var(--muted); line-height: 1.5; min-width: 96px; }
+.risk-stat b { display: block; font-size: 14px; color: var(--text); }
+tr.risk-stop td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
+tr.risk-stop td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+tr.risk-reduce td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+tr.risk-row { cursor: pointer; }
+tr.risk-row:hover td { background: color-mix(in srgb, var(--up) 4%, transparent); }
+.risk-bar { display: inline-block; height: 8px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.hour-strip { display: flex; align-items: stretch; gap: 2px; height: 54px; margin: 6px 0 2px; }
+.hour-cell { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 0; }
+.hour-bar { width: 72%; border-radius: 2px 2px 0 0; min-height: 2px; }
+.hour-lab { font-size: 9px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.hour-cell.bad .hour-lab { color: var(--warn); font-weight: 700; }
+.hour-cell.bad .hour-bar { box-shadow: 0 0 0 1px var(--warn); }
