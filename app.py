@@ -3258,16 +3258,18 @@ async def trail_loop():
 
 # ---------------------------------------------------------------- 交割单导入（真实成交 → 交易记录）
 
-# 交割单/成交流水列名别名（各家期货公司导出格式差异）
+# 交割单/成交流水列名别名（各家期货公司导出格式差异；
+# "买/卖"、"开/平" 为监控中心结算月报（安粮等）原生列名）
 _IMPORT_COL_ALIAS = {
     "date": ("成交日期", "交易日期", "日期", "交易日"),
     "time": ("成交时间", "时间", "成交时点"),
     "contract": ("合约", "合约代码", "合约编号", "instrument", "证券代码"),
-    "dir": ("买卖", "方向", "买卖方向", "交易方向"),
-    "offset": ("开平", "开平仓", "开平标志", "开平类型"),
+    "dir": ("买卖", "买/卖", "方向", "买卖方向", "交易方向"),
+    "offset": ("开平", "开/平", "开平仓", "开平标志", "开平类型"),
     "price": ("成交价", "价格", "成交价格", "发生价格"),
     "lots": ("成交量", "手数", "数量", "成交数量"),
     "fee": ("手续费", "费用", "手续费金额", "成交手续费"),
+    "close_pnl": ("平仓盈亏",),
 }
 _DIR_LONG = ("买", "买入", "b", "buy", "多")
 _DIR_SHORT = ("卖", "卖出", "s", "sell", "空")
@@ -3374,11 +3376,18 @@ def _parse_fills(text: str) -> tuple[list[dict], list[str]]:
         time_s = cells[col_map["time"]] if "time" in col_map and len(cells) > col_map["time"] else ""
         dt, date_norm = _imp_dt(date_s, time_s)
         fee = _imp_num(cells[col_map["fee"]]) if "fee" in col_map and len(cells) > col_map["fee"] else 0.0
+        # 结算月报的平仓盈亏列（逐笔对冲官方值，'--'=开仓行）
+        close_pnl = None
+        if "close_pnl" in col_map and len(cells) > col_map["close_pnl"]:
+            v = cells[col_map["close_pnl"]].strip()
+            if v and v != "--":
+                close_pnl = _imp_num(v)
         fills.append({
             "contract": contract, "side": side, "act": act, "price": price,
             "lots": lots, "fee": abs(fee or 0.0),
             "dt": dt, "date": date_norm or (dt.strftime("%Y-%m-%d") if dt else ""),
             "ms": int(dt.timestamp() * 1000) if dt else 0,
+            "close_pnl": close_pnl,
         })
     if not fills:
         errors.insert(0, "没有解析出有效成交行")
@@ -3413,6 +3422,11 @@ def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
             sign = 1 if closed_side == "long" else -1
             entry_fee = round(head_long["fee"] * (take / head_long["lots"]), 2) if head_long["lots"] else 0
             exit_ms = f["ms"] or head_long["ms"]
+            pts = round(sign * (f["price"] - head_long["price"]), 1)
+            # 结算月报的官方平仓盈亏单位是元——存独立字段供校验，result_pts 保持点数口径
+            official_pnl = None
+            if f.get("close_pnl") is not None and abs(take - f["lots"]) < 1e-9:
+                official_pnl = round(float(f["close_pnl"]) * (take / f["lots"]), 1)
             closed.append({
                 "id": f"imp{exit_ms}-{f['contract']}-{closed_side}-{len(closed)}",
                 "ts": head_long["ms"], "date": head_long["date"],
@@ -3424,7 +3438,8 @@ def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
                 "stop_points": None, "target_points": None,
                 "lots": int(take) if abs(take - round(take)) < 1e-9 else round(take, 2),
                 "status": "closed",
-                "result_pts": round(sign * (f["price"] - head_long["price"]), 1),
+                "result_pts": pts,
+                "official_pnl": official_pnl,
                 "closed_ts": exit_ms,
                 "note": f"交割单导入（持时{int(hold_min)}分）" if hold_min is not None else "交割单导入",
                 "fees": round(fee_share + entry_fee, 2),
