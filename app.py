@@ -3973,7 +3973,7 @@ _GATE_MOOD = (
     ("G7", "报复冲动"), ("G4", "FOMO 追涨"), ("G1b", "恐慌追空"),
     ("G6", "摊平执念"), ("G2", "抄底贪婪"), ("G1", "接飞刀冲动"),
     ("G9", "手痒超频"), ("G3", "逆势执念"), ("G8", "失控硬扛"),
-    ("G11", "翻本赌徒"),
+    ("G11", "翻本赌徒"), ("G12", "判停品种手痒"), ("G13", "送钱时段惯性"),
 )
 
 # 听消息开仓的关键词（中国散户特有：消息到你耳朵里时，主力早已建仓完毕）
@@ -3988,8 +3988,110 @@ def _infer_mood(blockers: list[dict]) -> str:
     return "未分类冲动"
 
 
+# ---------------------------------------------------------------- 实录风控（历史战绩驱动的风控策略）
+
+_RISK_PROFILE_CACHE: dict = {"data": None, "ts": 0.0}
+
+
+def _risk_profile(trades: Optional[list] = None, max_age: float = 600.0) -> dict:
+    """真实历史战绩 → 风控画像：品种判停/减仓、方向禁令、失血时段、报复后实绩。
+    阈值全部透明（防小样本噪音）：停=≥20笔且累亏≤-400点且盈亏比<0.6；
+    减=≥10笔且累亏≤-100点；方向禁=单方向≥10笔且累亏≤-300点；
+    失血时段=该钟点≥15笔且均亏≤-1点。传入 trades 时只算不缓存。"""
+    if trades is None and _RISK_PROFILE_CACHE["data"] and time.time() - _RISK_PROFILE_CACHE["ts"] < max_age:
+        return _RISK_PROFILE_CACHE["data"]
+    trades = trades if trades is not None else _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None
+              and t.get("source") != "auto"]
+    closed.sort(key=lambda t: t.get("closed_ts") or t.get("ts") or 0)
+
+    agg: dict[str, dict] = {}
+    for t in closed:
+        s = (t.get("symbol") or "").upper()
+        d = agg.setdefault(s, {"n": 0, "total": 0.0, "wins": 0, "win_pts": 0.0,
+                               "loss_n": 0, "loss_pts": 0.0,
+                               "long_n": 0, "long_pts": 0.0, "short_n": 0, "short_pts": 0.0})
+        p = float(t["result_pts"])
+        d["n"] += 1
+        d["total"] += p
+        if p > 0:
+            d["wins"] += 1
+            d["win_pts"] += p
+        else:
+            d["loss_n"] += 1
+            d["loss_pts"] += p
+        if t.get("direction") == "short":
+            d["short_n"] += 1
+            d["short_pts"] += p
+        else:
+            d["long_n"] += 1
+            d["long_pts"] += p
+
+    symbols: dict[str, dict] = {}
+    for s, d in agg.items():
+        avg_w = d["win_pts"] / (d["wins"] or 1)
+        avg_l = d["loss_pts"] / (d["loss_n"] or 1)
+        plr = round(avg_w / abs(avg_l), 2) if avg_l else None
+        verdict = "留"
+        if d["n"] >= 20 and d["total"] <= -400 and (plr is None or plr < 0.6):
+            verdict = "停"
+        elif d["n"] >= 10 and d["total"] <= -100:
+            verdict = "减"
+        dir_ban = ""
+        if d["long_n"] >= 10 and d["long_pts"] <= -300:
+            dir_ban = "long"
+        elif d["short_n"] >= 10 and d["short_pts"] <= -300:
+            dir_ban = "short"
+        symbols[s] = {"n": d["n"], "total": round(d["total"], 1),
+                      "win_rate": round(d["wins"] / d["n"] * 100, 1) if d["n"] else 0.0,
+                      "plr": plr, "verdict": verdict, "dir_ban": dir_ban,
+                      "long_n": d["long_n"], "long_pts": round(d["long_pts"], 1),
+                      "short_n": d["short_n"], "short_pts": round(d["short_pts"], 1)}
+
+    # 失血时段：按开仓钟点聚合
+    hours: dict[int, list] = {}
+    for t in closed:
+        ms = t.get("ts") or 0
+        if not ms:
+            continue
+        hours.setdefault(datetime.fromtimestamp(ms / 1000).hour, []).append(float(t["result_pts"]))
+    hour_stats, bad_hours = [], []
+    for h in sorted(hours):
+        pts = hours[h]
+        avg = sum(pts) / len(pts)
+        hour_stats.append({"hour": h, "n": len(pts), "total": round(sum(pts), 1), "avg": round(avg, 1)})
+        if len(pts) >= 15 and avg <= -1.0:
+            bad_hours.append({"hour": h, "n": len(pts), "avg": round(avg, 1), "total": round(sum(pts), 1)})
+
+    # 报复交易实绩：亏损了结后 30 分钟内开的仓，最后赚了还是亏了
+    closes = [(t.get("closed_ts") or 0, float(t["result_pts"])) for t in closed if t.get("closed_ts")]
+    revenge_n, revenge_pts = 0, 0.0
+    for t in closed:
+        ts0 = t.get("ts") or 0
+        for cts, cps in reversed(closes):
+            if cts >= ts0:
+                continue
+            if ts0 - cts < 30 * 60 * 1000 and cps < 0:
+                revenge_n += 1
+                revenge_pts += float(t["result_pts"])
+            break
+
+    profile = {"ok": True, "based_on": len(closed), "symbols": symbols,
+               "bad_hours": bad_hours, "hour_stats": hour_stats,
+               "revenge": {"n": revenge_n, "total": round(revenge_pts, 1)},
+               "rules": {"stop": "≥20笔 且 累亏≤-400点 且 盈亏比<0.6 → 品种判停",
+                         "reduce": "≥10笔 且 累亏≤-100点 → 建议手数减半",
+                         "dir_ban": "单方向≥10笔 且 累亏≤-300点 → 该方向拦截",
+                         "bad_hour": "钟点≥15笔 且 均亏≤-1点 → 时段拦截"}}
+    if trades is None:
+        _RISK_PROFILE_CACHE["data"] = profile
+        _RISK_PROFILE_CACHE["ts"] = time.time()
+    return profile
+
+
 def _suggested_lots(symbol: str, stop_points: float) -> Optional[float]:
-    """风险预算制建议手数：账户 × 单笔风险% ÷（止损点数 × 合约乘数）"""
+    """风险预算制建议手数：账户 × 单笔风险% ÷（止损点数 × 合约乘数）。
+    实录风控收紧：判减品种（≥10笔累亏≤-100点）预算减半——历史证明的优势缺位要付代价。"""
     if not stop_points or stop_points <= 0:
         return None
     cfg = load_config()["discipline"]
@@ -4001,7 +4103,11 @@ def _suggested_lots(symbol: str, stop_points: float) -> Optional[float]:
     if per_lot_risk <= 0:
         return None
     budget = acct * float(cfg.get("risk_per_trade", 1.0)) / 100
-    return int(budget // per_lot_risk)
+    lots = int(budget // per_lot_risk)
+    sv = _risk_profile()["symbols"].get(symbol)
+    if sv and sv.get("verdict") == "减":
+        lots //= 2
+    return lots
 
 
 def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_trades: list) -> list[dict]:
@@ -4141,6 +4247,26 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
             block("G6", "📉 亏损加仓（摊平）",
                   f"已持有同方向 {len(losing)} 笔亏单（最差浮亏 {worst:+.1f} 点），此刻加仓=摊平",
                   "摊平是让亏损集中爆发的最快路径：亏单只减不加；加仓等它转盈后按新信号执行")
+
+    # ---- 实录风控：自己的历史战绩划出的红线（G12 品种/方向、G13 时段） ----
+    rp = _risk_profile(all_trades)
+    sv = rp["symbols"].get(sym)
+    if sv:
+        if sv["verdict"] == "停":
+            block("G12", "🚫 品种判停（实录风控）",
+                  f"{sym} 历史实亏 {sv['total']:+.0f} 点 / {sv['n']} 笔、胜率 {sv['win_rate']:.0f}%、盈亏比 {sv['plr']}",
+                  "数据不支持继续实盘这个品种：判停期间用模拟盘重建优势，连续 20 笔模拟正期望再谈解禁")
+        elif sv["dir_ban"] == ("long" if is_long else "short"):
+            dn, dp = (sv["long_n"], sv["long_pts"]) if is_long else (sv["short_n"], sv["short_pts"])
+            other = sv["short_pts"] if is_long else sv["long_pts"]
+            block("G12", "🚫 方向禁令（实录风控）",
+                  f"{sym} {'做多' if is_long else '做空'} {dn} 笔累计 {dp:+.0f} 点，反方向累计 {other:+.0f} 点",
+                  "你在这个品种的单方向上持续失血：禁该方向，要做只做统计上站得住的另一侧")
+    for bh in rp["bad_hours"]:
+        if bh["hour"] == datetime.now().hour:
+            block("G13", "⏰ 失血时段（实录风控）",
+                  f"历史 {bh['hour']:02d}:00 时段开仓 {bh['n']} 笔、平均 {bh['avg']:+.1f} 点、累计 {bh['total']:+.0f} 点",
+                  "这个钟点是你的统计送钱时段：错过不是损失，等下一个时段再评估")
     return out
 
 
@@ -4912,6 +5038,13 @@ def _flaw_context() -> str:
 @app.get("/api/flaw-profile")
 async def flaw_profile_api():
     return {"ok": True, "flaws": _flaw_profile(), "blocked_count": len(_load_gate_log())}
+
+
+@app.get("/api/risk-profile")
+async def risk_profile_api():
+    """实录风控画像：真实历史战绩推导的品种判停/减仓、方向禁令、失血时段、报复实绩。
+    供人格分析页展示与闸门 G12/G13 使用。"""
+    return _risk_profile()
 
 
 @app.post("/api/discipline/config")

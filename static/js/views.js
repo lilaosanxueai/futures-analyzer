@@ -14,7 +14,7 @@
       $("#view-" + v).classList.add("active");
       if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); }
-      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); }
+      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); }
       if (v === "notes") loadNotes();
     });
   });
@@ -1194,6 +1194,37 @@ ${(() => {
   }
 
   // 交易人格分析页
+  // 实录风控：历史战绩推导的硬性风控线（品种判停/减、方向禁令、失血时段、报复实绩）
+  async function loadRiskProfile() {
+    const el = $("#riskBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/risk-profile");
+      const syms = Object.values(d.symbols || {}).sort((a, b) => a.total - b.total);
+      const vBadge = (v) => v === "停" ? '<span class="badge fatal">停</span>'
+        : v === "减" ? '<span class="badge warn">减半</span>' : '<span class="badge info">留</span>';
+      const rows = syms.map((s) => {
+        const key = Object.keys(d.symbols).find((k) => d.symbols[k] === s);
+        const dir = s.dir_ban
+          ? '<span style="color:var(--danger)">禁' + (s.dir_ban === "long" ? "多" : "空") + "</span>"
+          : (s.long_pts || 0) + "/" + (s.short_pts || 0);
+        return '<tr><td><b>' + esc(key) + "</b></td><td>" + s.n + "</td>" +
+          '<td><span class="' + (s.total > 0 ? "num-up" : "num-down") + '">' + (s.total > 0 ? "+" : "") + s.total + "</span></td>" +
+          "<td>" + s.win_rate + "%</td><td>" + (s.plr == null ? "—" : s.plr) + "</td><td>" + dir + "</td><td>" + vBadge(s.verdict) + "</td></tr>";
+      }).join("");
+      const bh = (d.bad_hours || []).map((h) =>
+        '<span class="badge warn" style="margin:2px">' + String(h.hour).padStart(2, "0") + ":00（" + h.n + "笔 均" + h.avg + "点）</span>").join("");
+      const rv = d.revenge || {};
+      el.innerHTML =
+        '<div class="mini-note" style="margin-bottom:8px">基于 <b>' + d.based_on + '</b> 笔已平仓真实记录自动推导 · 开仓时 G12/G13 自动执行</div>' +
+        '<table class="table"><thead><tr><th>品种</th><th>笔数</th><th>累计点</th><th>胜率</th><th>盈亏比</th><th>多/空点数</th><th>判定</th></tr></thead><tbody>' +
+        (rows || '<tr><td colspan="7" class="empty">无数据</td></tr>') + "</tbody></table>" +
+        '<div style="margin-top:10px"><b>⏰ 失血时段（G13 拦截）</b><div style="margin:6px 0">' + (bh || '<span class="muted small">无——没有钟点达到"≥15笔且均亏≤-1点"的定性标准</span>') + "</div></div>" +
+        '<div style="margin-top:6px"><b>🩸 报复交易实绩</b>：亏损了结后 30 分钟内开仓 <b>' + (rv.n || 0) + '</b> 笔、合计 <span class="' + ((rv.total || 0) > 0 ? "num-up" : "num-down") + '">' + (rv.total > 0 ? "+" : "") + (rv.total || 0) + ' 点</span></div>' +
+        '<div class="mini-note" style="margin-top:8px">判定规则：' + esc(d.rules.stop + "；" + d.rules.reduce + "；" + d.rules.dir_ban + "；" + d.rules.bad_hour) + "</div>";
+    } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
+  }
+
   async function loadMineRules() {
     const el = $("#mineBody");
     if (!el) return;
