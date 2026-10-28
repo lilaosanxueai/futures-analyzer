@@ -1517,18 +1517,37 @@ ${(() => {
 
   // 交易人格分析页：情绪画像 + 违规成绩单（占位结束）
 
-  // 分品种复盘：下拉填充（真实日志中出现的品种）+ 生成 + 报告
+  // 分品种复盘：下拉填充（精准对应真实交易记录的品种）+ 生成 + 报告
   async function fillSymbolReviewOptions() {
     const sel = $("#srSymbol");
     if (!sel) return;
     try {
       const d = await api("/api/trades?source=real");
-      const syms = [...new Set((d.items || []).map((t) => t.symbol))].sort();
+      const items = d.items || [];
+      // 每品种统计已平仓笔数（复盘最小样本口径：≥3 笔可生成）
+      const closedCnt = {}, seen = {};
+      items.forEach((t) => {
+        const s = (t.symbol || "").toUpperCase();
+        if (!s) return;
+        seen[s] = 1;
+        if (t.status === "closed") closedCnt[s] = (closedCnt[s] || 0) + 1;
+      });
+      const nameOf = (s) => {
+        const it = (FA.state.dirItems || []).find((x) => x.symbol === s);
+        return it ? " " + it.name : "";
+      };
+      const syms = Object.keys(seen).sort((a, b) => (closedCnt[b] || 0) - (closedCnt[a] || 0) || a.localeCompare(b));
       const cur = sel.value;
       sel.innerHTML = '<option value="">分品种复盘…</option>' +
-        syms.map((s) => '<option value="' + s + '">' + s + "</option>").join("");
+        syms.map((s) => {
+          const n = closedCnt[s] || 0;
+          const label = s + esc(nameOf(s)) + " · " + n + " 笔平仓";
+          return n >= 3
+            ? '<option value="' + s + '">' + label + "</option>"
+            : '<option value="' + s + '" disabled>' + label + "（样本不足）</option>";
+        }).join("");
       if (cur) sel.value = cur;
-      $("#btnSymbolReview").disabled = !syms.length;
+      $("#btnSymbolReview").disabled = !sel.value;
     } catch (e) { /* ignore */ }
   }
   $("#srSymbol").addEventListener("change", () => {
