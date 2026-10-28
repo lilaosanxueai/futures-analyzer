@@ -3423,10 +3423,15 @@ def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
             entry_fee = round(head_long["fee"] * (take / head_long["lots"]), 2) if head_long["lots"] else 0
             exit_ms = f["ms"] or head_long["ms"]
             pts = round(sign * (f["price"] - head_long["price"]), 1)
-            # 结算月报的官方平仓盈亏单位是元——存独立字段供校验，result_pts 保持点数口径
+            # 结算月报的官方平仓盈亏单位是元——存独立字段供校验；有官方值且乘数已知时
+            # 直接反推精确点数（FIFO 配对在部分平仓交错时的笔级归属可能与逐笔对冲官方归属不同）
             official_pnl = None
             if f.get("close_pnl") is not None and abs(take - f["lots"]) < 1e-9:
                 official_pnl = round(float(f["close_pnl"]) * (take / f["lots"]), 1)
+                m_mult = re.match(r"^([A-Za-z]{1,2})", f["contract"])
+                mult = CONTRACT_MULTIPLIER.get(m_mult.group(1).upper()) if m_mult else None
+                if mult and take > 0:
+                    pts = round(official_pnl / (mult * take), 1)
             closed.append({
                 "id": f"imp{exit_ms}-{f['contract']}-{closed_side}-{len(closed)}",
                 "ts": head_long["ms"], "date": head_long["date"],
@@ -4761,9 +4766,16 @@ def _flaw_profile() -> list[dict]:
         })
 
     # 1 无止损：把亏损控制权交给对手盘
-    no_stop = sum(1 for t in trades if not t.get("stop_points"))
-    add("无止损开仓", no_stop, len(trades), f"{no_stop}/{len(trades)} 笔未设止损",
-        "开仓即挂硬止损（结构位之外），单笔风险 ≤ 账户 1%")
+    # 口径修正：结算月报导入记录天然无止损字段（交割单不含止损列），
+    # 只统计手动记录（非 import）；导入数据的无止损风险改由"扛单深度"间接体现
+    manual_trades = [t for t in trades if t.get("source") != "import"]
+    no_stop = sum(1 for t in manual_trades if not t.get("stop_points"))
+    imported_n = len(trades) - len(manual_trades)
+    if no_stop or not imported_n:
+        add("无止损开仓", no_stop, len(manual_trades) or len(trades),
+            f"{no_stop}/{len(manual_trades) or len(trades)} 笔未设止损"
+            + (f"（另 {imported_n} 笔导入记录无止损字段，不计入）" if imported_n else ""),
+            "开仓即挂硬止损（结构位之外），单笔风险 ≤ 账户 1%")
 
     # 2 穿损扛单：止损形同虚设
     held = sum(
@@ -5438,6 +5450,121 @@ async def ai_trade_review(body: TradeReviewIn):
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 _feishu_token = {"token": "", "expire_at": 0.0}
+
+
+@app.get("/api/symbol-review/{symbol}")
+async def symbol_review(symbol: str, days: int = 0):
+    """分品种深度复盘：该品种全部真实交易 + 盘面回放 + 情绪/出场质量 → AI 个性化报告"""
+    sym = symbol.strip().upper()
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed"
+              and t.get("result_pts") is not None and t["symbol"].upper() == sym]
+    if days > 0:
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        closed = [t for t in closed if (t.get("date") or "") >= cutoff]
+    if len(closed) < 3:
+        raise HTTPException(status_code=400, detail=f"{sym} 样本不足（{len(closed)} 笔已平仓，至少 3 笔）")
+    closed.sort(key=lambda t: (t.get("closed_ts") or t.get("ts") or 0))
+
+    pts = [float(t["result_pts"]) for t in closed]
+    wins = [p for p in pts if p > 0]
+    losses = [p for p in pts if p < 0]
+    longs = [t for t in closed if t["direction"] == "long"]
+    shorts = [t for t in closed if t["direction"] == "short"]
+
+    def _grp(items):
+        if not items:
+            return "无"
+        p_ = [float(t["result_pts"]) for t in items]
+        wr = sum(1 for x in p_ if x > 0) / len(p_) * 100
+        return f"{len(items)} 笔、胜率 {wr:.0f}%、累计 {sum(p_):+.0f} 点、均值 {sum(p_) / len(p_):+.0f}"
+
+    stat_lines = [
+        f"- 已平仓 {len(closed)} 笔：胜率 {len(wins) / len(closed) * 100:.0f}%，累计 {sum(pts):+.0f} 点，"
+        f"手续费 {sum(t.get('fees') or 0 for t in closed):.0f} 元",
+        f"- 做多：{_grp(longs)} ｜ 做空：{_grp(shorts)}",
+        f"- 最大单笔亏损 {min(pts):+.0f} 点 / 最大单笔盈利 {max(pts):+.0f} 点",
+    ]
+    if wins and losses:
+        aw, al = sum(wins) / len(wins), abs(sum(losses) / len(losses))
+        stat_lines.append(f"- 平均盈利 {aw:+.0f} vs 平均亏损 -{al:.0f}（盈亏比 {aw / al if al else 999:.2f}）")
+    # 结算单官方盈亏校验（元）
+    official = [t.get("official_pnl") for t in closed if t.get("official_pnl") is not None]
+    if official:
+        stat_lines.append(f"- 结算单官方平仓盈亏合计 {sum(official):+,.0f} 元（用于交叉验证点数口径）")
+
+    # 盘面回放（复用现有回放器）
+    bars_map = {sym: await _daily_bars_for(sym)}
+    try:
+        mrows = await get_minute(sym, "15")
+    except Exception:
+        mrows = []
+    m15 = []
+    for r in mrows:
+        try:
+            ms = int(datetime.fromisoformat(str(r["datetime"])).timestamp() * 1000)
+            hi_, lo_ = float(r.get("high") or 0), float(r.get("low") or 0)
+            if hi_ > 0 and lo_ > 0:
+                m15.append((ms, hi_, lo_))
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+
+    detail, flag_list = [], []
+    for t in closed[-40:]:
+        tag, flags = _replay_tag(t, bars_map.get(sym, []), m15)
+        if flags:
+            flag_list.append(flags)
+        viol = " 🚫强行" if t.get("violation") else ""
+        hold = f"（持时{t['hold_min']}分）" if t.get("hold_min") is not None else ""
+        mood = f" 情绪:{t['mood']}" if t.get("mood") else ""
+        detail.append(
+            f"- {t.get('date', '')} {'多' if t['direction'] == 'long' else '空'} {t.get('lots', 1)}手 "
+            f"{t['entry']}→{t.get('exit')}{hold} {float(t['result_pts']):+.0f}点{mood}{viol}{tag}"
+        )
+    replay_sum = _replay_summary(flag_list)
+
+    # 该品种出场质量
+    eq = _exit_quality()
+    eq_sym = [q for q in eq if q["symbol"].upper() == sym]
+    q_counts: dict[str, int] = {}
+    for q in eq_sym:
+        q_counts[q["quality"]] = q_counts.get(q["quality"], 0) + 1
+    mood_groups: dict[str, list[float]] = {}
+    for t in closed:
+        if t.get("mood"):
+            mood_groups.setdefault(t["mood"], []).append(float(t["result_pts"]))
+    mood_txt = "、".join(
+        f"{mo} {sum(v):+.0f}点/{len(v)}笔" for mo, v in sorted(mood_groups.items(), key=lambda kv: sum(kv[1]))
+    ) or "无标记"
+
+    prompt = f"""你是反幻想交易教练。以下是用户在 **{sym}** 这一个品种上的全部真实交易（{scope_txt(days)}），请做单品种深度复盘：
+
+【汇总】
+{chr(10).join(stat_lines)}
+{chr(10).join(replay_sum)}
+
+【逐笔明细】（末尾 [ ] 为入场时刻盘面回放与持有期浮盈/浮亏极值）
+{chr(10).join(detail)}
+
+【出场质量分布】{json.dumps(q_counts, ensure_ascii=False)}
+【开仓情绪】{mood_txt}
+
+输出（Markdown，## 分节，900 字内）：
+一、在这个品种上你整体是亏是赚、亏/赚在什么结构（方向/时段/持仓时长）
+二、回放清算：⚠ 标签逐类点名——追涨杀跌/逆势/逆资金入场各几笔、结果如何、付出什么代价
+三、出场质量：拿早/扛单/按计划各占比，最可惜的一笔和最该止损的一笔具体点评
+四、这个品种的"正确玩法"：基于以上数据给出 3 条该品种专属纪律（含具体数字）
+五、去留建议：数据是否支持继续交易这个品种（给出明确的"留/减/停"判断）
+
+要求：每句结论引用具体数值；样本不足的维度明说；不编造。结尾注明不构成投资建议。"""
+
+    report = await _llm_text_retry(prompt, max_tokens=2800)
+    return {"ok": True, "symbol": sym, "trades": len(closed),
+            "total_pts": round(sum(pts), 1), "report": report}
+
+
+def scope_txt(days: int) -> str:
+    return f"近 {days} 天" if days > 0 else "全部历史"
 
 
 async def _feishu_push(text: str) -> bool:

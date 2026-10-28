@@ -12,7 +12,7 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); }
+      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); }
       if (v === "notes") loadNotes();
@@ -1516,6 +1516,39 @@ ${(() => {
   }
 
   // 交易人格分析页：情绪画像 + 违规成绩单（占位结束）
+
+  // 分品种复盘：下拉填充（真实日志中出现的品种）+ 生成 + 报告
+  async function fillSymbolReviewOptions() {
+    const sel = $("#srSymbol");
+    if (!sel) return;
+    try {
+      const d = await api("/api/trades?source=real");
+      const syms = [...new Set((d.items || []).map((t) => t.symbol))].sort();
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">分品种复盘…</option>' +
+        syms.map((s) => '<option value="' + s + '">' + s + "</option>").join("");
+      if (cur) sel.value = cur;
+      $("#btnSymbolReview").disabled = !syms.length;
+    } catch (e) { /* ignore */ }
+  }
+  $("#srSymbol").addEventListener("change", () => {
+    $("#btnSymbolReview").disabled = !$("#srSymbol").value;
+  });
+  $("#btnSymbolReview").addEventListener("click", async () => {
+    const sym = $("#srSymbol").value;
+    if (!sym) return;
+    $("#tradeReviewModal").classList.remove("hidden");
+    const body = $("#tradeReviewBody");
+    body.innerHTML = '<span class="typing">' + esc(sym) + ' 分品种复盘生成中（约 30-60 秒）…</span>';
+    FA._lastTradeReview = null;
+    try {
+      const d = await api("/api/symbol-review/" + encodeURIComponent(sym));
+      body.innerHTML = '<div class="mini-note" style="margin-bottom:8px">品种 ' + esc(d.symbol) + " · " + d.trades + ' 笔 · 累计 <b class="' + (d.total_pts > 0 ? "num-up" : "num-down") + '">' + (d.total_pts > 0 ? "+" : "") + d.total_pts + " 点</b></div>" + md(d.report);
+      FA._lastTradeReview = d;
+    } catch (e) {
+      body.innerHTML = '<span style="color:var(--danger)">生成失败：' + esc(e.message) + "</span>";
+    }
+  });
 
   // CSV 导出
   $("#btnExportCsv").addEventListener("click", () => {
