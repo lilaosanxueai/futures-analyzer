@@ -4837,20 +4837,29 @@ async def patch_trade(trade_id: str, body: TradePatch):
 async def del_trade(trade_id: str):
     trades = _load_trades()
     remain = [t for t in trades if t["id"] != trade_id]
-    if len(remain) == len(trades):
+    if len(remain) != len(trades):
+        _save_trades(remain)
+        return {"ok": True}
+    # 不在 trades.json → 试引擎存储 auto_trades.json（模拟日志两种来源统一删除入口）
+    autos = _load_auto_trades()
+    remain_a = [t for t in autos if t["id"] != trade_id]
+    if len(remain_a) == len(autos):
         raise HTTPException(status_code=404, detail="交易记录不存在")
-    _save_trades(remain)
+    _save_auto_trades(remain_a)
     return {"ok": True}
 
 
 @app.get("/api/trades")
 async def get_trades(source: str = ""):
-    """交易记录。source=real 只看手动+导入（真实交易），source=auto 只看模拟，空=全部"""
+    """交易记录。source=real 只看手动+导入（真实交易），source=auto 只看模拟（手动模拟+引擎自动），空=全部"""
     items_all = list(reversed(_load_trades()))
     if source == "real":
         items_all = [t for t in items_all if t.get("source") != "auto"]
     elif source == "auto":
-        items_all = [t for t in items_all if t.get("source") == "auto"]
+        # 模拟日志两种来源打通：手动模拟存 trades.json，引擎单存 auto_trades.json，合并按时间倒序
+        manual_auto = [t for t in items_all if t.get("source") == "auto"]
+        engine = list(_load_auto_trades())
+        items_all = sorted(manual_auto + engine, key=lambda t: t.get("ts") or 0, reverse=True)
     items = items_all
     # 缓存未命中的持仓品种并行补拉行情（串行最坏 N×0.5s；fetch_quote 自带 5s 缓存回填）
     missing = sorted({t["symbol"] for t in items
