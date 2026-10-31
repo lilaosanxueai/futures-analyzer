@@ -3757,12 +3757,16 @@ def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
             # 结算月报的官方平仓盈亏单位是元——存独立字段供校验；有官方值且乘数已知时
             # 直接反推精确点数（FIFO 配对在部分平仓交错时的笔级归属可能与逐笔对冲官方归属不同）
             official_pnl = None
+            entry_px = head_long["price"]  # FIFO 配对腿价（无官方值时的兜底）
             if f.get("close_pnl") is not None and abs(take - f["lots"]) < 1e-9:
                 official_pnl = round(float(f["close_pnl"]) * (take / f["lots"]), 1)
                 m_mult = re.match(r"^([A-Za-z]{1,2})", f["contract"])
                 mult = CONTRACT_MULTIPLIER.get(m_mult.group(1).upper()) if m_mult else None
                 if mult and take > 0:
                     pts = round(official_pnl / (mult * take), 1)
+                    # 开仓价按官方盈亏反推（FIFO 腿在部分平仓交错时会配错——
+                    # 2026-11-01 清洗教训：205 笔显示价与铁账错位即源于此）
+                    entry_px = round(f["price"] - sign * pts, 1)
             closed.append({
                 "id": f"imp{exit_ms}-{f['contract']}-{closed_side}-{len(closed)}",
                 "ts": head_long["ms"], "date": head_long["date"],
@@ -3770,7 +3774,7 @@ def _pair_fills(fills: list[dict]) -> tuple[list[dict], list[dict], int]:
                            if re.match(r"^([A-Za-z]{1,2})", f["contract"]) else f["contract"]),
                 "contract": f["contract"],
                 "direction": closed_side,
-                "entry": head_long["price"], "exit": f["price"],
+                "entry": entry_px, "exit": f["price"],
                 "stop_points": None, "target_points": None,
                 "lots": int(take) if abs(take - round(take)) < 1e-9 else round(take, 2),
                 "status": "closed",
