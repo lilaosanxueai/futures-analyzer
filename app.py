@@ -379,21 +379,29 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
     return quotes, positions
 
 
+_THS_SCANNING = {"busy": False}  # UIA 若卡死（期货通无响应）防扫描任务堆积
+
+
 async def _ths_scan_once() -> dict:
-    """读一次期货通：窗口→UIA文本→解析→更新状态"""
+    """读一次期货通：窗口→UIA文本→解析→更新状态（in-flight 防堆积）"""
+    if _THS_SCANNING["busy"]:
+        return {"ok": False, "err": "上一次读取尚未返回（期货通无响应？），跳过本轮"}
+    _THS_SCANNING["busy"] = True
+    try:
+        def _run():
+            hwnd = _ths_hwnd()
+            if not hwnd:
+                return {"ok": False, "err": "没找到期货通窗口（先打开同花顺期货通客户端）"}
+            try:
+                texts = _ths_uia_texts(hwnd)
+            except Exception as e:
+                return {"ok": False, "err": f"UIA 读取失败：{e}"}
+            quotes, positions = _ths_parse(texts)
+            return {"ok": True, "texts": len(texts), "quotes": quotes, "positions": positions}
 
-    def _run():
-        hwnd = _ths_hwnd()
-        if not hwnd:
-            return {"ok": False, "err": "没找到期货通窗口（先打开同花顺期货通客户端）"}
-        try:
-            texts = _ths_uia_texts(hwnd)
-        except Exception as e:
-            return {"ok": False, "err": f"UIA 读取失败：{e}"}
-        quotes, positions = _ths_parse(texts)
-        return {"ok": True, "texts": len(texts), "quotes": quotes, "positions": positions}
-
-    r = await asyncio.to_thread(_run)
+        r = await asyncio.to_thread(_run)
+    finally:
+        _THS_SCANNING["busy"] = False
     if not r.get("ok"):
         _ths_log(f"读取失败：{r.get('err')}")
         THS_SYNC["last"] = {"ok": False, "err": r.get("err"), "ts": int(time.time() * 1000)}
@@ -415,6 +423,39 @@ async def ths_sync_loop():
         except Exception:
             pass
         await asyncio.sleep(60)
+
+
+_BACKUP_STATE = {"day": ""}
+
+
+async def backup_loop():
+    """每日滚动备份核心数据文件到 backups/（保留最近 7 天）。
+    经历过截断事故后这是底线保险：文件坏了至少能回到昨天。"""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if _BACKUP_STATE["day"] != today:
+                import shutil
+                bdir = BASE_DIR / "backups"
+                bdir.mkdir(exist_ok=True)
+                n = 0
+                for fname in ("trades.json", "auto_trades.json", "gate_log.json",
+                              "alerts.json", "notes.json", "trader_profile.json", "config.json"):
+                    src = BASE_DIR / fname
+                    if src.exists():
+                        shutil.copy2(src, bdir / f"{today}-{fname}")
+                        n += 1
+                # 只保留最近 7 个日期
+                days = sorted({p.name[:10] for p in bdir.iterdir() if p.name[4:5] == "-"})
+                for old in days[:-7]:
+                    for p in bdir.glob(old + "-*"):
+                        p.unlink(missing_ok=True)
+                _BACKUP_STATE["day"] = today
+                _ths_log(f"每日备份：{n} 个文件 → backups/")
+        except Exception:
+            pass
+        await asyncio.sleep(1800)
 
 
 async def _warmup():
@@ -440,11 +481,12 @@ async def lifespan(_app):
     diagnose_task = asyncio.create_task(diagnose_loop())
     care_task = asyncio.create_task(auto_care_loop())
     ths_task = asyncio.create_task(ths_sync_loop())
+    backup_task = asyncio.create_task(backup_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
-              care_task, ths_task, report_task, selfcheck_task):
+              care_task, ths_task, backup_task, report_task, selfcheck_task):
         t.cancel()
 
 
@@ -1350,6 +1392,9 @@ def _sig_diag_tick() -> None:
                           "filter": 0, "gate_blocked": 0, "cooldown": 0, "opened": 0})
 
 
+_AUTO_LOCK = asyncio.Lock()  # auto_trades.json 读-改-写互斥：引擎循环与 API 手动删改并发时防旧快照回写
+
+
 def _load_auto_trades() -> list[dict]:
     if AUTO_SIM_FILE.exists():
         try:
@@ -1490,84 +1535,86 @@ async def auto_sim_loop():
             hhmm = now.strftime("%H:%M")
             # 尾盘强平窗口：日盘 14:50+ / 夜盘 22:50+（除 SC/AU/AG 至 02:20）
             force_close = (hhmm >= "14:50" and hhmm < "15:00") or (hhmm >= "22:50" and hhmm < "23:00")
-            trades = _load_auto_trades()
-            syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})
-            # 实盘战绩加持①：判停品种自动进模拟试炼场（自选之外最多补 2 个，攒解禁证据）
-            trial_set = {t["symbol"] for t in _sim_trial_progress() if not t["ready"]}
-            syms = syms[:6] + sorted(s for s in trial_set if s not in syms)[:2]
-            for sym in syms[:6]:   # 最多盯 6 个自选
-                try:
-                    snap = await psych_snapshot(sym)
-                except Exception:
-                    continue
-                if not snap or snap.get("last") is None:
-                    continue
-                last = snap["last"]
-                # ---- 持仓管理 ----
-                for t in trades:
-                    if t.get("status") != "open" or t["symbol"] != sym:
+            async with _AUTO_LOCK:  # 引擎读改写与 API 手动删改互斥
+                trades = _load_auto_trades()
+                syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})
+                # 实盘战绩加持①：判停品种自动进模拟试炼场（自选之外最多补 2 个，攒解禁证据）
+                trial_set = {t["symbol"] for t in _sim_trial_progress() if not t["ready"]}
+                syms = syms[:6] + sorted(s for s in trial_set if s not in syms)[:2]
+                for sym in syms[:6]:   # 最多盯 6 个自选
+                    try:
+                        snap = await psych_snapshot(sym)
+                    except Exception:
                         continue
-                    sign = 1 if t["direction"] == "long" else -1
-                    pnl = sign * (last - t["entry"])
-                    if pnl <= -t["stop_points"]:            # 触损
-                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
-                                 closed_ts=int(now.timestamp() * 1000), exit_mood="止损执行", close_reason="stop")
-                    elif pnl >= t["target_points"]:         # 触盈
-                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
-                                 closed_ts=int(now.timestamp() * 1000), exit_mood="按计划兑现", close_reason="target")
-                    elif force_close:                        # 尾盘强平
-                        t.update(status="closed", exit=last, result_pts=round(pnl, 1),
-                                 closed_ts=int(now.timestamp() * 1000), exit_mood="尾盘清仓", close_reason="eod")
-                # ---- 开仓 ----
-                has_open = any(t.get("status") == "open" and t["symbol"] == sym for t in trades)
-                if has_open or force_close:
-                    continue
-                loop_now = asyncio.get_event_loop().time()
-                if loop_now - _auto_sim_state["last_open"].get(sym, -1e9) < 15 * 60:
-                    continue   # 同品种 15 分钟冷却
-                _sig_diag_tick()
-                _sig_diag["scans"] += 1
-                sig, stage = _auto_sim_signal_diag(snap)
-                if stage == "resonance" or stage == "nodata":
-                    continue
-                _sig_diag["resonance"] += 1
-                if stage == "funding":
-                    continue
-                _sig_diag["funding"] += 1
-                if stage == "filter":
-                    continue
-                _sig_diag["filter"] += 1
-                if not sig:
-                    continue
-                # 走闸门（模拟同样受纪律约束——被拦即弃；source=auto 使 G12/G13 沙盒豁免显式生效）
-                mock = {"symbol": sym, "direction": sig["direction"], "entry": last,
+                    if not snap or snap.get("last") is None:
+                        continue
+                    last = snap["last"]
+                    # ---- 持仓管理 ----
+                    for t in trades:
+                        if t.get("status") != "open" or t["symbol"] != sym:
+                            continue
+                        sign = 1 if t["direction"] == "long" else -1
+                        pnl = sign * (last - t["entry"])
+                        if pnl <= -t["stop_points"]:            # 触损
+                            t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                     closed_ts=int(now.timestamp() * 1000), exit_mood="止损执行", close_reason="stop")
+                        elif pnl >= t["target_points"]:         # 触盈
+                            t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                     closed_ts=int(now.timestamp() * 1000), exit_mood="按计划兑现", close_reason="target")
+                        elif force_close:                        # 尾盘强平
+                            t.update(status="closed", exit=last, result_pts=round(pnl, 1),
+                                     closed_ts=int(now.timestamp() * 1000), exit_mood="尾盘清仓", close_reason="eod")
+                    # ---- 开仓 ----
+                    has_open = any(t.get("status") == "open" and t["symbol"] == sym for t in trades)
+                    if has_open or force_close:
+                        continue
+                    loop_now = asyncio.get_event_loop().time()
+                    if loop_now - _auto_sim_state["last_open"].get(sym, -1e9) < 15 * 60:
+                        continue   # 同品种 15 分钟冷却
+                    _sig_diag_tick()
+                    _sig_diag["scans"] += 1
+                    sig, stage = _auto_sim_signal_diag(snap)
+                    if stage == "resonance" or stage == "nodata":
+                        continue
+                    _sig_diag["resonance"] += 1
+                    if stage == "funding":
+                        continue
+                    _sig_diag["funding"] += 1
+                    if stage == "filter":
+                        continue
+                    _sig_diag["filter"] += 1
+                    if not sig:
+                        continue
+                    # 走闸门（模拟同样受纪律约束——被拦即弃；source=auto 使 G12/G13 沙盒豁免显式生效）
+                    mock = {"symbol": sym, "direction": sig["direction"], "entry": last,
+                            "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
+                            "source": "auto"}
+                    blockers = _entry_gate(mock, snap, last, [t for t in trades if t.get("status") == "open"])
+                    if blockers:
+                        _sig_diag["gate_blocked"] += 1
+                        continue   # 被闸门拦截的信号不入场
+                    now_ms = int(now.timestamp() * 1000)
+                    _sig_diag["opened"] += 1
+                    trades.append({
+                        "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": now.strftime("%Y-%m-%d"),
+                        "symbol": sym, "direction": sig["direction"], "entry": last,
                         "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
-                        "source": "auto"}
-                blockers = _entry_gate(mock, snap, last, [t for t in trades if t.get("status") == "open"])
-                if blockers:
-                    _sig_diag["gate_blocked"] += 1
-                    continue   # 被闸门拦截的信号不入场
-                now_ms = int(now.timestamp() * 1000)
-                _sig_diag["opened"] += 1
-                trades.append({
-                    "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": now.strftime("%Y-%m-%d"),
-                    "symbol": sym, "direction": sig["direction"], "entry": last,
-                    "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
-                    "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
-                    "note": "自动模拟：解禁试炼（判停品种重建优势）" if sym in trial_set else "自动模拟：多周期共振+顺资金",
-                    "mood": "系统纪律",
-                    "source": "auto", "trail": None,
-                })
-                _auto_sim_state["last_open"][sym] = loop_now
-                _emit_event({
-                    "id": f"autosim-{now_ms}-{sym}", "ts": now_ms, "kind": "diag",
-                    "etype": "AUTO_SIM", "level": "info", "symbol": sym, "name": "",
-                    "dir": "up" if sig["direction"] == "long" else "down", "price": last,
-                    "text": f"🤖 模拟开仓：{sym} {'多' if sig['direction'] == 'long' else '空'} @ {last}，"
-                            f"止损 {sig['stop']} 目标 {sig['target']}（共振+顺资金）",
-                    "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
-                })
-            _save_auto_trades(trades)
+                        "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
+                        "note": "自动模拟：解禁试炼（判停品种重建优势）" if sym in trial_set else "自动模拟：多周期共振+顺资金",
+                        "mood": "系统纪律",
+                        "source": "auto", "trail": None,
+                    })
+                    _auto_sim_state["last_open"][sym] = loop_now
+                    _emit_event({
+                        "id": f"autosim-{now_ms}-{sym}", "ts": now_ms, "kind": "diag",
+                        "etype": "AUTO_SIM", "level": "info", "symbol": sym, "name": "",
+                        "dir": "up" if sig["direction"] == "long" else "down", "price": last,
+                        "text": f"🤖 模拟开仓：{sym} {'多' if sig['direction'] == 'long' else '空'} @ {last}，"
+                                f"止损 {sig['stop']} 目标 {sig['target']}（共振+顺资金）",
+                        "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                    })
+                _save_auto_trades(trades)
+
         except Exception:
             pass
         await asyncio.sleep(30)
@@ -5051,14 +5098,15 @@ async def patch_trade(trade_id: str, body: TradePatch):
         _apply_trade_patch(t, body)
         _save_trades(trades)
         return {"ok": True, "item": t}
-    # 引擎单兜底：auto_trades.json（模拟日志的手动平仓入口）
-    autos = _load_auto_trades()
-    for t in autos:
-        if t["id"] != trade_id:
-            continue
-        _apply_trade_patch(t, body, ai_review=False)
-        _save_auto_trades(autos)
-        return {"ok": True, "item": t}
+    # 引擎单兜底：auto_trades.json（模拟日志的手动平仓入口，与引擎循环互斥）
+    async with _AUTO_LOCK:
+        autos = _load_auto_trades()
+        for t in autos:
+            if t["id"] != trade_id:
+                continue
+            _apply_trade_patch(t, body, ai_review=False)
+            _save_auto_trades(autos)
+            return {"ok": True, "item": t}
     raise HTTPException(status_code=404, detail="交易记录不存在")
 
 
@@ -5069,12 +5117,13 @@ async def del_trade(trade_id: str):
     if len(remain) != len(trades):
         _save_trades(remain)
         return {"ok": True}
-    # 不在 trades.json → 试引擎存储 auto_trades.json（模拟日志两种来源统一删除入口）
-    autos = _load_auto_trades()
-    remain_a = [t for t in autos if t["id"] != trade_id]
-    if len(remain_a) == len(autos):
-        raise HTTPException(status_code=404, detail="交易记录不存在")
-    _save_auto_trades(remain_a)
+    # 不在 trades.json → 试引擎存储 auto_trades.json（与引擎循环互斥防旧快照回写复活）
+    async with _AUTO_LOCK:
+        autos = _load_auto_trades()
+        remain_a = [t for t in autos if t["id"] != trade_id]
+        if len(remain_a) == len(autos):
+            raise HTTPException(status_code=404, detail="交易记录不存在")
+        _save_auto_trades(remain_a)
     return {"ok": True}
 
 
@@ -6964,12 +7013,21 @@ async def _selfcheck_run(ping_ai: bool = False) -> list:
                 json.loads(fp.read_text(encoding="utf-8"))
         return "数据文件完整"
 
+    async def probe_ths():
+        last = THS_SYNC.get("last") or {}
+        if not last:
+            return "未读取（盯屏未开启）"
+        if last.get("ok"):
+            return f"上次读取成功（{len(THS_SYNC.get('quotes') or [])} 条报价）"
+        return f"读取失败：{str(last.get('err'))[:40]}"
+
     checks = [
         ("国内实时行情", probe_quote), ("国内日K", probe_kline),
         ("国内分钟线", probe_minute), ("国际行情", probe_intl),
         ("心理博弈引擎", probe_psych), ("盯盘循环", probe_monitor),
         ("博弈雷达", probe_psych_watch), ("飞书", probe_feishu),
         ("AI 服务", probe_ai), ("本地数据", probe_disk),
+        ("期货通盯屏", probe_ths),
     ]
 
     async def guarded(name, fn):

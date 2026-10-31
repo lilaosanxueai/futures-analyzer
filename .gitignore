@@ -14,3 +14,4 @@ alerts.json
 auto_trades.json
 uia_sample.txt
 *.tmp
+backups/
