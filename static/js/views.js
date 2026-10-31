@@ -12,9 +12,10 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
+      if (v === "work") { loadThs(); }
       if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); loadSettle(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
-      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); }
+      if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); loadMonthly(); }
       if (v === "notes") loadNotes();
     });
   });
@@ -1262,17 +1263,46 @@ ${(() => {
         } else {
           pnlHtml = '<span class="muted">--</span>';
         }
-        const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + "</span>" : "";
+        const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + (t.note.length > 14 ? "…" : "") + "</span>" : "";
+        const acts = t.status === "open"
+          ? '<button class="link-btn" data-act="mktclose" data-id="' + t.id + '" title="按当前市价平仓">💰</button>' +
+            '<button class="link-btn" data-act="close" data-id="' + t.id + '">了结</button>' +
+            '<button class="link-btn danger" data-del="' + t.id + '">删</button>'
+          : '<button class="link-btn danger" data-del="' + t.id + '">删</button>';
         return "<tr><td>" + esc(t.date) + "</td><td><b>" + esc(t.symbol) + "</b>" + note + "</td>" +
           '<td><span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + "</span> " + (t.lots || 1) + "手</td>" +
           '<td class="r">' + fmtNum(t.entry) + '</td><td class="r">' + (t.stop_points || "--") + '</td><td class="r">' + (t.target_points || "--") + '</td>' +
-          '<td class="r">' + pnlHtml + '</td><td><button class="link-btn danger" data-del="' + t.id + '">删</button></td></tr>';
+          '<td class="r">' + pnlHtml + "</td><td>" + acts + "</td></tr>";
       }).join("");
       $$("#simTradesBody [data-del]").forEach((b) => {
         b.addEventListener("click", async () => {
           if (!confirm("删除？")) return;
           await api("/api/trades/" + b.getAttribute("data-del"), { method: "DELETE" });
           loadSimTrades();
+        });
+      });
+      $$("#simTradesBody [data-act]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          const id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
+          const row = Array.from(document.querySelectorAll("#simTradesBody tr"))
+            .find((r) => r.innerHTML.indexOf('data-id="' + id + '"') >= 0);
+          const live = ((d.items || []).find((x) => x.id === id) || {}).live || {};
+          if (act === "mktclose") {
+            if (live.price == null) { alert("实时价未就绪，稍后再试"); return; }
+            if (!confirm("按 " + live.price + " 市价平仓这笔模拟单？")) return;
+            try {
+              await api("/api/trades/" + id, { method: "PATCH", body: JSON.stringify({ exit: live.price }) });
+              loadSimTrades(); loadSimStats(); loadVersus(); loadTrial();
+            } catch (err) { alert("平仓失败：" + err.message); }
+            return;
+          }
+          if (act === "close") {
+            const v = prompt("了结价（留空=仅标记了结）：", "");
+            if (v === null) return;
+            const body2 = v.trim() !== "" && !isNaN(parseFloat(v)) ? { exit: parseFloat(v) } : { status: "closed" };
+            await api("/api/trades/" + id, { method: "PATCH", body: JSON.stringify(body2) });
+            loadSimTrades(); loadSimStats(); loadVersus(); loadTrial();
+          }
         });
       });
     } catch (e) {
@@ -1286,16 +1316,121 @@ ${(() => {
       const d = await api("/api/auto-sim");
       const st = d.stats || {};
       const t = st.today || {};
+      const tot = st.total || {};
       const fn = st.funnel || {};
       el.innerHTML = '<div class="kv-list">' +
         '<div class="kv"><span class="k">今日战绩</span><span class="v">' + (t.count ? t.count + ' 笔 · 胜率 ' + t.win_rate + '% · <b class="' + (t.total_pts > 0 ? "num-up" : "num-down") + '">' + (t.total_pts > 0 ? "+" : "") + t.total_pts + '点</b>' : "暂无平仓") + "</span></div>" +
+        '<div class="kv"><span class="k">累计战绩</span><span class="v">' + (tot.count ? tot.count + ' 笔 · 胜率 ' + tot.win_rate + '% · <b class="' + (tot.total_pts > 0 ? "num-up" : "num-down") + '">' + (tot.total_pts > 0 ? "+" : "") + tot.total_pts + '点</b>' : "尚无闭环") + "</span></div>" +
         '<div class="kv"><span class="k">持仓中</span><span class="v">' + (st.open_count || 0) + " 笔</span></div>" +
         (fn.scans ? '<div class="kv"><span class="k">信号漏斗</span><span class="v">' + fn.scans + "扫→" + (fn.resonance || 0) + "共振→" + (fn.opened || 0) + "开</span></div>" : "") +
         '<div class="kv"><span class="k">引擎状态</span><span class="v">' + (d.enabled ? "✅ 运行中" : "⛔ 未启用") + '</span></div></div>';
     } catch (e) { /* ignore */ }
   }
 
+  // 期货通盯屏同步：UIA 直读（自选报价 + 持仓插槽）
+  async function loadThs() {
+    const el = $("#thsBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/ths-sync");
+      renderThs(d);
+    } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
+  }
+  function renderThs(d) {
+    const el = $("#thsBody");
+    const last = d.last || {};
+    const btn = $("#btnThsToggle");
+    if (btn) btn.textContent = d.enabled ? "关闭" : "开启";
+    const qs = d.quotes || [];
+    const status = !last.ok ? (last.err || "未读取") :
+      "✅ " + new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) + " · " + (last.texts || 0) + " 元素";
+    const quoteRows = qs.slice(0, 10).map((q) =>
+      '<span class="chip" style="margin:2px">' + esc(q.code) + (q.name ? " " + esc(q.name.replace(/\d+$/, "")) : "") +
+      ' <b>' + fmtNum(q.price) + '</b> <span class="' + ((q.chg_pct || 0) > 0 ? "num-up" : "num-down") + '">' +
+      (q.chg_pct == null ? "--" : (q.chg_pct > 0 ? "+" : "") + q.chg_pct + "%") + "</span></span>").join("");
+    const pos = d.positions || [];
+    const posHtml = pos.length
+      ? pos.map((p) => '<div class="kv"><span class="k">' + esc(p.symbol) + " " + (p.direction === "long" ? "多" : "空") + " " + p.lots + '手</span><span class="v">' + (p.float_pnl == null ? "--" : p.float_pnl + "点") + "</span></div>").join("")
+      : '<div class="mini-note">持仓通道待校准：在期货通打开<b>交易页并登录</b> → 点「📐 采样」一次即自动识别</div>';
+    el.innerHTML =
+      '<div class="kv"><span class="k">状态</span><span class="v">' + esc(status) +
+      (d.enabled ? ' · <span style="color:var(--up)">同步中(60s)</span>' : "") + "</span></div>" +
+      (quoteRows ? '<div style="margin:6px 0"><b class="small">期货通自选</b><br>' + quoteRows +
+        ' <button class="link-btn" id="btnThsWatch" style="margin-left:4px">⇪ 同步到应用自选</button></div>' : "") +
+      '<div style="margin-top:6px"><b class="small">期货通持仓</b></div>' + posHtml +
+      ((d.log || []).length ? '<div class="mini-note" style="margin-top:6px">' + d.log.slice(0, 4).map(esc).join("<br>") + "</div>" : "");
+    const bw = $("#btnThsWatch");
+    if (bw) bw.addEventListener("click", () => {
+      // RM2701 → RM0 主力映射后并入应用自选
+      const cur = FA.watch();
+      const add = (d.quotes || []).map((q) => {
+        const m = q.code.match(/^([A-Za-z]{1,2})\d{3,4}$/);
+        return m ? (m[1].toUpperCase() + "0") : null;
+      }).filter((s) => s && !cur.includes(s));
+      if (!add.length) { alert("自选已全部同步过"); return; }
+      FA.setWatch(cur.concat(add));
+      alert("已加入 " + add.join("、") + "（主力连续合约）");
+      if (FA.pollQuotes) FA.pollQuotes(true);
+    });
+  }
+  const btnThsScan = $("#btnThsScan");
+  if (btnThsScan) btnThsScan.addEventListener("click", async () => {
+    btnThsScan.disabled = true; btnThsScan.textContent = "⏳ 读取中…";
+    try { await api("/api/ths-sync/scan", { method: "POST" }); loadThs(); }
+    catch (e) { alert("读取失败：" + e.message); }
+    btnThsScan.disabled = false; btnThsScan.textContent = "▶ 立即读取";
+  });
+  const btnThsSample = $("#btnThsSample");
+  if (btnThsSample) btnThsSample.addEventListener("click", async () => {
+    try {
+      const r = await api("/api/ths-sync/sample", { method: "POST" });
+      alert("已采样 " + r.lines + " 行页面结构（uia_sample.txt）——据此校准持仓提取");
+      loadThs();
+    } catch (e) { alert("采样失败：" + e.message); }
+  });
+  const btnThsToggle = $("#btnThsToggle");
+  if (btnThsToggle) btnThsToggle.addEventListener("click", async () => {
+    btnThsToggle.disabled = true;
+    try {
+      const cur = (await api("/api/ths-sync")).enabled;
+      await api("/api/ths-sync", { method: "POST", body: JSON.stringify({ enabled: !cur }) });
+    } catch (e) { alert(e.message); }
+    btnThsToggle.disabled = false;
+    loadThs();
+  });
+
   // 交易人格分析页
+  // 月度进步曲线：真实记录按月聚合，环比看进退
+  async function loadMonthly() {
+    const el = $("#monthlyBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/trades/monthly");
+      const ms = d.months || [];
+      if (!ms.length) { el.innerHTML = '<div class="empty">暂无已平仓记录</div>'; return; }
+      const maxAbs = Math.max(1, ...ms.map((m) => Math.abs(m.total_pts)));
+      const rows = ms.slice().reverse().map((m, i, arr) => {
+        const prev = arr[i + 1]; // 展示倒序，上一行=上一月
+        const w = Math.max(4, Math.round(Math.abs(m.total_pts) / maxAbs * 72));
+        const bar = '<i class="risk-bar" style="width:' + w + 'px;background:var(--' + (m.total_pts > 0 ? "up" : "down") + ')"></i>';
+        let trend = "";
+        if (prev && prev.total_pts !== m.total_pts) {
+          const better = m.total_pts > prev.total_pts;
+          trend = '<span class="' + (better ? "num-up" : "num-down") + '">' + (better ? "↑" : "↓") + "</span>";
+        }
+        return "<tr><td><b>" + esc(m.month) + "</b></td><td>" + m.n + "</td>" +
+          '<td style="white-space:nowrap">' + bar + '<span class="' + (m.total_pts > 0 ? "num-up" : "num-down") + '">' +
+          (m.total_pts > 0 ? "+" : "") + m.total_pts + "</span> " + trend + "</td>" +
+          "<td>" + m.win_rate + "%</td><td>" + (m.plr == null ? "—" : m.plr) + "</td>" +
+          '<td style="color:' + (m.violations ? "var(--danger)" : "var(--muted)") + '">' + (m.violations || 0) + "</td></tr>";
+      }).join("");
+      el.innerHTML =
+        '<table class="table"><thead><tr><th>月份</th><th>笔数</th><th>累计点</th><th>胜率</th><th>盈亏比</th><th>强行违规</th></tr></thead><tbody>' +
+        rows + "</tbody></table>" +
+        '<div class="mini-note" style="margin-top:6px">↑↓ 为环比上月（红涨绿跌口径：↑=当月比上月少亏/多赚）</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
+  }
+
   // 实录风控：历史战绩推导的硬性风控线（品种判停/减、方向禁令、失血时段、报复实绩）
   async function loadRiskProfile() {
     const el = $("#riskBody");

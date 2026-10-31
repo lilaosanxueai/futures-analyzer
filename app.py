@@ -13,6 +13,7 @@ AI 对话：OpenAI 兼容接口（智谱 GLM / DeepSeek / 自定义端点），K
 
 import asyncio
 import json
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -279,6 +280,143 @@ async def _call_ak_side(func, *args, timeout: float = 15.0, **kwargs):
     return await asyncio.wait_for(fut, timeout=timeout)
 
 
+# ---------------------------------------------------------------- 期货通盯屏同步（UIA 直读——不截图、不依赖视觉API、不怕遮挡）
+
+THS_SYNC: dict = {"enabled": False, "last": None, "quotes": [], "positions": [], "log": []}
+
+
+def _ths_log(msg: str) -> None:
+    THS_SYNC["log"] = ([f"{datetime.now().strftime('%H:%M:%S')} {msg}"] + THS_SYNC["log"])[:30]
+
+
+def _ths_hwnd() -> Optional[int]:
+    """找期货通主窗口（标题含'期货通'的可见顶层窗口）"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    hits = []
+
+    def cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n > 0:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if "期货通" in buf.value:
+                    hits.append(hwnd)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    return hits[0] if hits else None
+
+
+def _ths_uia_texts(hwnd: int) -> list[str]:
+    """在独立线程里遍历期货通 UIA 树取全部文本（COM 需线程内初始化）"""
+    import comtypes
+    import comtypes.client
+    comtypes.CoInitialize()
+    try:
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+        uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+        el = uia.ElementFromHandle(hwnd)
+        walker = uia.RawViewWalker
+        out: list[str] = []
+        cnt = 0
+
+        def walk(node, depth):
+            nonlocal cnt
+            cnt += 1
+            if cnt > 6000 or depth > 18:
+                return
+            try:
+                ch = walker.GetFirstChildElement(node)
+            except Exception:
+                return
+            while ch is not None:
+                try:
+                    name = (ch.CurrentName or "").strip()
+                    if name:
+                        out.append(name)
+                    walk(ch, depth + 1)
+                    ch = walker.GetNextSiblingElement(ch)
+                except Exception:
+                    break
+
+        import sys
+        sys.setrecursionlimit(20000)
+        walk(el, 0)
+        return out
+    finally:
+        comtypes.CoUninitialize()
+
+
+def _ths_num(s: str) -> Optional[float]:
+    try:
+        return float(str(s).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
+    """UIA 文本流 → (自选/报价条目, 持仓行)。
+    报价条目结构（已验证）：名称2701 / 主力 / 代码2701 / 价格 / ±涨跌%。
+    持仓行：交易页激活后才进树——待 /api/ths-sync/sample 采样校准提取规则。"""
+    quotes = []
+    for i, t in enumerate(texts):
+        if re.fullmatch(r"[A-Za-z]{1,2}\d{3,4}", t or ""):
+            price = _ths_num(texts[i + 1]) if i + 1 < len(texts) else None
+            chg = None
+            if i + 2 < len(texts) and texts[i + 2].endswith("%"):
+                chg = _ths_num(texts[i + 2].rstrip("%"))
+            if price is not None and price > 0:
+                name = ""
+                if i > 0 and not re.fullmatch(r"[A-Za-z]{1,2}\d{3,4}", texts[i - 1] or ""):
+                    name = texts[i - 1]
+                quotes.append({"code": t.upper(), "name": name, "price": price, "chg_pct": chg})
+    positions: list[dict] = []  # 待交易页样本校准
+    return quotes, positions
+
+
+async def _ths_scan_once() -> dict:
+    """读一次期货通：窗口→UIA文本→解析→更新状态"""
+
+    def _run():
+        hwnd = _ths_hwnd()
+        if not hwnd:
+            return {"ok": False, "err": "没找到期货通窗口（先打开同花顺期货通客户端）"}
+        try:
+            texts = _ths_uia_texts(hwnd)
+        except Exception as e:
+            return {"ok": False, "err": f"UIA 读取失败：{e}"}
+        quotes, positions = _ths_parse(texts)
+        return {"ok": True, "texts": len(texts), "quotes": quotes, "positions": positions}
+
+    r = await asyncio.to_thread(_run)
+    if not r.get("ok"):
+        _ths_log(f"读取失败：{r.get('err')}")
+        THS_SYNC["last"] = {"ok": False, "err": r.get("err"), "ts": int(time.time() * 1000)}
+        return r
+    THS_SYNC.update(quotes=r["quotes"], positions=r["positions"],
+                    last={"ok": True, "texts": r["texts"], "ts": int(time.time() * 1000)})
+    _ths_log(f"读取成功：{r['texts']} 元素 / {len(r['quotes'])} 条报价 / {len(r['positions'])} 笔持仓")
+    return {"ok": True, "quotes": r["quotes"], "positions": r["positions"], "texts": r["texts"]}
+
+
+async def ths_sync_loop():
+    """盯屏同步循环：开启后交易时段每 60 秒读一次期货通"""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            now = datetime.now()
+            if THS_SYNC["enabled"] and is_trading_time(now):
+                await _ths_scan_once()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 async def _warmup():
     try:
         await call_ak(ak.futures_zh_spot, symbol="RB0", market="CF", adjust="0")
@@ -301,11 +439,12 @@ async def lifespan(_app):
     psych_task = asyncio.create_task(psych_watch_loop())
     diagnose_task = asyncio.create_task(diagnose_loop())
     care_task = asyncio.create_task(auto_care_loop())
+    ths_task = asyncio.create_task(ths_sync_loop())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
-              care_task, report_task, selfcheck_task):
+              care_task, ths_task, report_task, selfcheck_task):
         t.cancel()
 
 
@@ -325,6 +464,53 @@ async def _static_cache_headers(request: Request, call_next):
     elif p == "/" or p.endswith(".html"):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ------- 期货通盯屏同步端点（THS_SYNC 状态与 ths_sync_loop 定义在 lifespan 之前）-------
+
+@app.get("/api/ths-sync")
+async def ths_sync_get():
+    return {"ok": True, "enabled": THS_SYNC["enabled"], "last": THS_SYNC["last"],
+            "quotes": THS_SYNC["quotes"], "positions": THS_SYNC["positions"], "log": THS_SYNC["log"]}
+
+
+class ThsSyncIn(BaseModel):
+    enabled: Optional[bool] = None
+
+
+@app.post("/api/ths-sync")
+async def ths_sync_post(body: ThsSyncIn):
+    if body.enabled is not None:
+        THS_SYNC["enabled"] = bool(body.enabled)
+        _ths_log("盯屏同步已" + ("开启" if body.enabled else "关闭"))
+        if body.enabled:
+            return {**await _ths_scan_once(), "enabled": True}
+    return {"ok": True, "enabled": THS_SYNC["enabled"]}
+
+
+@app.post("/api/ths-sync/scan")
+async def ths_sync_scan():
+    """立即读一次（与开关无关）"""
+    return await _ths_scan_once()
+
+
+@app.post("/api/ths-sync/sample")
+async def ths_sync_sample():
+    """采样当前期货通页面结构 → uia_sample.txt（校准持仓提取器用：
+    在期货通里切到交易页并登录后点这个按钮）"""
+
+    def _run():
+        hwnd = _ths_hwnd()
+        if not hwnd:
+            return None
+        return _ths_uia_texts(hwnd)
+
+    texts = await asyncio.to_thread(_run)
+    if texts is None:
+        raise HTTPException(status_code=503, detail="没找到期货通窗口")
+    (BASE_DIR / "uia_sample.txt").write_text("\n".join(texts), encoding="utf-8")
+    _ths_log(f"已采样 {len(texts)} 行页面结构 → uia_sample.txt")
+    return {"ok": True, "lines": len(texts)}
 
 
 # ---------------------------------------------------------------- 行情基础层
@@ -1169,7 +1355,7 @@ def _load_auto_trades() -> list[dict]:
         try:
             return json.loads(AUTO_SIM_FILE.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            _backup_corrupt(AUTO_SIM_FILE)  # 2026-10-29 教训：截断文件被当空表回写，2 笔记录险些永久丢失
     return []
 
 
@@ -1213,7 +1399,7 @@ def _sim_hour_stats() -> list[dict]:
 
 def _save_auto_trades(items: list[dict]) -> None:
     try:
-        AUTO_SIM_FILE.write_text(json.dumps(items[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(AUTO_SIM_FILE, json.dumps(items[-500:], ensure_ascii=False, indent=2))
     except Exception:
         pass
 
@@ -3179,6 +3365,24 @@ async def _psych_check(sym: str) -> None:
 TRADES_FILE = BASE_DIR / "trades.json"
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """先写临时文件再 os.replace 原子替换（同卷原子）——强杀进程/断电也不会再产生半截 JSON。
+    2026-10-29 事故教训：taskkill /F 撞上 write_text 导致 auto_trades.json 截断成空表。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _backup_corrupt(path: Path) -> None:
+    """解析失败时把坏文件留底成 .bad（只留一份）——防"空表回写"把可抢救数据彻底抹掉"""
+    try:
+        bak = path.with_name(path.name + ".bad")
+        if path.exists() and not bak.exists():
+            os.replace(path, bak)
+    except Exception:
+        pass
+
+
 _TRADES_CACHE = {"mt": 0.0, "data": []}
 
 
@@ -3193,6 +3397,7 @@ def _load_trades() -> list[dict]:
         _TRADES_CACHE.update(mt=mt, data=data)
         return data
     except Exception:
+        _backup_corrupt(TRADES_FILE)
         return _TRADES_CACHE.get("data") or []
 
 
@@ -3212,12 +3417,13 @@ def _load_gate_log() -> list[dict]:
         _GATE_LOG_CACHE.update(mt=mt, data=data)
         return data
     except Exception:
+        _backup_corrupt(GATE_LOG_FILE)
         return _GATE_LOG_CACHE.get("data") or []
 
 
 def _save_gate_log(items: list[dict]) -> None:
     try:
-        GATE_LOG_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(GATE_LOG_FILE, json.dumps(items[-200:], ensure_ascii=False, indent=2))
         _GATE_LOG_CACHE.update(mt=GATE_LOG_FILE.stat().st_mtime, data=items[-200:])
     except Exception:
         pass
@@ -3225,7 +3431,7 @@ def _save_gate_log(items: list[dict]) -> None:
 
 def _save_trades(trades: list[dict]) -> None:
     try:
-        TRADES_FILE.write_text(json.dumps(trades, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(TRADES_FILE, json.dumps(trades, ensure_ascii=False, indent=2))
         _TRADES_CACHE.update(mt=TRADES_FILE.stat().st_mtime, data=trades)
     except Exception:
         pass
@@ -4619,7 +4825,7 @@ def _load_alerts() -> list[dict]:
 
 def _save_alerts(items: list[dict]) -> None:
     try:
-        ALERTS_FILE.write_text(json.dumps(items[-50:], ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(ALERTS_FILE, json.dumps(items[-50:], ensure_ascii=False, indent=2))
     except Exception:
         pass
 
@@ -4802,33 +5008,47 @@ def _post_close_review(t: dict):
     asyncio.create_task(_job())
 
 
+def _apply_trade_patch(t: dict, body: "TradePatch", ai_review: bool = True) -> None:
+    """PATCH 单笔交易的公共逻辑（trades.json 与 auto_trades.json 共用）"""
+    if body.exit is not None:
+        t["exit"] = body.exit
+        sign = 1 if t["direction"] == "long" else -1
+        t["result_pts"] = round(sign * (body.exit - t["entry"]), 1)
+    if body.result_pts is not None:
+        t["result_pts"] = body.result_pts
+    if body.note is not None:
+        t["note"] = body.note.strip()[:200]
+    if body.status:
+        if body.status not in ("open", "closed", "abandoned"):
+            raise HTTPException(status_code=400, detail="status 仅支持 open/closed/abandoned")
+        t["status"] = body.status
+    if t.get("result_pts") is not None or t["status"] == "abandoned":
+        if t["status"] == "open":
+            t["status"] = "closed"
+        if not t.get("closed_ts"):
+            t["closed_ts"] = int(datetime.now().timestamp() * 1000)
+        if body.exit is not None and not t.get("exit_mood"):
+            t["exit_mood"] = _exit_mood(t)
+            if ai_review:
+                _post_close_review(t)  # 趁热打铁：平仓即复盘（模拟单跳过，不烧 AI）
+
+
 @app.patch("/api/trades/{trade_id}")
 async def patch_trade(trade_id: str, body: TradePatch):
     trades = _load_trades()
     for t in trades:
         if t["id"] != trade_id:
             continue
-        if body.exit is not None:
-            t["exit"] = body.exit
-            sign = 1 if t["direction"] == "long" else -1
-            t["result_pts"] = round(sign * (body.exit - t["entry"]), 1)
-        if body.result_pts is not None:
-            t["result_pts"] = body.result_pts
-        if body.note is not None:
-            t["note"] = body.note.strip()[:200]
-        if body.status:
-            if body.status not in ("open", "closed", "abandoned"):
-                raise HTTPException(status_code=400, detail="status 仅支持 open/closed/abandoned")
-            t["status"] = body.status
-        if t.get("result_pts") is not None or t["status"] == "abandoned":
-            if t["status"] == "open":
-                t["status"] = "closed"
-            if not t.get("closed_ts"):
-                t["closed_ts"] = int(datetime.now().timestamp() * 1000)
-            if body.exit is not None and not t.get("exit_mood"):
-                t["exit_mood"] = _exit_mood(t)
-                _post_close_review(t)  # 趁热打铁：平仓即复盘
+        _apply_trade_patch(t, body)
         _save_trades(trades)
+        return {"ok": True, "item": t}
+    # 引擎单兜底：auto_trades.json（模拟日志的手动平仓入口）
+    autos = _load_auto_trades()
+    for t in autos:
+        if t["id"] != trade_id:
+            continue
+        _apply_trade_patch(t, body, ai_review=False)
+        _save_auto_trades(autos)
         return {"ok": True, "item": t}
     raise HTTPException(status_code=404, detail="交易记录不存在")
 
@@ -4987,7 +5207,8 @@ async def trades_stats(source: str = ""):
     if source == "real":
         trades = [t for t in trades if t.get("source") != "auto"]
     elif source == "auto":
-        trades = [t for t in trades if t.get("source") == "auto"]
+        # 与 /api/trades?source=auto 同口径：手动模拟 + 引擎单合并
+        trades = [t for t in trades if t.get("source") == "auto"] + _load_auto_trades()
     closed = [t for t in trades if t["status"] == "closed" and t.get("result_pts") is not None]
 
     def _summary(items):
@@ -5216,6 +5437,40 @@ async def risk_profile_api():
     return _risk_profile()
 
 
+@app.get("/api/trades/monthly")
+async def trades_monthly():
+    """月度进步曲线（真实记录）：每月 笔数/累计点/胜率/盈亏比/违规次数——回答"我在变好吗\""""
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed"
+              and t.get("result_pts") is not None and t.get("source") != "auto"]
+    months: dict[str, list] = {}
+    for t in closed:
+        m = (t.get("date") or "")[:7]
+        if len(m) == 7:
+            months.setdefault(m, []).append(float(t["result_pts"]))
+    viol: dict[str, int] = {}
+    for t in trades:
+        v = t.get("violation") or []
+        if v:
+            m = (t.get("date") or "")[:7]
+            if len(m) == 7:
+                viol[m] = viol.get(m, 0) + 1
+    out = []
+    for m in sorted(months):
+        pts = months[m]
+        wins = [p for p in pts if p > 0]
+        losses = [p for p in pts if p < 0]
+        avg_w = sum(wins) / len(wins) if wins else 0.0
+        avg_l = sum(losses) / len(losses) if losses else 0.0
+        out.append({
+            "month": m, "n": len(pts), "total_pts": round(sum(pts), 1),
+            "win_rate": round(len(wins) / len(pts) * 100, 1) if pts else 0.0,
+            "plr": round(avg_w / abs(avg_l), 2) if avg_l else None,
+            "violations": viol.get(m, 0),
+        })
+    return {"ok": True, "months": out}
+
+
 @app.post("/api/discipline/config")
 async def discipline_config_post(body: dict):
     cfg = load_config()
@@ -5246,7 +5501,7 @@ def _load_notes() -> list[dict]:
 
 def _save_notes(notes: list[dict]) -> None:
     try:
-        NOTES_FILE.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(NOTES_FILE, json.dumps(notes, ensure_ascii=False, indent=2))
     except Exception:
         pass
 
@@ -6210,7 +6465,7 @@ def _load_profile() -> dict:
 
 def _save_profile(p: dict) -> None:
     p["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    PROFILE_FILE.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(PROFILE_FILE, json.dumps(p, ensure_ascii=False, indent=2))
     _profile_cache["data"] = p
 
 
@@ -6400,7 +6655,7 @@ def _load_reports() -> dict:
 
 def _save_reports(data: dict) -> None:
     try:
-        REPORT_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write(REPORT_FILE, json.dumps(data, ensure_ascii=False, indent=2))
     except Exception:
         pass
 

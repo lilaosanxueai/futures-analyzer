@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream"];var t=localStorage.getItem("fa_theme");if(t&&T.indexOf(t)>=0&&t!=="default")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261028g">
+<link rel="stylesheet" href="/static/style.css?v=20261028i">
 </head>
 <body>
 
@@ -67,6 +67,17 @@
             <tbody id="watchBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
           </table>
           <div class="hint">点击行进入品种博弈分析 · 持仓变化 = 今日实时 vs 昨收盘</div>
+        </div>
+
+        <div class="card" id="thsCard">
+          <div class="card-head"><h2>👁 期货通盯屏同步 <span class="muted small">UIA 直读 · 不截图 · 不怕遮挡</span></h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnThsScan">▶ 立即读取</button>
+              <button class="btn ghost sm" id="btnThsSample" title="切到期货通交易页后点此采样，校准持仓提取">📐 采样</button>
+              <button class="btn ghost sm" id="btnThsToggle">开启</button>
+            </div>
+          </div>
+          <div id="thsBody" style="padding:8px 14px"><div class="empty">读取期货通窗口后显示自选报价与持仓</div></div>
         </div>
 
         <div class="card" id="intlCard">
@@ -311,6 +322,10 @@
       </div>
       <div class="trades-right">
         <div class="card">
+          <div class="card-head"><h2>📈 月度进步曲线 <span class="muted small">真实记录 · 我在变好吗</span></h2></div>
+          <div id="monthlyBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="card">
           <div class="card-head"><h2>🛡️ 实录风控 <span class="muted small">历史战绩 → 硬性风控线（已接入开仓闸门 G12/G13）</span></h2></div>
           <div id="riskBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
@@ -517,8 +532,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261028g"></script>
-<script src="/static/js/views.js?v=20261028g"></script>
-<script src="/static/js/chat.js?v=20261028g"></script>
+<script src="/static/js/base.js?v=20261028i"></script>
+<script src="/static/js/views.js?v=20261028i"></script>
+<script src="/static/js/chat.js?v=20261028i"></script>
 </body>
 </html>
