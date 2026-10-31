@@ -12,3 +12,5 @@ server.log_fix.py
 gate_log.json
 alerts.json
 auto_trades.json
+uia_sample.txt
+*.tmp

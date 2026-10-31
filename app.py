@@ -1539,9 +1539,10 @@ async def auto_sim_loop():
                 _sig_diag["filter"] += 1
                 if not sig:
                     continue
-                # 走闸门（模拟同样受纪律约束——被拦即弃）
+                # 走闸门（模拟同样受纪律约束——被拦即弃；source=auto 使 G12/G13 沙盒豁免显式生效）
                 mock = {"symbol": sym, "direction": sig["direction"], "entry": last,
-                        "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1}
+                        "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
+                        "source": "auto"}
                 blockers = _entry_gate(mock, snap, last, [t for t in trades if t.get("status") == "open"])
                 if blockers:
                     _sig_diag["gate_blocked"] += 1
@@ -4018,16 +4019,18 @@ def _diagnose_global(trades: list) -> list[dict]:
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
-    today_trades = [t for t in trades if t.get("date") == today and t.get("status") in ("open", "closed")]
+    today_trades = [t for t in trades if t.get("date") == today
+                    and t.get("status") in ("open", "closed")
+                    and t.get("source") not in ("auto", "import")]  # 模拟/导入不占实盘日内限额
     daily_max = int(cfg.get("daily_max_trades", 3))
     if len(today_trades) > daily_max:
         out.append(_issue("D05", "fatal", "日内开仓超限",
                           f"今日已开 {len(today_trades)} 笔（上限 {daily_max}）",
                           "频繁交易=手续费+情绪双杀。今日停止开新仓。"))
 
-    # 报复性交易：亏损了结后 30 分钟内立刻开新仓（只看实时记录——
+    # 报复性交易：亏损了结后 30 分钟内立刻开新仓（只看实时真实单——
     # 导入的历史交割单是密集日内交易，拿来当"报复交易"证据是永久误报）
-    live_trades = [t for t in trades if t.get("source") != "import"]
+    live_trades = [t for t in trades if t.get("source") not in ("auto", "import")]
     closed_sorted = sorted(
         [t for t in live_trades if t.get("status") == "closed" and t.get("closed_ts")],
         key=lambda t: t["closed_ts"])
@@ -4049,10 +4052,10 @@ def _diagnose_global(trades: list) -> list[dict]:
                           "、".join(f"{t['symbol']} {t['result_pts']:+.0f}点" for t in recent),
                           "连亏说明节奏或方向感出了问题（往往正值逆势期）。停手半日，用「品种博弈」页重看资金方向。"))
 
-    # 相关品种组同向堆仓（隐形杠杆，只看实时持仓——导入历史仓位不是当下的杠杆）
+    # 相关品种组同向堆仓（隐形杠杆，只看实盘持仓——模拟与导入仓位不是当下的杠杆）
     group_hits: dict[str, list] = {}
     for t in trades:
-        if t.get("status") != "open" or t.get("source") == "import":
+        if not _is_real_live(t):
             continue
         pfx = _variety_prefix(t["symbol"])
         for g, members in CORR_GROUPS.items():
@@ -4108,7 +4111,7 @@ async def _diagnosis_scan(push: bool = False) -> list[dict]:
     它们天然没有止损/情绪字段，逐笔诊断只会制造"无止损"误报轰炸。"""
     trades = _load_trades()
     issues: list[dict] = []
-    live_open = [t for t in trades if t.get("status") == "open" and t.get("source") != "import"]
+    live_open = [t for t in trades if _is_real_live(t)]
     imp_open = [t for t in trades if t.get("status") == "open" and t.get("source") == "import"]
     missing = sorted({t["symbol"] for t in live_open
                       if not (_quote_cache.get(t["symbol"], (0, {}))[1] or {}).get("last")})
@@ -4187,7 +4190,7 @@ async def auto_care_loop():
                 await asyncio.sleep(60)
                 continue
             loop_now = asyncio.get_event_loop().time()
-            for t in [x for x in _load_trades() if x.get("status") == "open" and x.get("source") != "import"]:
+            for t in [x for x in _load_trades() if _is_real_live(x)]:
                 if loop_now - _CARE_COOLDOWN.get(t["id"], -1e9) < 4 * 3600:
                     continue
                 stop = t.get("stop_points")
@@ -4273,6 +4276,12 @@ def _infer_mood(blockers: list[dict]) -> str:
 # ---------------------------------------------------------------- 实录风控（历史战绩驱动的风控策略）
 
 _RISK_PROFILE_CACHE: dict = {"data": None, "ts": 0.0}
+
+
+def _is_real_live(t: dict) -> bool:
+    """实盘持仓口径：手动真实单（排除模拟 auto 与导入对账 import）——
+    盾/诊断/AI 体检/超频计数只看这个，模拟与历史仓位不进实盘风控。"""
+    return t.get("status") == "open" and t.get("source") not in ("auto", "import")
 
 
 def _risk_profile(trades: Optional[list] = None, max_age: float = 600.0) -> dict:
@@ -4918,8 +4927,8 @@ async def shield_status():
     for t in trades:
         if t.get("status") != "open":
             continue
-        if t.get("source") == "import":
-            continue  # 历史对账仓位不入盾：无止损字段属正常，不该计为风险敞口
+        if t.get("source") in ("auto", "import"):
+            continue  # 模拟单与历史对账仓位不入盾：不该计为实盘风险敞口
         open_n += 1
         m = CONTRACT_MULTIPLIER.get(_variety_prefix(t["symbol"]))
         stop = t.get("stop_points")
@@ -5087,26 +5096,30 @@ async def get_trades(source: str = ""):
                       and not (_quote_cache.get(t["symbol"], (0, {}))[1] or {}).get("last")})
     if missing:
         await asyncio.gather(*[fetch_quote(s) for s in missing], return_exceptions=True)
+    # live 快照挂在副本上（缓存 dict 是全服务共享的，直接写会把过时价格随下次保存落盘）
+    out_items = []
     for t in items:
         if t.get("status") != "open":
+            out_items.append(t)
             continue
+        t = dict(t)  # 浅拷贝：live 只存在于本次响应
         sym = t["symbol"]
         ts_, q = _quote_cache.get(sym, (0, {}))
         price = (q or {}).get("last")
-        if not price:
-            continue
-        sign = 1 if t["direction"] == "long" else -1
-        tr = t.get("trail") or {}
-        t["live"] = {
-            "price": price,
-            "pnl_pts": round(sign * (price - t["entry"]), 1),
-            "peak": tr.get("peak"),
-            "active": tr.get("active", False),
-            "triggered": tr.get("triggered", False),
-            "partial_done": tr.get("partial_done", False),
-            "trail_line": round(tr["peak"] - sign * tr["points"], 2) if tr.get("active") and not tr.get("triggered") else None,
-        }
-    return {"ok": True, "items": items}
+        if price:
+            sign = 1 if t["direction"] == "long" else -1
+            tr = t.get("trail") or {}
+            t["live"] = {
+                "price": price,
+                "pnl_pts": round(sign * (price - t["entry"]), 1),
+                "peak": tr.get("peak"),
+                "active": tr.get("active", False),
+                "triggered": tr.get("triggered", False),
+                "partial_done": tr.get("partial_done", False),
+                "trail_line": round(tr["peak"] - sign * tr["points"], 2) if tr.get("active") and not tr.get("triggered") else None,
+            }
+        out_items.append(t)
+    return {"ok": True, "items": out_items}
 
 
 @app.get("/api/trades/export")
