@@ -6860,7 +6860,7 @@ async def _generate_report() -> str:
     lines = []
     for s in syms:
         try:
-            snap = await psych_snapshot(s)
+            snap = await asyncio.wait_for(psych_snapshot(s), 25)  # 单品种超时：慢源不拖死整份报告
         except Exception:
             continue
         r = snap["parties"]["retail"]
@@ -6928,7 +6928,7 @@ async def _generate_report() -> str:
 
     # 外盘锚
     try:
-        intl_items = await fetch_intl()
+        intl_items = await asyncio.wait_for(fetch_intl(), 30)
         lines = []
         for it in intl_items:
             pct = it.get("chg_pct")
@@ -7019,10 +7019,15 @@ async def _generate_report() -> str:
         + "\n\n".join(parts)
     )
     cfg = load_config()
-    return await _call_ai_simple(
-        [{"role": "user", "content": prompt}],
-        max_tokens=min(4096, max_output_for(cfg["model"] or "")),
-    )
+    try:
+        return await asyncio.wait_for(
+            _call_ai_simple(
+                [{"role": "user", "content": prompt}],
+                max_tokens=min(4096, max_output_for(cfg["model"] or "")),
+            ), 240)
+    except Exception:
+        # AI 超时/不可用：parts 直出（保底报告——数据比辞藻重要）
+        return ("# 晨夜报（AI 摘要超时，原始数据直出）\n\n" + "\n\n".join(parts) + "\n\n仅供参考。")
 
 
 async def report_push_loop():
