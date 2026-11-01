@@ -376,32 +376,38 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
                     name = texts[i - 1]
                 quotes.append({"code": t.upper(), "name": name, "price": price, "chg_pct": chg})
     positions: list[dict] = []
-    # 通用持仓行提取（armed，交易页+交易登录激活后生效）：
-    # 模式 = 合约代码 + 紧随的 买/卖 方向 token + 数字窗（手数/开仓价/浮动盈亏…）。
-    # 仅展示层——不自动写交易记录，首次实测确认结构后再接差分同步。
+    # 持仓行提取（2026-11-01 已按真实表格结构校准）：
+    # 期货通持仓表列 = 操作|品种|合约号|多空|总仓|可用|今仓|今可用|开仓均价|盈利价差|逐笔浮盈|浮盈比例|价值|保证金|资金占比|持仓均价|盯市浮盈|交易类型|投保
+    # 数据行形态：… / 合约号XX2701 / 多|空 / 总仓数字 / … 数字串
     seen_pos: set = set()
     for i, t in enumerate(texts):
         if not re.fullmatch(r"[A-Za-z]{1,2}\d{3,4}", t or ""):
             continue
-        window = texts[i + 1:i + 9]
+        window = texts[i + 1:i + 10]
         dir_ = None
         for w in window[:4]:
             ws = w or ""
-            if any(k in ws for k in ("买持", "多头", "买开")) or ws == "买":
+            if any(k in ws for k in ("买持", "多头", "买开")) or ws in ("买", "多"):
                 dir_ = "long"
                 break
-            if any(k in ws for k in ("卖持", "空头", "卖开")) or ws == "卖":
+            if any(k in ws for k in ("卖持", "空头", "卖开")) or ws in ("卖", "空"):
                 dir_ = "short"
                 break
         if not dir_:
-            continue  # 报价行：代码后是 主力/价格/百分比，无方向 token
+            continue  # 报价行：代码后是 主力/价格/百分比
         key = (t.upper(), dir_)
         if key in seen_pos:
             continue
         nums = [x for x in window if _ths_num(x) is not None]
-        lots = next((abs(_ths_num(x)) for x in window[:3] if _ths_num(x)), None)
+        # 总仓=方向 token 后第一个数字；开仓均价/逐笔浮盈在后续数字串里（列序对齐交由实测微调）
+        k = window.index(next(w for w in window[:4] if w in ("多", "空", "买", "卖", "买持", "卖持")))
+        lots = _ths_num(window[k + 1]) if k + 1 < len(window) else None
+        avg_entry = _ths_num(window[k + 2]) if k + 2 < len(window) else None
+        float_pnl = next((_ths_num(x) for x in window[k + 3:k + 6]
+                          if _ths_num(x) is not None and _ths_num(x) != 0), None)
         positions.append({"symbol": t.upper(), "direction": dir_, "lots": lots,
-                          "raw": window[:6], "nums": nums[:5]})
+                          "avg_entry": avg_entry, "float_pnl": float_pnl,
+                          "raw": window[:8]})
         seen_pos.add(key)
     return quotes, positions
 
