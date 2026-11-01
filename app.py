@@ -6906,6 +6906,26 @@ async def _generate_report() -> str:
     except Exception:
         pass
 
+    # 实录风控红线（每天睁眼先看到红线在哪）
+    try:
+        rp = _risk_profile()
+        stops = [s for s, v in rp["symbols"].items() if v["verdict"] == "停"]
+        reduces = [s for s, v in rp["symbols"].items() if v["verdict"] == "减"]
+        bh = "、".join(f"{h['hour']:02d}:00（均{h['avg']:+.0f}点）" for h in rp.get("bad_hours", []))
+        tr = _sim_trial_progress()
+        tr_txt = "；".join(f"{t['symbol']} 试炼{t['n']}/20笔 累计{t['total_pts']:+.0f}点" for t in tr) or "当前无判停品种"
+        seg = []
+        if stops:
+            seg.append(f"- 判停品种（开仓即被 G12 拦截）：{'、'.join(stops)}")
+        if reduces:
+            seg.append(f"- 手数减半品种：{'、'.join(reduces)}")
+        if bh:
+            seg.append(f"- 失血时段（G13 拦截）：{bh}")
+        seg.append(f"- 解禁试炼：{tr_txt}")
+        parts.append("【实录风控红线（你的战绩划定的）】\n" + "\n".join(seg))
+    except Exception:
+        pass
+
     # 外盘锚
     try:
         intl_items = await fetch_intl()
@@ -6993,7 +7013,8 @@ async def _generate_report() -> str:
         + f"你是反幻想交易教练。基于以下数据生成{kind}，Markdown 格式：\n"
         f"## 一、市场情绪概览（3-4 句：各品种散户情绪处于什么阶段，外盘与宏观要闻给的情绪基调——要闻只解释情绪来源与跳空风险，不作方向依据）\n"
         f"## 二、分品种博弈要点（每品种 1-2 句：资金方向+散户陷阱+关键价位）\n"
-        f"## 三、今日纪律（3-5 条：结合持仓、诊断问题与缺陷画像，给出「不做清单」——今天最不该做的是什么；若上下文带缺陷画像，逐条点名对应缺陷）\n"
+        f"## 三、实录风控红线（把数据区【实录风控红线】的判定逐条照列——判停品种/减半/失血时段/解禁试炼进度，这是硬规则不是建议，不许改判不许省略）\n"
+        f"## 四、今日纪律（3-5 条：结合持仓、诊断问题与缺陷画像，给出「不做清单」——今天最不该做的是什么；若上下文带缺陷画像，逐条点名对应缺陷）\n"
         f"要求：客观精炼、全文 600 字以内、全部引用具体数值；结尾注明仅供参考。\n\n"
         + "\n\n".join(parts)
     )
