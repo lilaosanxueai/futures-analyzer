@@ -282,7 +282,8 @@ async def _call_ak_side(func, *args, timeout: float = 15.0, **kwargs):
 
 # ---------------------------------------------------------------- 期货通盯屏同步（UIA 直读——不截图、不依赖视觉API、不怕遮挡）
 
-THS_SYNC: dict = {"enabled": False, "last": None, "quotes": [], "positions": [], "log": []}
+THS_SYNC: dict = {"enabled": False, "mirror": False, "last": None, "quotes": [],
+                  "positions": [], "log": []}
 
 
 def _ths_log(msg: str) -> None:
@@ -445,14 +446,94 @@ async def _ths_scan_once() -> dict:
     return {"ok": True, "quotes": r["quotes"], "positions": r["positions"], "texts": r["texts"]}
 
 
+def _ths_pref(code: str) -> str:
+    m = re.match(r"^([A-Za-z]{1,2})", code or "")
+    return (m.group(1).upper() + "0") if m else (code or "")
+
+
+async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
+    """期货通持仓 → 应用实盘记录差分镜像（安全闸：只动 source=ths-sync 的镜像单）。
+    新持仓出现 → 建仓记录（开仓价=盯市开仓均价，无则现价）；持仓消失 → 镜像单按现价平仓落账；
+    手动记录永不被自动平仓。判停品种镜像时发 G12 提醒事件。"""
+    acts: list[str] = []
+    trades = _load_trades()
+    mirrors_open = [t for t in trades if t.get("status") == "open" and t.get("source") == "ths-sync"]
+    real_open = [t for t in trades if _is_real_live(t)]
+    now_ms = int(time.time() * 1000)
+    ths_map: dict[tuple, dict] = {}
+    for p in positions:
+        ths_map[(_ths_pref(p.get("symbol", "")), p.get("direction"))] = p
+    mirror_map: dict[tuple, list] = {}
+    for t in mirrors_open:
+        mirror_map.setdefault((t["symbol"], t["direction"]), []).append(t)
+    real_keys = {(t["symbol"], t["direction"]) for t in real_open}
+
+    # ① 新持仓：期货通有、镜像无、手动实盘也无 → 建镜像单
+    for key, p in ths_map.items():
+        if key in mirror_map or key in real_keys:
+            continue
+        sym = key[0]
+        entry = p.get("avg_entry")
+        if not entry:
+            q = _quote_cache.get(sym, (0, {}))[1] or {}
+            entry = q.get("last")
+        if not entry:
+            continue
+        trades.append({
+            "id": f"ths{now_ms}-{sym}-{key[1]}", "ts": now_ms,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "symbol": sym, "direction": key[1], "entry": round(float(entry), 1),
+            "stop_points": None, "target_points": None, "lots": p.get("lots") or 1,
+            "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
+            "note": f"期货通盯屏镜像（{p.get('symbol')} 浮动 {p.get('float_pnl')}）",
+            "trail": None, "source": "ths-sync",
+        })
+        acts.append(f"镜像建仓 {sym} {'多' if key[1]=='long' else '空'} {p.get('lots') or 1}手 @ {entry}")
+        sv = _risk_profile()["symbols"].get(sym)
+        if sv and sv.get("verdict") == "停":
+            _emit_event({"id": f"ths-g12-{now_ms}-{sym}", "ts": now_ms, "kind": "diag",
+                         "etype": "THS_MIRROR", "level": "fatal", "symbol": sym, "name": "",
+                         "dir": "down", "price": entry,
+                         "text": f"⚠ 镜像提醒：实盘新仓 {sym}（实录风控判停品种，G12 红线）",
+                         "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": ""})
+
+    # ② 消失的持仓：只平镜像单（手动单绝不动）
+    for key, ms in mirror_map.items():
+        if key in ths_map:
+            continue
+        sym = key[0]
+        q = _quote_cache.get(sym, (0, {}))[1] or {}
+        price = q.get("last")
+        for t in ms:
+            if not price:
+                acts.append(f"镜像平仓失败 {sym}（无现价）")
+                continue
+            sign = 1 if t["direction"] == "long" else -1
+            t.update(status="closed", exit=price,
+                     result_pts=round(sign * (price - float(t["entry"])), 1),
+                     closed_ts=now_ms, exit_mood="盯屏镜像平仓")
+            acts.append(f"镜像平仓 {sym} {'多' if t['direction']=='long' else '空'} @ {price}（{t['result_pts']:+.1f}点）")
+
+    if acts:
+        _save_trades(trades)
+        for a in acts:
+            _ths_log("镜像 " + a)
+    return acts
+
+
 async def ths_sync_loop():
-    """盯屏同步循环：开启后交易时段每 60 秒读一次期货通"""
+    """盯屏同步循环：开启后交易时段每 60 秒读一次期货通；镜像开关时差分落账"""
+    cfg = load_config().get("ths_sync") or {}
+    THS_SYNC["enabled"] = bool(cfg.get("scan"))
+    THS_SYNC["mirror"] = bool(cfg.get("mirror"))
     await asyncio.sleep(90)
     while True:
         try:
             now = datetime.now()
             if THS_SYNC["enabled"] and is_trading_time(now):
-                await _ths_scan_once()
+                r = await _ths_scan_once()
+                if THS_SYNC["mirror"] and r.get("ok") and r.get("positions") is not None:
+                    await _ths_mirror_sync(r["positions"])
         except Exception:
             pass
         await asyncio.sleep(60)
@@ -545,28 +626,41 @@ async def _static_cache_headers(request: Request, call_next):
 
 @app.get("/api/ths-sync")
 async def ths_sync_get():
-    return {"ok": True, "enabled": THS_SYNC["enabled"], "last": THS_SYNC["last"],
-            "quotes": THS_SYNC["quotes"], "positions": THS_SYNC["positions"], "log": THS_SYNC["log"]}
+    return {"ok": True, "enabled": THS_SYNC["enabled"], "mirror": THS_SYNC["mirror"],
+            "last": THS_SYNC["last"], "quotes": THS_SYNC["quotes"],
+            "positions": THS_SYNC["positions"], "log": THS_SYNC["log"]}
 
 
 class ThsSyncIn(BaseModel):
     enabled: Optional[bool] = None
+    mirror: Optional[bool] = None
 
 
 @app.post("/api/ths-sync")
 async def ths_sync_post(body: ThsSyncIn):
-    if body.enabled is not None:
-        THS_SYNC["enabled"] = bool(body.enabled)
-        _ths_log("盯屏同步已" + ("开启" if body.enabled else "关闭"))
-        if body.enabled:
-            return {**await _ths_scan_once(), "enabled": True}
-    return {"ok": True, "enabled": THS_SYNC["enabled"]}
+    if body.enabled is not None or body.mirror is not None:
+        cfg = load_config()
+        ts_cfg = cfg.get("ths_sync") or {}
+        if body.enabled is not None:
+            THS_SYNC["enabled"] = ts_cfg["scan"] = bool(body.enabled)
+            _ths_log("盯屏同步已" + ("开启" if body.enabled else "关闭"))
+        if body.mirror is not None:
+            THS_SYNC["mirror"] = ts_cfg["mirror"] = bool(body.mirror)
+            _ths_log("镜像落账已" + ("开启" if body.mirror else "关闭"))
+        cfg["ths_sync"] = ts_cfg
+        save_config(cfg)
+        if body.enabled and body.mirror is None:
+            return {**await _ths_scan_once(), "enabled": True, "mirror": THS_SYNC["mirror"]}
+    return {"ok": True, "enabled": THS_SYNC["enabled"], "mirror": THS_SYNC["mirror"]}
 
 
 @app.post("/api/ths-sync/scan")
 async def ths_sync_scan():
-    """立即读一次（与开关无关）"""
-    return await _ths_scan_once()
+    """立即读一次（与开关无关）；镜像开启时顺带差分落账"""
+    r = await _ths_scan_once()
+    if THS_SYNC["mirror"] and r.get("ok"):
+        r["mirror_acts"] = await _ths_mirror_sync(r.get("positions") or [])
+    return r
 
 
 @app.post("/api/ths-sync/sample")

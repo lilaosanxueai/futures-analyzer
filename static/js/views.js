@@ -1341,6 +1341,8 @@ ${(() => {
     const last = d.last || {};
     const btn = $("#btnThsToggle");
     if (btn) btn.textContent = d.enabled ? "关闭" : "开启";
+    const bm = $("#btnThsMirror");
+    if (bm) { bm.textContent = d.mirror ? "🪞 镜像中" : "🪞 镜像"; bm.style.color = d.mirror ? "var(--up)" : ""; }
     const qs = d.quotes || [];
     const status = !last.ok ? (last.err || "未读取") :
       "✅ " + new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) + " · " + (last.texts || 0) + " 元素";
@@ -1350,11 +1352,14 @@ ${(() => {
       (q.chg_pct == null ? "--" : (q.chg_pct > 0 ? "+" : "") + q.chg_pct + "%") + "</span></span>").join("");
     const pos = d.positions || [];
     const posHtml = pos.length
-      ? pos.map((p) => '<div class="kv"><span class="k">' + esc(p.symbol) + " " + (p.direction === "long" ? "多" : "空") + " " + p.lots + '手</span><span class="v">' + (p.float_pnl == null ? "--" : p.float_pnl + "点") + "</span></div>").join("")
-      : '<div class="mini-note">持仓通道待校准：在期货通打开<b>交易页并登录</b> → 点「📐 采样」一次即自动识别</div>';
+      ? pos.map((p) => '<div class="kv"><span class="k">' + esc(p.symbol) + " " + (p.direction === "long" ? "多" : "空") +
+          " " + (p.lots == null ? "--" : p.lots + "手") + (p.avg_entry ? " @ " + p.avg_entry : "") + '</span><span class="v">' +
+          (p.float_pnl == null ? "--" : '<span class="' + (p.float_pnl > 0 ? "num-up" : "num-down") + '">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + "点</span>") + "</span></div>").join("")
+      : '<div class="mini-note">当前无持仓数据行（交易面板激活且有持仓时自动出现；提取器已按真实列校准）</div>';
     el.innerHTML =
       '<div class="kv"><span class="k">状态</span><span class="v">' + esc(status) +
-      (d.enabled ? ' · <span style="color:var(--up)">同步中(60s)</span>' : "") + "</span></div>" +
+      (d.enabled ? ' · <span style="color:var(--up)">同步中(60s)</span>' : "") +
+      (d.mirror ? ' · <span style="color:var(--up)">镜像落账</span>' : "") + "</span></div>" +
       (quoteRows ? '<div style="margin:6px 0"><b class="small">期货通自选</b><br>' + quoteRows +
         ' <button class="link-btn" id="btnThsWatch" style="margin-left:4px">⇪ 同步到应用自选</button></div>' : "") +
       '<div style="margin-top:6px"><b class="small">期货通持仓</b></div>' + posHtml +
@@ -1396,6 +1401,19 @@ ${(() => {
       await api("/api/ths-sync", { method: "POST", body: JSON.stringify({ enabled: !cur }) });
     } catch (e) { alert(e.message); }
     btnThsToggle.disabled = false;
+    loadThs();
+  });
+  const btnThsMirror = $("#btnThsMirror");
+  if (btnThsMirror) btnThsMirror.addEventListener("click", async () => {
+    const cur = (await api("/api/ths-sync")).mirror;
+    const msg = cur
+      ? "关闭镜像落账？（已生成的镜像记录保留）"
+      : "开启镜像落账？\n\n期货通持仓出现→自动建仓记录；消失→自动按现价平仓。\n· 只动「ths-sync 镜像单」，你的手动记录绝不被自动平仓\n· 判停品种新仓会触发 G12 红线提醒\n· 建议先在下次真实持仓时验证解析数值一致后再开启";
+    if (!confirm(msg)) return;
+    btnThsMirror.disabled = true;
+    try { await api("/api/ths-sync", { method: "POST", body: JSON.stringify({ mirror: !cur }) }); }
+    catch (e) { alert(e.message); }
+    btnThsMirror.disabled = false;
     loadThs();
   });
 
