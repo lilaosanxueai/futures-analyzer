@@ -162,6 +162,10 @@ DEFAULT_CONFIG = {
     "auto_sim": {
         "enabled": False,            # 自动模拟引擎（日内高频·纯规则）
     },
+    "ths_sync": {
+        "scan": False,               # 期货通盯屏：交易时段每 60s UIA 直读
+        "mirror": False,             # 持仓差分镜像落账（只动 ths-sync 单）
+    },
     # 风控参数（诊断引擎的预警阈值，用户按自身账户设定，AI 不代定）
     "discipline": {
         "account_size": 0.0,       # 账户权益（0=未设置，风险类检查跳过）
@@ -486,6 +490,11 @@ async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
             q = _quote_cache.get(sym, (0, {}))[1] or {}
             entry = q.get("last")
         if not entry:
+            try:
+                entry = (await fetch_quote(sym)).get("last")  # 非自选品种缓存未热 → 现场拉
+            except Exception:
+                entry = None
+        if not entry:
             continue
         trades.append({
             "id": f"ths{now_ms}-{sym}-{key[1]}", "ts": now_ms,
@@ -512,6 +521,11 @@ async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
         sym = key[0]
         q = _quote_cache.get(sym, (0, {}))[1] or {}
         price = q.get("last")
+        if not price:
+            try:
+                price = (await fetch_quote(sym)).get("last")  # 非自选品种缓存未热 → 现场拉
+            except Exception:
+                price = None
         for t in ms:
             if not price:
                 acts.append(f"镜像平仓失败 {sym}（无现价）")

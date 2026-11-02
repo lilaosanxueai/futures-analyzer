@@ -1334,6 +1334,15 @@ ${(() => {
     try {
       const d = await api("/api/ths-sync");
       renderThs(d);
+      // 同步开启时：工作台停留期间每 60s 自动刷新卡片（服务端循环在读，UI 跟上）
+      if (d.enabled && !FA.state._thsTimer) {
+        FA.state._thsTimer = setInterval(() => {
+          if (FA.state.currentView === "work") loadThs();
+        }, 60000);
+      } else if (!d.enabled && FA.state._thsTimer) {
+        clearInterval(FA.state._thsTimer);
+        FA.state._thsTimer = null;
+      }
     } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
   }
   function renderThs(d) {
