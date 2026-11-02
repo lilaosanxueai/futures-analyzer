@@ -764,6 +764,75 @@ async def ths_order_probe():
         _THS_ORDER["busy"] = False
 
 
+# 填单字段模式（今晚 probe 采样后按 uia_order_sample.txt 实名微调）
+_THS_ORDER_FIELDS = {
+    "contract": ("合约", "代码", "合约代码"),
+    "price": ("价格", "委托价", "委托价格"),
+    "lots": ("手数", "数量"),
+    "submit": ("下单", "买入", "卖出", "委托"),
+}
+
+
+def _ths_order_fill(symbol: str, direction: str, action: str, lots: float, price: Optional[float]) -> dict:
+    """在 F9 键盘下单面板填单（CALIBRATION-PENDING：字段实名待今晚采样后定稿）。
+    填单自动、提交不在此函数——提交必须经 /ths-order/confirm 且用户确认。"""
+    import comtypes.client
+    comtypes.client.GetModule("UIAutomationCore.dll")
+    from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation, IUIAutomationValuePattern
+    uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+    hwnd = _ths_hwnd()
+    if not hwnd:
+        return {"ok": False, "err": "没找到期货通窗口"}
+    root = uia.ElementFromHandle(hwnd)
+    walker = uia.RawViewWalker
+    found: dict[str, object] = {}
+
+    def walk(node, depth=0):
+        if len(found) == len(_THS_ORDER_FIELDS) or depth > 16:
+            return
+        try:
+            ch = walker.GetFirstChildElement(node)
+        except Exception:
+            return
+        while ch is not None:
+            try:
+                name = (ch.CurrentName or "").strip()
+                ct = ch.CurrentControlType
+                for field, kws in _THS_ORDER_FIELDS.items():
+                    if field in found:
+                        continue
+                    if any(k in name for k in kws) and ct in (50004, 50002, 50010, 50033, 50030):
+                        found[field] = ch
+                walk(ch, depth + 1)
+                ch = walker.GetNextSiblingElement(ch)
+            except Exception:
+                break
+
+    walk(root)
+
+    def _set(el, value: str) -> bool:
+        try:
+            unk = el.GetCurrentPattern(10002)  # ValuePattern
+            if unk:
+                unk.QueryInterface(IUIAutomationValuePattern).SetValue(value)
+                return True
+        except Exception:
+            pass
+        return False  # 采样定稿后可加 SetFocus+剪贴板粘贴兜底
+
+    fills = {}
+    if "contract" in found:
+        fills["contract"] = _set(found["contract"], symbol)
+    if "price" in found and price:
+        fills["price"] = _set(found["price"], f"{price:.1f}")
+    if "lots" in found:
+        fills["lots"] = _set(found["lots"], str(int(lots)))
+    # 方向/开平通常是单选钮组：采样后按实名点击（买/卖、开/平）
+    fills["_direction_action"] = "TODO 采样后接钮点击"
+    return {"ok": True, "filled": fills, "matched_fields": sorted(found.keys()),
+            "note": "字段实名待 uia_order_sample.txt 校准"}
+
+
 # ---------------------------------------------------------------- 行情基础层
 
 QUOTE_TTL = 5.0        # 单合约行情缓存（秒），与前端轮询周期一致
@@ -3640,6 +3709,27 @@ def _backup_corrupt(path: Path) -> None:
         pass
 
 
+TRADES_ARCHIVE_FILE = BASE_DIR / "trades_archive.json"
+
+
+def _load_full_trades() -> list[dict]:
+    """完整历史 = 档案(2026-11-02 前全量) + 主记录(重大亏损留存+此后新交易)，按 id 去重——
+    留存单两边都有，防重复计数。实录风控/月度曲线等统计引擎用这个，保证判定建立在
+    真实盈亏分布上（主记录只留伤疤会让 M0 这类盈利品种被误判）。"""
+    seen: dict[str, dict] = {}
+    if TRADES_ARCHIVE_FILE.exists():
+        try:
+            for t in json.loads(TRADES_ARCHIVE_FILE.read_text(encoding="utf-8")):
+                if t.get("id"):
+                    seen[t["id"]] = t
+        except Exception:
+            _backup_corrupt(TRADES_ARCHIVE_FILE)
+    for t in _load_trades():  # 主记录覆盖同 id（保留最新状态）
+        if t.get("id"):
+            seen[t["id"]] = t
+    return list(seen.values())
+
+
 _TRADES_CACHE = {"mt": 0.0, "data": []}
 
 
@@ -4551,7 +4641,7 @@ def _risk_profile(trades: Optional[list] = None, max_age: float = 600.0) -> dict
     失血时段=该钟点≥15笔且均亏≤-1点。传入 trades 时只算不缓存。"""
     if trades is None and _RISK_PROFILE_CACHE["data"] and time.time() - _RISK_PROFILE_CACHE["ts"] < max_age:
         return _RISK_PROFILE_CACHE["data"]
-    trades = trades if trades is not None else _load_trades()
+    trades = trades if trades is not None else _load_full_trades()
     closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None
               and t.get("source") != "auto"]
     closed.sort(key=lambda t: t.get("closed_ts") or t.get("ts") or 0)
@@ -5714,8 +5804,8 @@ async def risk_profile_api():
 
 @app.get("/api/trades/monthly")
 async def trades_monthly():
-    """月度进步曲线（真实记录）：每月 笔数/累计点/胜率/盈亏比/违规次数——回答"我在变好吗\""""
-    trades = _load_trades()
+    """月度进步曲线（完整历史=档案+主记录）：每月 笔数/累计点/胜率/盈亏比/违规次数——回答"我在变好吗\""""
+    trades = _load_full_trades()
     closed = [t for t in trades if t.get("status") == "closed"
               and t.get("result_pts") is not None and t.get("source") != "auto"]
     months: dict[str, list] = {}
