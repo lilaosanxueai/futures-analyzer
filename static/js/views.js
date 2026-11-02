@@ -12,7 +12,7 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "work") { loadThs(); }
+      if (v === "work") { loadThs(); loadSignals(); }
       if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); loadNotesEmbed(); fillSymbolReviewOptions(); loadSettle(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); loadMonthly(); }
@@ -1325,6 +1325,42 @@ ${(() => {
         (fn.scans ? '<div class="kv"><span class="k">信号漏斗</span><span class="v">' + fn.scans + "扫→" + (fn.resonance || 0) + "共振→" + (fn.opened || 0) + "开</span></div>" : "") +
         '<div class="kv"><span class="k">引擎状态</span><span class="v">' + (d.enabled ? "✅ 运行中" : "⛔ 未启用") + '</span></div></div>';
     } catch (e) { /* ignore */ }
+  }
+
+  // 盘面信号：四方资金 → 多/空/观望 + 短中长三期
+  async function loadSignals() {
+    const el = $("#signalBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/signals");
+      const sigs = d.signals || [];
+      if (!sigs.length) { el.innerHTML = '<div class="empty">暂无信号</div>'; return; }
+      const dirBadge = (dir) =>
+        dir === "long" ? '<span class="badge bull">多</span>'
+        : dir === "short" ? '<span class="badge bear">空</span>'
+        : '<span class="badge neutral">观望</span>';
+      const tfBadge = (dir) =>
+        dir === "long" ? '<span style="color:var(--up)">多</span>'
+        : dir === "short" ? '<span style="color:var(--down)">空</span>'
+        : '<span class="muted">中</span>';
+      el.innerHTML = '<table class="table"><thead><tr>' +
+        '<th>品种</th><th>方向</th><th>置信</th><th>短</th><th>中</th><th>长</th><th>关键证据</th></tr></thead><tbody>' +
+        sigs.map((s) => {
+          const conf_color = s.confidence >= 60 ? "var(--up)" : s.confidence >= 35 ? "var(--warn)" : "var(--muted)";
+          const risk = s.risk_note ? '<br><span style="color:var(--danger);font-size:10px">⚠ ' + esc(s.risk_note) + "</span>" : "";
+          return "<tr>" +
+            '<td><b>' + esc(s.symbol) + "</b><br><span class=\"muted small\">" + esc(s.name || "") + "</span>" + risk + "</td>" +
+            "<td>" + dirBadge(s.direction) + "</td>" +
+            '<td style="color:' + conf_color + ';font-weight:700">' + s.confidence + "%</td>" +
+            "<td>" + tfBadge(s.timeframes.short.direction) + "</td>" +
+            "<td>" + tfBadge(s.timeframes.medium.direction) + "</td>" +
+            "<td>" + tfBadge(s.timeframes.long.direction) + "</td>" +
+            '<td class="small" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+            esc(s.evidence.join("；")) + '">' + esc((s.evidence[0] || "") + (s.evidence[1] ? "；" + s.evidence[1] : "")) + "</td>" +
+            "</tr>";
+        }).join("") + "</tbody></table>" +
+        '<div class="mini-note" style="margin-top:4px">短=当前信号 · 中=20日趋势 · 长=供需结构 · 置信度≥60%信号较强 · 判停品种强制观望</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
   }
 
   // 期货通盯屏同步：UIA 直读（自选报价 + 持仓插槽）

@@ -3305,6 +3305,221 @@ async def psych_ai(symbol: str):
     try:
         snap = await psych_snapshot(symbol)
     except Exception as e:
+        raise HTTPException(status_code=502, detail=f"快照获取失败：{e}")
+
+
+# ---------------------------------------------------------------- 方向研判引擎（四方资金 → 多/空/观望）
+
+_SIGNAL_WEIGHTS = {
+    "capital_flow": 3.0,    # 日线资金方向（最重：新钱方向=核心驱动力）
+    "regime": 2.0,          # 60日剧本阶段
+    "seats": 1.5,           # 席位净变化方向
+    "supply": 1.5,          # 供需温度计
+    "intl": 1.0,            # 外盘锚
+    "trap_risk": -0.5,      # 高陷阱 → 降置信度
+}
+
+_INTL_MAP = {
+    "SC0": ("WTI 原油", "布伦特原油"), "AU0": ("COMEX 黄金",),
+    "BU0": ("WTI 原油",), "FU0": ("WTI 原油",), "RU0": ("WTI 原油",),
+}
+
+
+def _signal_from_snapshot(sym: str, snap: dict, rp_symbols: Optional[dict] = None) -> dict:
+    """四方资金快照 → 方向研判（多/空/观望 + 置信度 + 证据链 + 短中长三期）。
+    纯规则零 LLM——速度优先，证据透明。"""
+    votes: list[tuple[str, float, str]] = []  # (direction, weight, evidence)
+
+    # ① 日线资金方向
+    cap = (snap.get("capital") or {}).get("state5") or ""
+    if "增仓上行" in cap:
+        votes.append(("long", _SIGNAL_WEIGHTS["capital_flow"], f"日线{cap}"))
+    elif "增仓下行" in cap:
+        votes.append(("short", _SIGNAL_WEIGHTS["capital_flow"], f"日线{cap}"))
+    elif "减仓上行" in cap:
+        votes.append(("long", _SIGNAL_WEIGHTS["capital_flow"] * 0.5, f"日线{cap}（旧多获利了结，需确认）"))
+    elif "减仓下行" in cap:
+        votes.append(("short", _SIGNAL_WEIGHTS["capital_flow"] * 0.6, f"日线{cap}（空方减仓=跌势可能衰竭）"))
+
+    # ② 剧本阶段
+    regime = (snap.get("regime") or {}).get("key") or ""
+    regime_label = (snap.get("regime") or {}).get("label") or ""
+    if regime in ("趋势上行", "高位加速"):
+        votes.append(("long", _SIGNAL_WEIGHTS["regime"], f"{regime_label}"))
+    elif regime in ("趋势下行",):
+        votes.append(("short", _SIGNAL_WEIGHTS["regime"], f"{regime_label}"))
+    elif regime in ("低位阴跌", "低位恐慌"):
+        votes.append(("long", _SIGNAL_WEIGHTS["regime"] * 0.4, f"{regime_label}（底部区域，左侧机会）"))
+    elif regime in ("高位回落",):
+        votes.append(("short", _SIGNAL_WEIGHTS["regime"] * 0.7, f"{regime_label}"))
+    else:  # 震荡
+        votes.append(("watch", _SIGNAL_WEIGHTS["regime"] * 0.5, f"{regime_label}（方向不明）"))
+
+    # ③ 席位方向
+    seats = snap.get("seats") or {}
+    net = seats.get("net_chg")
+    if net is not None and abs(net) > 500:
+        bias = seats.get("bias") or ""
+        if "多" in bias:
+            votes.append(("long", _SIGNAL_WEIGHTS["seats"], f"席位净变化{net:+,}（{bias}）"))
+        elif "空" in bias:
+            votes.append(("short", _SIGNAL_WEIGHTS["seats"], f"席位净变化{net:+,}（{bias}）"))
+
+    # ④ 供需温度计
+    f = snap.get("fundamentals") or {}
+    inv_chg = f.get("inv_chg2w_pct")
+    basis = f.get("basis")
+    if inv_chg is not None:
+        evi = f"库存2周{inv_chg:+.1f}%"
+        if inv_chg < -3:
+            votes.append(("long", _SIGNAL_WEIGHTS["supply"], evi + "（去库加速）"))
+        elif inv_chg > 3:
+            votes.append(("short", _SIGNAL_WEIGHTS["supply"], evi + "（累库压力）"))
+    if basis is not None and abs(basis) > 50:
+        if basis > 0:
+            votes.append(("long", _SIGNAL_WEIGHTS["supply"] * 0.5, f"基差{basis:+.0f}（现货升水）"))
+        else:
+            votes.append(("short", _SIGNAL_WEIGHTS["supply"] * 0.5, f"基差{basis:+.0f}（现货贴水）"))
+
+    # ⑤ 外盘锚
+    intl_refs = _INTL_MAP.get(sym, ())
+    if intl_refs:
+        intl_data = snap.get("intl_anchor") or []
+        for it in intl_data:
+            name = it.get("name", "")
+            chg = it.get("chg_pct")
+            if any(r in name for r in intl_refs) and chg is not None:
+                direction = "long" if chg > 0.5 else ("short" if chg < -0.5 else "watch")
+                votes.append((direction, _SIGNAL_WEIGHTS["intl"], f"{name} {chg:+.2f}%"))
+                break
+
+    # ⑥ 散户陷阱（反向指标+置信度惩罚）
+    trap = ((snap.get("parties") or {}).get("retail") or {}).get("trap_risk")
+    trap_evi = f"散户陷阱{trap}/100" if trap is not None else ""
+    if trap is not None and trap >= 60:
+        # 高陷阱=散户拥挤 → 反着来
+        if votes and votes[0][0] == "long":
+            votes.append(("short", 0.8, trap_evi + "（散户多头拥挤=反向信号）"))
+        elif votes and votes[0][0] == "short":
+            votes.append(("long", 0.8, trap_evi + "（散户空头拥挤=反向信号）"))
+
+    # 汇总
+    long_score = sum(w for d, w, _ in votes if d == "long")
+    short_score = sum(w for d, w, _ in votes if d == "short")
+    watch_score = sum(w for d, w, _ in votes if d == "watch")
+    total = long_score + short_score + watch_score
+
+    if long_score > short_score * 1.3 and long_score > 2:
+        direction = "long"
+        conf = min(100, int(long_score / max(total, 1) * 100))
+    elif short_score > long_score * 1.3 and short_score > 2:
+        direction = "short"
+        conf = min(100, int(short_score / max(total, 1) * 100))
+    else:
+        direction = "watch"
+        conf = 100 - min(100, int(abs(long_score - short_score) / max(total, 1) * 200))
+
+    # 置信度惩罚：高陷阱降
+    if trap is not None and trap >= 70:
+        conf = int(conf * 0.7)
+
+    # 实录风控覆盖
+    risk_note = ""
+    if rp_symbols:
+        sv = rp_symbols.get(sym)
+        if sv and sv.get("verdict") == "停":
+            direction = "watch"
+            conf = 0
+            risk_note = f"G12 判停（{sv['total']:+.0f}点/{sv['n']}笔）——本品种你实亏，禁开仓"
+        elif sv and sv.get("verdict") == "减":
+            risk_note = f"手数减半（{sv['total']:+.0f}点/{sv['n']}笔）"
+
+    # 短中长三周期
+    trend = snap.get("trend") or {}
+    pct60 = trend.get("pct60") or 50
+    chg20 = trend.get("chg20") or 0
+    oi5 = trend.get("oi_chg5d") or 0
+
+    short_dir = direction  # 短期=当前信号
+    short_evi = f"资金{cap}，60日{pct60:.0f}%分位"
+
+    if pct60 > 70 and chg20 > 3:
+        medium_dir = "long"
+        medium_evi = f"中期趋势偏多（60日{pct60:.0f}%分位，20日{chg20:+.1f}%）"
+    elif pct60 < 30 and chg20 < -3:
+        medium_dir = "short"
+        medium_evi = f"中期趋势偏空（60日{pct60:.0f}%分位，20日{chg20:+.1f}%）"
+    else:
+        medium_dir = "watch"
+        medium_evi = f"中期方向不明（60日{pct60:.0f}%分位，20日{chg20:+.1f}%）"
+
+    long_evi_parts = []
+    if inv_chg is not None:
+        long_evi_parts.append(f"库存趋势{inv_chg:+.1f}%/2周")
+    if basis is not None:
+        long_evi_parts.append(f"基差{basis:+.0f}")
+    if oi5:
+        long_evi_parts.append(f"5日持仓{oi5:+.1f}%")
+    long_dir = medium_dir  # 长期跟随中期结构
+    long_evi = "；".join(long_evi_parts) or "供需数据不足"
+
+    return {
+        "symbol": sym,
+        "name": snap.get("name", ""),
+        "last": snap.get("last"),
+        "change_pct": snap.get("change_pct"),
+        "direction": direction,
+        "confidence": conf,
+        "evidence": [e for _, _, e in votes if e],
+        "risk_note": risk_note,
+        "trap_risk": trap,
+        "regime": regime_label,
+        "capital_flow": cap,
+        "timeframes": {
+            "short": {"direction": short_dir, "evidence": short_evi},
+            "medium": {"direction": medium_dir, "evidence": medium_evi},
+            "long": {"direction": long_dir, "evidence": long_evi},
+        },
+    }
+
+
+@app.get("/api/signal/{symbol}")
+async def signal_one(symbol: str):
+    """单品种方向研判：四方资金 → 多/空/观望 + 置信度 + 短中长三期"""
+    sym = symbol.strip().upper()
+    try:
+        snap = await psych_snapshot(sym)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"快照获取失败：{e}")
+    rp = _risk_profile()
+    return _signal_from_snapshot(sym, snap, rp.get("symbols"))
+
+
+@app.get("/api/signals")
+async def signals_batch(symbols: str = ""):
+    """批量方向研判（自选品种或指定列表）"""
+    if symbols:
+        syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:10]
+    else:
+        syms = sorted(set(_MONITOR["watch"]) or {"RB0", "SA0", "MA0"})[:8]
+    rp = _risk_profile()
+    rp_syms = rp.get("symbols")
+    results = []
+    for sym in syms:
+        try:
+            snap = await psych_snapshot(sym)
+            results.append(_signal_from_snapshot(sym, snap, rp_syms))
+        except Exception:
+            continue
+    return {"ok": True, "signals": results, "count": len(results)}
+
+
+@app.post("/api/psych/{symbol}/ai")
+async def psych_ai(symbol: str):
+    symbol = symbol.strip().upper()
+    try:
+        snap = await psych_snapshot(symbol)
+    except Exception as e:
         raise HTTPException(status_code=502, detail=f"快照计算失败：{e}")
     context = psy.to_context_text(snap)
     nblk, vblk, fblk = await asyncio.gather(_news_context(3), _variety_news_context(symbol, 2), _fund_blk(symbol))
@@ -7056,6 +7271,31 @@ async def _generate_report() -> str:
         )
     if lines:
         parts.append("【自选品种博弈快照】\n" + "\n".join(lines))
+
+    # 方向研判（盘前提示 / 盘后三周期——晨报出短中期，夜报出短中长）
+    try:
+        rp_syms = _risk_profile().get("symbols")
+        sig_lines = []
+        for s in syms[:8]:
+            try:
+                snap_sig = await psych_snapshot(s)  # 复用上方已缓存的快照
+            except Exception:
+                continue
+            sig = _signal_from_snapshot(s, snap_sig, rp_syms)
+            arrow = {"long": "看多", "short": "看空", "watch": "观望"}[sig["direction"]]
+            tf = sig["timeframes"]
+            med = {"long": "偏多", "short": "偏空", "watch": "中性"}[tf["medium"]["direction"]]
+            lng = {"long": "偏多", "short": "偏空", "watch": "中性"}[tf["long"]["direction"]]
+            risk_txt = f"（{sig['risk_note']}）" if sig.get("risk_note") else ""
+            sig_lines.append(
+                f"- **{s}（{sig['name']}）：{arrow} {sig['confidence']}%**{risk_txt} · "
+                f"短期{arrow} / 中期{med} / 长期{lng} · "
+                + "；".join(sig["evidence"][:3])
+            )
+        if sig_lines:
+            parts.append("【方向研判（盘前提示 / 盘后三周期）】\n" + "\n".join(sig_lines))
+    except Exception:
+        pass
 
     # 持仓与诊断
     try:

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream"];var t=localStorage.getItem("fa_theme");if(t&&T.indexOf(t)>=0&&t!=="default")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261102b">
+<link rel="stylesheet" href="/static/style.css?v=20261102c">
 </head>
 <body>
 
@@ -67,6 +67,11 @@
             <tbody id="watchBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
           </table>
           <div class="hint">点击行进入品种博弈分析 · 持仓变化 = 今日实时 vs 昨收盘</div>
+        </div>
+
+        <div class="card" id="signalCard">
+          <div class="card-head"><h2>📡 盘面信号 <span class="muted small">四方资金 → 多/空/观望 · 短中长三期</span></h2></div>
+          <div id="signalBody" style="padding:8px 14px"><div class="empty">加载中…</div></div>
         </div>
 
         <div class="card" id="thsCard">
@@ -533,8 +538,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261102b"></script>
-<script src="/static/js/views.js?v=20261102b"></script>
-<script src="/static/js/chat.js?v=20261102b"></script>
+<script src="/static/js/base.js?v=20261102c"></script>
+<script src="/static/js/views.js?v=20261102c"></script>
+<script src="/static/js/chat.js?v=20261102c"></script>
 </body>
 </html>
