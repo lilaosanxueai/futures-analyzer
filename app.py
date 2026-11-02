@@ -2078,7 +2078,7 @@ async def auto_sim_toggle(body: dict):
 def _mine_rules() -> list[dict]:
     """从用户真实交易挖掘行为模式：时间/序列/仓位/品种维度，
     每条规则必须满足样本 ≥3 且有统计差异（p 近似）。返回可执行规则。"""
-    trades = _load_trades()
+    trades = _load_full_trades()  # 完整历史：重记账后主记录只有伤疤馆，经验挖掘需要全量
     closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
     if len(closed) < 5:
         return []
@@ -5646,7 +5646,7 @@ async def multipliers():
 def _flaw_profile() -> list[dict]:
     """从真实交易记录检测该交易者的散户缺陷：每项含证据与解药（纪律规则），按严重度排序。
     只用已存字段（不需要行情回放），随时可算。样本 <3 笔时返回空——不拿两笔交易给人贴标签。"""
-    trades = _load_trades()
+    trades = _load_full_trades()  # 完整历史：重记账后主记录只有伤疤馆，画像挖掘需要全量
     closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
     if len(closed) < 3 and len(trades) < 3:
         return []
