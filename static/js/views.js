@@ -1363,7 +1363,8 @@ ${(() => {
     const posHtml = pos.length
       ? pos.map((p) => '<div class="kv"><span class="k">' + esc(p.symbol) + " " + (p.direction === "long" ? "多" : "空") +
           " " + (p.lots == null ? "--" : p.lots + "手") + (p.avg_entry ? " @ " + p.avg_entry : "") + '</span><span class="v">' +
-          (p.float_pnl == null ? "--" : '<span class="' + (p.float_pnl > 0 ? "num-up" : "num-down") + '">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + "点</span>") + "</span></div>").join("")
+          (p.float_pnl == null ? "--" : '<span class="' + (p.float_pnl > 0 ? "num-up" : "num-down") + '">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + "点</span>") + "</span></div>" +
+          ((p.raw && p.raw.length) ? '<div class="mini-note" style="margin:-4px 0 4px;font-size:10px;opacity:.75">原始列: ' + p.raw.map(esc).join(" | ") + "</div>" : "")).join("")
       : '<div class="mini-note">当前无持仓数据行（交易面板激活且有持仓时自动出现；提取器已按真实列校准）</div>';
     el.innerHTML =
       '<div class="kv"><span class="k">状态</span><span class="v">' + esc(status) +
