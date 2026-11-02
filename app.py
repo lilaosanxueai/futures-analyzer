@@ -65,7 +65,10 @@ PROVIDERS = {
     "custom": {
         "label": "自定义 / Coding Plan",
         "base_url": "",  # 由设置页填写（Coding Plan 等 OpenAI 兼容端点）
-        "default_model": "glm-5",
+        # 兜底链用的默认模型——必须选端点分组真实供应的（2026-11-01 实测 new.bi
+        # New.bi-Codex 组仅 gpt-6.1-sol/gpt-5.6-terra/gpt-5.6-sol/codex-auto-review 可用；
+        # 曾因默认 glm-5 致回退必 503；可用 config.custom_model 覆盖）
+        "default_model": "gpt-6.1-sol",
     },
 }
 
@@ -116,7 +119,12 @@ def _llm_candidates(cfg: dict) -> list[dict]:
         url = provider_base_url(cfg, p)
         if not key or not url:
             continue
-        model = (cfg["model"] or PROVIDERS[p]["default_model"]) if p == active else PROVIDERS[p]["default_model"]
+        if p == active:
+            model = cfg["model"] or PROVIDERS[p]["default_model"]
+        elif p == "custom":
+            model = str(cfg.get("custom_model") or "").strip() or PROVIDERS[p]["default_model"]
+        else:
+            model = PROVIDERS[p]["default_model"]
         out.append({"provider": p, "base_url": url, "api_key": key, "model": model})
     out.sort(key=lambda c: _provider_demoted(c["provider"]))  # 稳定排序：被熔断的沉底
     return out

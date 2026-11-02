@@ -1,6 +1,6 @@
 @echo off
 title FuturesAnalyzer Guardian
-cd /d "C:\Users\weimin8\ZCodeProject\futures-analyzer"
+cd /d "C:\Users\10166\.agents\skills\futures-analyzer"
 
 :loop
 rem Port 8300 already listening? -> recheck in 5 min
@@ -15,7 +15,7 @@ if exist server.log for %%F in (server.log) do if %%~zF GTR 10485760 move /y ser
 
 rem Start server with absolute python path; when it exits, restart in 5s
 echo [%date% %time%] starting server >> server.log
-"C:\Users\weimin8\AppData\Local\Programs\Python\Python312\python.exe" "C:\Users\weimin8\ZCodeProject\futures-analyzer\app.py" >> server.log 2>&1
+"C:\Users\10166\.agents\skills\futures-analyzer\.venv\Scripts\python.exe" "C:\Users\10166\.agents\skills\futures-analyzer\app.py" >> server.log 2>&1
 echo [%date% %time%] server exited, restarting in 5s >> server.log
 timeout /t 5 /nobreak >nul
 goto loop
