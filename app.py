@@ -704,6 +704,66 @@ async def ths_sync_sample():
     return {"ok": True, "lines": len(texts)}
 
 
+# ---------------- 辅助下单（期货通 F9 键盘面板：UIA 填单 → 用户确认 → 提交）----------------
+# 安全原则：填单可以自动，提交永远需要用户在本应用里二次点击；交易时段外拒绝。
+_THS_ORDER = {"busy": False, "calibrated": False}
+
+
+def _ths_open_order_panel() -> tuple[bool, str]:
+    """还原+前台期货通并发 F9 打开键盘下单面板（已验证快捷键有效）。返回(成功, 说明)"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hwnd = _ths_hwnd()
+    if not hwnd:
+        return False, "没找到期货通窗口"
+    user32.ShowWindow(hwnd, 9)
+    import time as _t
+    _t.sleep(0.6)
+    tid = ctypes.windll.kernel32.GetCurrentThreadId()
+    hfg = user32.GetForegroundWindow()
+    tfg = user32.GetWindowThreadProcessId(hfg, None)
+    user32.AttachThreadInput(tid, tfg, True)
+    user32.SetForegroundWindow(hwnd)
+    _t.sleep(0.3)
+    user32.PostMessageW(hwnd, 0x0100, 0x78, 0x00380001)  # WM_KEYDOWN F9
+    user32.PostMessageW(hwnd, 0x0102, 0x78, 0x00380001)  # WM_CHAR
+    user32.PostMessageW(hwnd, 0x0101, 0x78, 0xC0380001)  # WM_KEYUP
+    user32.AttachThreadInput(tid, tfg, False)
+    _t.sleep(2.5)
+    return True, "F9 已发送（下单面板 2.5 秒后采样）"
+
+
+@app.post("/api/ths-order/probe")
+async def ths_order_probe():
+    """辅助下单第一步：F9 打开下单面板并采样控件结构 → uia_order_sample.txt。
+    交易登录后调用一次，据此写字段填充映射（填单→确认→提交三段式）。"""
+    if _THS_ORDER["busy"]:
+        raise HTTPException(status_code=429, detail="上一次操作未完成")
+    _THS_ORDER["busy"] = True
+    try:
+        def _run():
+            ok, msg = _ths_open_order_panel()
+            if not ok:
+                return None, msg
+            hwnd = _ths_hwnd()
+            texts = _ths_uia_texts(hwnd)
+            (BASE_DIR / "uia_order_sample.txt").write_text("\n".join(texts), encoding="utf-8")
+            return len(texts), msg
+
+        n, msg = await asyncio.to_thread(_run)
+        if n is None:
+            raise HTTPException(status_code=503, detail=msg)
+        _ths_log(f"下单面板采样 {n} 行 → uia_order_sample.txt")
+        # 找下单面板特征判断是否已登录
+        logged = any(k in line for line in (BASE_DIR / "uia_order_sample.txt").read_text(encoding="utf-8").splitlines()
+                     for k in ("买卖", "开平", "委托价", "下单"))
+        return {"ok": True, "lines": n, "panel_detected": logged,
+                "next": "字段映射校准中——面板结构已存档"}
+    finally:
+        _THS_ORDER["busy"] = False
+
+
 # ---------------------------------------------------------------- 行情基础层
 
 QUOTE_TTL = 5.0        # 单合约行情缓存（秒），与前端轮询周期一致

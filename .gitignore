@@ -15,3 +15,5 @@ auto_trades.json
 uia_sample.txt
 *.tmp
 backups/
+uia_order_sample.txt
+_assistant.jpg
