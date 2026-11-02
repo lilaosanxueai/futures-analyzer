@@ -389,38 +389,47 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
                     name = texts[i - 1]
                 quotes.append({"code": t.upper(), "name": name, "price": price, "chg_pct": chg})
     positions: list[dict] = []
-    # 持仓行提取（2026-11-01 已按真实表格结构校准）：
-    # 期货通持仓表列 = 操作|品种|合约号|多空|总仓|可用|今仓|今可用|开仓均价|盈利价差|逐笔浮盈|浮盈比例|价值|保证金|资金占比|持仓均价|盯市浮盈|交易类型|投保
-    # 数据行形态：… / 合约号XX2701 / 多|空 / 总仓数字 / … 数字串
+    # 持仓行提取（2026-11-02 夜盘实弹校准）：
+    # 实测 UIA 数据流：c2701 → [条,止,止,不活跃,临期,末日,套(状态标签×7)] → 多|空 → 总仓 → 可用 → 今仓 → 今可用 → 开仓均价 → 价差 → 浮盈 → 浮盈% → 价值 → 保证金 → ...
+    # 搜索窗口 12（跨过状态标签找方向），找到方向后按固定列序取数
     seen_pos: set = set()
     for i, t in enumerate(texts):
         if not re.fullmatch(r"[A-Za-z]{1,2}\d{3,4}", t or ""):
             continue
-        window = texts[i + 1:i + 10]
+        # 排除行情区的代码（行情区代码后面跟的是 价格/百分比，不是方向 token）
+        window = texts[i + 1:i + 20]  # 20 个窗口：覆盖状态标签×7 + 方向×2 + 8列×2 = 25（够用）
+        dir_idx = None
         dir_ = None
-        for w in window[:4]:
-            ws = w or ""
-            if any(k in ws for k in ("买持", "多头", "买开")) or ws in ("买", "多"):
-                dir_ = "long"
+        for k, w in enumerate(window):
+            if w == "多":
+                dir_idx, dir_ = k, "long"
                 break
-            if any(k in ws for k in ("卖持", "空头", "卖开")) or ws in ("卖", "空"):
-                dir_ = "short"
+            if w == "空":
+                dir_idx, dir_ = k, "short"
                 break
-        if not dir_:
-            continue  # 报价行：代码后是 主力/价格/百分比
+            if w in ("买持", "买开"):
+                dir_idx, dir_ = k, "long"
+                break
+            if w in ("卖持", "卖开"):
+                dir_idx, dir_ = k, "short"
+                break
+        if dir_ is None:
+            continue  # 行情行：代码后无方向 token
         key = (t.upper(), dir_)
         if key in seen_pos:
             continue
-        nums = [x for x in window if _ths_num(x) is not None]
-        # 总仓=方向 token 后第一个数字；开仓均价/逐笔浮盈在后续数字串里（列序对齐交由实测微调）
-        k = window.index(next(w for w in window[:4] if w in ("多", "空", "买", "卖", "买持", "卖持")))
-        lots = _ths_num(window[k + 1]) if k + 1 < len(window) else None
-        avg_entry = _ths_num(window[k + 2]) if k + 2 < len(window) else None
-        float_pnl = next((_ths_num(x) for x in window[k + 3:k + 6]
-                          if _ths_num(x) is not None and _ths_num(x) != 0), None)
+        # UIA 值成对出现（DataItem + 内嵌Text 各一次）→ 每列占 2 个 token 位
+        # 方向后跳过重复方向 token，然后每列 ×2：
+        # 总仓=+2 可用=+4 今仓=+6 今可用=+8 开仓均价=+10 价差=+12 浮盈=+14
+        def _at(off):
+            j = dir_idx + 1 + off  # +1 跳过重复的方向 token
+            return _ths_num(texts[i + 1 + j]) if (i + 1 + j) < len(texts) else None
+        lots = _at(2)                # 总仓（+2 = 跳过方向dup + 总仓first）
+        avg_entry = _at(10)          # 开仓均价
+        float_pnl = _at(14)          # 逐笔浮盈
         positions.append({"symbol": t.upper(), "direction": dir_, "lots": lots,
                           "avg_entry": avg_entry, "float_pnl": float_pnl,
-                          "raw": window[:8]})
+                          "raw": window[:10]})
         seen_pos.add(key)
     return quotes, positions
 
