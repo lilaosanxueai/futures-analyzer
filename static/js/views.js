@@ -1327,6 +1327,36 @@ ${(() => {
     } catch (e) { /* ignore */ }
   }
 
+  // 持仓建议渲染（renderThs 和 30s 定时器共用）
+  function _renderPosAdvice(pb, adv) {
+    const ps = adv.positions || [];
+    if (!ps.length) { pb.innerHTML = '<div class="empty">无持仓</div>'; return; }
+    pb.innerHTML = ps.map((p) => {
+      const hColor = p.health === "healthy" ? "var(--up)" : p.health === "danger" ? "var(--danger)" : "var(--warn)";
+      const aColor = p.action.includes("平") || p.action.includes("减") ? "var(--danger)" :
+        p.action.includes("增") ? "var(--up)" : "var(--warn)";
+      const pnlCls = (p.float_pnl || 0) > 0 ? "num-up" : "num-down";
+      return '<div style="border-left:3px solid ' + hColor + ';padding:8px 12px;margin:4px 0;background:var(--panel-2);border-radius:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<div><b style="font-size:15px">' + esc(p.symbol) + '</b> ' +
+            '<span class="badge ' + (p.direction === "long" ? "bull" : "bear") + '">' + (p.direction === "long" ? "多" : "空") + '</span>' +
+            ' ' + p.lots + '手 @ ' + p.entry + '</div>' +
+          '<div class="' + pnlCls + '" style="font-size:18px;font-weight:700">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + ' 点</div>' +
+        '</div>' +
+        '<div style="margin-top:6px;font-size:12px">' +
+          '<span style="color:' + hColor + ';font-weight:700">' + p.health_txt + '</span>' +
+          ' · <span style="color:' + aColor + ';font-weight:700;font-size:13px">' + p.action + '</span>' +
+          (p.risk_note ? ' · <span style="color:var(--danger)">' + esc(p.risk_note) + '</span>' : '') +
+        '</div>' +
+        '<div style="margin-top:4px;font-size:12px;color:var(--muted)">' + esc(p.action_detail) + '</div>' +
+        '<div style="margin-top:3px;font-size:11px;color:var(--muted)">止损 <b style="color:var(--danger)">' + p.stop_price + '</b>' +
+          ' · 目标 <b style="color:var(--up)">' + p.target_price + '</b>' +
+          ' · 信号置信 ' + p.signal_conf + '%' +
+          (p.trap_risk >= 60 ? ' · <span style="color:var(--danger)">陷阱' + p.trap_risk + '</span>' : '') + '</div>' +
+        '</div>';
+    }).join("");
+  }
+
   // 盘面信号：四方资金 → 多/空/观望 + 短中长三期
   async function loadSignals() {
     const el = $("#signalBody");
@@ -1370,6 +1400,22 @@ ${(() => {
     try {
       const d = await api("/api/ths-sync");
       renderThs(d);
+      // 持仓存在时：建议卡每 30 秒自动刷新（不只依赖页面切换）
+      const hasPos = (d.positions || []).length > 0;
+      if (hasPos && !FA.state._posAdvTimer) {
+        FA.state._posAdvTimer = setInterval(() => {
+          if (FA.state.currentView === "work") {
+            api("/api/position-advice").then((adv) => {
+              const pb = $("#posAdviceBody");
+              if (!pb) return;
+              _renderPosAdvice(pb, adv);
+            }).catch(() => {});
+          }
+        }, 30000);
+      } else if (!hasPos && FA.state._posAdvTimer) {
+        clearInterval(FA.state._posAdvTimer);
+        FA.state._posAdvTimer = null;
+      }
       // 同步开启时：工作台停留期间每 60s 自动刷新卡片（服务端循环在读，UI 跟上）
       if (d.enabled && !FA.state._thsTimer) {
         FA.state._thsTimer = setInterval(() => {
@@ -1393,36 +1439,9 @@ ${(() => {
     if (pos.length) {
       el.innerHTML = '<div id="posAdviceBody"><div class="empty">评估中…</div></div>' +
         ((d.log || []).slice(0, 2).length ? '<div class="mini-note" style="margin-top:4px">' + d.log.slice(0, 2).map(esc).join("<br>") + "</div>" : "");
-      // 异步拉取建议
       api("/api/position-advice").then((adv) => {
         const pb = $("#posAdviceBody");
-        if (!pb) return;
-        const ps = adv.positions || [];
-        if (!ps.length) { pb.innerHTML = '<div class="empty">无持仓</div>'; return; }
-        pb.innerHTML = ps.map((p) => {
-          const hColor = p.health === "healthy" ? "var(--up)" : p.health === "danger" ? "var(--danger)" : "var(--warn)";
-          const aColor = p.action.includes("平") || p.action.includes("减") ? "var(--danger)" :
-            p.action.includes("增") ? "var(--up)" : "var(--warn)";
-          const pnlCls = (p.float_pnl || 0) > 0 ? "num-up" : "num-down";
-          return '<div style="border-left:3px solid ' + hColor + ';padding:8px 12px;margin:4px 0;background:var(--panel-2);border-radius:6px">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center">' +
-              '<div><b style="font-size:15px">' + esc(p.symbol) + '</b> ' +
-                '<span class="badge ' + (p.direction === "long" ? "bull" : "bear") + '">' + (p.direction === "long" ? "多" : "空") + '</span>' +
-                ' ' + p.lots + '手 @ ' + p.entry + '</div>' +
-              '<div class="' + pnlCls + '" style="font-size:18px;font-weight:700">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + ' 点</div>' +
-            '</div>' +
-            '<div style="margin-top:6px;font-size:12px">' +
-              '<span style="color:' + hColor + ';font-weight:700">' + p.health_txt + '</span>' +
-              ' · <span style="color:' + aColor + ';font-weight:700;font-size:13px">' + p.action + '</span>' +
-              (p.risk_note ? ' · <span style="color:var(--danger)">' + esc(p.risk_note) + '</span>' : '') +
-            '</div>' +
-            '<div style="margin-top:4px;font-size:12px;color:var(--muted)">' + esc(p.action_detail) + '</div>' +
-            '<div style="margin-top:3px;font-size:11px;color:var(--muted)">止损 <b style="color:var(--danger)">' + p.stop_price + '</b>' +
-              ' · 目标 <b style="color:var(--up)">' + p.target_price + '</b>' +
-              ' · 信号置信 ' + p.signal_conf + '%' +
-              (p.trap_risk >= 60 ? ' · <span style="color:var(--danger)">陷阱' + p.trap_risk + '</span>' : '') + '</div>' +
-            '</div>';
-        }).join("");
+        if (pb) _renderPosAdvice(pb, adv);
       }).catch(() => {
         const pb = $("#posAdviceBody");
         if (pb) pb.innerHTML = '<div class="empty">建议获取失败</div>';

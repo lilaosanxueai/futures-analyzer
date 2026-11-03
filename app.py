@@ -627,11 +627,12 @@ async def lifespan(_app):
     care_task = asyncio.create_task(auto_care_loop())
     ths_task = asyncio.create_task(ths_sync_loop())
     backup_task = asyncio.create_task(backup_loop())
+    poshealth_task = asyncio.create_task(_pos_health_monitor())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
-              care_task, ths_task, backup_task, report_task, selfcheck_task):
+              care_task, ths_task, backup_task, poshealth_task, report_task, selfcheck_task):
         t.cancel()
 
 
@@ -3610,6 +3611,57 @@ def _position_advice(pos: dict, sig: dict) -> dict:
     }
 
 
+_POS_HEALTH_LAST: dict[str, str] = {}  # symbol → last health（变化才推送，防轰炸）
+
+
+async def _pos_health_monitor():
+    """持仓健康监控：每次盯屏扫描后评估，健康状态变化时推事件流+飞书"""
+    while True:
+        await asyncio.sleep(45)
+        try:
+            if not is_trading_time(datetime.now()):
+                continue
+            positions = THS_SYNC.get("positions") or []
+            if not positions:
+                _POS_HEALTH_LAST.clear()
+                continue
+            rp_syms = _risk_profile().get("symbols")
+            for pos in positions:
+                sym = _ths_pref(pos.get("symbol", ""))
+                try:
+                    snap = await psych_snapshot(sym)
+                    sig = _signal_from_snapshot(sym, snap, rp_syms)
+                except Exception:
+                    continue
+                adv = _position_advice(pos, sig)
+                health = adv["health"]
+                prev = _POS_HEALTH_LAST.get(sym)
+                _POS_HEALTH_LAST[sym] = health
+                if prev is None or prev == health:
+                    continue  # 首次或未变化不推
+                now_ms = int(time.time() * 1000)
+                symbol_txt = f"{pos.get('symbol')} {'多' if pos['direction']=='long' else '空'}"
+                if health == "danger":
+                    text = f"🔴 持仓健康恶化：{symbol_txt} {prev}→高危。{adv['action']}：{adv['action_detail']}"
+                    level = "fatal"
+                elif health == "healthy" and prev == "danger":
+                    text = f"✅ 持仓恢复健康：{symbol_txt} 高危→健康。{adv['action']}：{adv['action_detail']}"
+                    level = "info"
+                else:
+                    text = f"⚠️ 持仓状态变化：{symbol_txt} {prev}→{health}。{adv['action']}：{adv['action_detail']}"
+                    level = "warn"
+                _emit_event({
+                    "id": f"poshealth-{now_ms}-{sym}", "ts": now_ms,
+                    "kind": "diag", "etype": "POS_HEALTH", "level": level,
+                    "symbol": sym, "name": "", "dir": "down" if health == "danger" else "up",
+                    "price": pos.get("avg_entry"),
+                    "text": text, "chg5": 0, "chg15": 0, "threshold": 0,
+                    "intl": False, "ai": "",
+                }, feishu=True, feishu_text=f"🛡️ 持仓健康预警\n{symbol_txt}\n{text}")
+        except Exception:
+            pass
+
+
 @app.get("/api/position-advice")
 async def position_advice():
     """持仓实时健康 + 操作建议（结合 THS 持仓 + 方向信号 + 实录风控）"""
@@ -3636,6 +3688,48 @@ async def position_advice():
             adv["risk_note"] = ""
         results.append(adv)
     return {"ok": True, "positions": results, "count": len(results)}
+
+
+@app.get("/api/premarket-check")
+async def premarket_check():
+    """盘前就绪检查：一条端点确认全部子系统状态"""
+    checks = []
+
+    # ① 服务自身
+    checks.append(("系统", True, "运行中"))
+
+    # ② THS 客户端
+    ths_ok = _ths_hwnd() is not None
+    checks.append(("期货通", ths_ok, "已打开" if ths_ok else "未打开（请启动同花顺期货通）"))
+
+    # ③ 盯屏同步
+    checks.append(("盯屏", THS_SYNC["enabled"], "已开启" if THS_SYNC["enabled"] else "未开启"))
+
+    # ④ 镜像
+    checks.append(("镜像", THS_SYNC["mirror"], "已开启" if THS_SYNC["mirror"] else "未开启（建议开启）"))
+
+    # ⑤ AI 服务
+    cfg = load_config()
+    ai_ok = bool(cfg.get("api_keys", {}).get(cfg.get("provider", "")))
+    checks.append(("AI", ai_ok, f"{cfg.get('provider', '?')} 已配置" if ai_ok else "未配置"))
+
+    # ⑥ 实录风控
+    rp = _risk_profile()
+    stops = [s for s, v in rp.get("symbols", {}).items() if v.get("verdict") == "停"]
+    checks.append(("风控", True, f"{len(stops)} 品种判停" if stops else "无判停"))
+
+    # ⑦ 飞书
+    fs_ok = bool((cfg.get("feishu") or {}).get("app_id"))
+    checks.append(("飞书", fs_ok, "已配置" if fs_ok else "未配置"))
+
+    # ⑧ 自选品种
+    watch = sorted(set(_MONITOR["watch"]) or set())
+    checks.append(("自选", len(watch) > 0, f"{len(watch)} 个" if watch else "空"))
+
+    all_ok = all(ok for _, ok, _ in checks)
+    return {"ok": True, "ready": all_ok,
+            "summary": "✅ 全部就绪" if all_ok else "⚠️ 有待处理项",
+            "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in checks]}
 
 
 @app.post("/api/psych/{symbol}/ai")
