@@ -1388,28 +1388,67 @@ ${(() => {
     if (btn) btn.textContent = d.enabled ? "关闭" : "开启";
     const bm = $("#btnThsMirror");
     if (bm) { bm.textContent = d.mirror ? "🪞 镜像中" : "🪞 镜像"; bm.style.color = d.mirror ? "var(--up)" : ""; }
-    const qs = d.quotes || [];
-    const status = !last.ok ? (last.err || "未读取") :
-      "✅ " + new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) + " · " + (last.texts || 0) + " 元素";
-    const quoteRows = qs.slice(0, 10).map((q) =>
-      '<span class="chip" style="margin:2px">' + esc(q.code) + (q.name ? " " + esc(q.name.replace(/\d+$/, "")) : "") +
-      ' <b>' + fmtNum(q.price) + '</b> <span class="' + ((q.chg_pct || 0) > 0 ? "num-up" : "num-down") + '">' +
-      (q.chg_pct == null ? "--" : (q.chg_pct > 0 ? "+" : "") + q.chg_pct + "%") + "</span></span>").join("");
     const pos = d.positions || [];
-    const posHtml = pos.length
-      ? pos.map((p) => '<div class="kv"><span class="k">' + esc(p.symbol) + " " + (p.direction === "long" ? "多" : "空") +
-          " " + (p.lots == null ? "--" : p.lots + "手") + (p.avg_entry ? " @ " + p.avg_entry : "") + '</span><span class="v">' +
-          (p.float_pnl == null ? "--" : '<span class="' + (p.float_pnl > 0 ? "num-up" : "num-down") + '">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + "点</span>") + "</span></div>" +
-          ((p.raw && p.raw.length) ? '<div class="mini-note" style="margin:-4px 0 4px;font-size:10px;opacity:.75">原始列: ' + p.raw.map(esc).join(" | ") + "</div>" : "")).join("")
-      : '<div class="mini-note">当前无持仓数据行（交易面板激活且有持仓时自动出现；提取器已按真实列校准）</div>';
-    el.innerHTML =
-      '<div class="kv"><span class="k">状态</span><span class="v">' + esc(status) +
-      (d.enabled ? ' · <span style="color:var(--up)">同步中(60s)</span>' : "") +
-      (d.mirror ? ' · <span style="color:var(--up)">镜像落账</span>' : "") + "</span></div>" +
-      (quoteRows ? '<div style="margin:6px 0"><b class="small">期货通自选</b><br>' + quoteRows +
-        ' <button class="link-btn" id="btnThsWatch" style="margin-left:4px">⇪ 同步到应用自选</button></div>' : "") +
-      '<div style="margin-top:6px"><b class="small">期货通持仓</b></div>' + posHtml +
-      ((d.log || []).length ? '<div class="mini-note" style="margin-top:6px">' + d.log.slice(0, 4).map(esc).join("<br>") + "</div>" : "");
+    // ---- 持仓健康 + 操作建议（极简卡片） ----
+    if (pos.length) {
+      el.innerHTML = '<div id="posAdviceBody"><div class="empty">评估中…</div></div>' +
+        ((d.log || []).slice(0, 2).length ? '<div class="mini-note" style="margin-top:4px">' + d.log.slice(0, 2).map(esc).join("<br>") + "</div>" : "");
+      // 异步拉取建议
+      api("/api/position-advice").then((adv) => {
+        const pb = $("#posAdviceBody");
+        if (!pb) return;
+        const ps = adv.positions || [];
+        if (!ps.length) { pb.innerHTML = '<div class="empty">无持仓</div>'; return; }
+        pb.innerHTML = ps.map((p) => {
+          const hColor = p.health === "healthy" ? "var(--up)" : p.health === "danger" ? "var(--danger)" : "var(--warn)";
+          const aColor = p.action.includes("平") || p.action.includes("减") ? "var(--danger)" :
+            p.action.includes("增") ? "var(--up)" : "var(--warn)";
+          const pnlCls = (p.float_pnl || 0) > 0 ? "num-up" : "num-down";
+          return '<div style="border-left:3px solid ' + hColor + ';padding:8px 12px;margin:4px 0;background:var(--panel-2);border-radius:6px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center">' +
+              '<div><b style="font-size:15px">' + esc(p.symbol) + '</b> ' +
+                '<span class="badge ' + (p.direction === "long" ? "bull" : "bear") + '">' + (p.direction === "long" ? "多" : "空") + '</span>' +
+                ' ' + p.lots + '手 @ ' + p.entry + '</div>' +
+              '<div class="' + pnlCls + '" style="font-size:18px;font-weight:700">' + (p.float_pnl > 0 ? "+" : "") + p.float_pnl + ' 点</div>' +
+            '</div>' +
+            '<div style="margin-top:6px;font-size:12px">' +
+              '<span style="color:' + hColor + ';font-weight:700">' + p.health_txt + '</span>' +
+              ' · <span style="color:' + aColor + ';font-weight:700;font-size:13px">' + p.action + '</span>' +
+              (p.risk_note ? ' · <span style="color:var(--danger)">' + esc(p.risk_note) + '</span>' : '') +
+            '</div>' +
+            '<div style="margin-top:4px;font-size:12px;color:var(--muted)">' + esc(p.action_detail) + '</div>' +
+            '<div style="margin-top:3px;font-size:11px;color:var(--muted)">止损 <b style="color:var(--danger)">' + p.stop_price + '</b>' +
+              ' · 目标 <b style="color:var(--up)">' + p.target_price + '</b>' +
+              ' · 信号置信 ' + p.signal_conf + '%' +
+              (p.trap_risk >= 60 ? ' · <span style="color:var(--danger)">陷阱' + p.trap_risk + '</span>' : '') + '</div>' +
+            '</div>';
+        }).join("");
+      }).catch(() => {
+        const pb = $("#posAdviceBody");
+        if (pb) pb.innerHTML = '<div class="empty">建议获取失败</div>';
+      });
+    } else {
+      el.innerHTML =
+        '<div class="kv"><span class="k">状态</span><span class="v">' +
+        (last.ok ? "✅ " + new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) : (last.err || "未读取")) +
+        (d.enabled ? ' · <span style="color:var(--up)">同步中</span>' : "") +
+        (d.mirror ? ' · <span style="color:var(--up)">镜像</span>' : "") + "</span></div>" +
+        '<div class="mini-note" style="margin-top:6px">当前无持仓。开仓后自动显示健康评估与操作建议。</div>' +
+        ((d.log || []).slice(0, 2).length ? '<div class="mini-note">' + d.log.slice(0, 2).map(esc).join("<br>") + "</div>" : "");
+    }
+    const bw = $("#btnThsWatch");
+    if (bw) bw.addEventListener("click", () => {
+      const cur = FA.watch();
+      const add = (d.quotes || []).map((q) => {
+        const m = q.code.match(/^([A-Za-z]{1,2})\d{3,4}$/);
+        return m ? (m[1].toUpperCase() + "0") : null;
+      }).filter((s) => s && !cur.includes(s));
+      if (!add.length) { alert("自选已全部同步过"); return; }
+      FA.setWatch(cur.concat(add));
+      alert("已加入 " + add.join("、") + "（主力连续合约）");
+      if (FA.pollQuotes) FA.pollQuotes(true);
+    });
+  }
     const bw = $("#btnThsWatch");
     if (bw) bw.addEventListener("click", () => {
       // RM2701 → RM0 主力映射后并入应用自选

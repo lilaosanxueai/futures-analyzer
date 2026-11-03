@@ -3523,6 +3523,121 @@ async def signals_batch(symbols: str = ""):
     return {"ok": True, "signals": results, "count": len(results)}
 
 
+def _position_advice(pos: dict, sig: dict) -> dict:
+    """持仓健康评估 + 操作建议（持有/增仓/减仓/平仓 + 具体点位）"""
+    sym = pos.get("symbol", "")
+    direction = pos.get("direction", "long")
+    entry = pos.get("avg_entry") or 0
+    pnl = pos.get("float_pnl") or 0
+    lots = pos.get("lots") or 1
+
+    # 信号方向 vs 持仓方向
+    sig_dir = sig.get("direction", "watch")
+    conf = sig.get("confidence", 0)
+    trap = sig.get("trap_risk", 0) or 0
+    aligned = (direction == "long" and sig_dir == "long") or (direction == "short" and sig_dir == "short")
+
+    # 健康等级
+    if aligned and conf >= 55 and trap < 60:
+        health = "healthy"
+        health_txt = "✅ 健康"
+    elif aligned and conf >= 40:
+        health = "caution"
+        health_txt = "⚠️ 谨慎持有"
+    elif trap >= 70:
+        health = "danger"
+        health_txt = "🔴 高危"
+    elif not aligned and conf >= 55:
+        health = "danger"
+        health_txt = "🔴 信号反转"
+    else:
+        health = "caution"
+        health_txt = "⚠️ 中性"
+
+    # 操作建议 + 点位
+    sign = 1 if direction == "long" else -1
+    # 止损：入场价 ± 20 点（或波幅的 1.5 倍，取小值）
+    intraday = sig.get("intraday_range") or 30
+    stop_pts = min(20, intraday * 0.5)
+    stop_price = round(entry - sign * stop_pts, 1)
+    target_price = round(entry + sign * stop_pts * 2, 1)  # 2:1 盈亏比
+
+    if health == "healthy" and conf >= 65 and trap < 50:
+        action = "增仓"
+        add_price = round(entry + sign * 5, 1)  # 回踩加仓
+        action_detail = f"回调至 {add_price} 附近可加 1 手，止损 {stop_price}，目标 {target_price}"
+    elif health == "healthy":
+        action = "持有"
+        action_detail = f"止损 {stop_price}，目标 {target_price}，浮盈回撤 50% 离场"
+    elif health == "caution":
+        action = "持有观察"
+        action_detail = f"收紧止损至 {stop_price}，若跌破立即离场"
+    elif health == "danger" and pnl < -10:
+        action = "平仓"
+        action_detail = f"建议立即平仓（信号{('多' if sig_dir=='long' else '空' if sig_dir=='short' else '观望')}，浮亏 {pnl:+.0f} 点）"
+    elif health == "danger":
+        action = "减仓"
+        action_detail = f"减半至 {lots/2 if lots >= 2 else '最少'} 手，止损收紧至 {stop_price}"
+    else:
+        action = "持有"
+        action_detail = f"止损 {stop_price}，目标 {target_price}"
+
+    # 组合证据
+    evidence = []
+    if sig.get("capital_flow"):
+        evidence.append(f"资金{sig['capital_flow']}")
+    if sig.get("regime"):
+        evidence.append(f"{sig['regime']}")
+    if trap >= 60:
+        evidence.append(f"陷阱{trap}/100")
+
+    return {
+        "symbol": sym,
+        "direction": direction,
+        "lots": lots,
+        "entry": entry,
+        "float_pnl": pnl,
+        "health": health,
+        "health_txt": health_txt,
+        "action": action,
+        "action_detail": action_detail,
+        "stop_price": stop_price,
+        "target_price": target_price,
+        "signal_dir": sig_dir,
+        "signal_conf": conf,
+        "trap_risk": trap,
+        "evidence": "；".join(evidence[:3]),
+    }
+
+
+@app.get("/api/position-advice")
+async def position_advice():
+    """持仓实时健康 + 操作建议（结合 THS 持仓 + 方向信号 + 实录风控）"""
+    positions = THS_SYNC.get("positions") or []
+    if not positions:
+        return {"ok": True, "positions": [], "note": "当前无持仓"}
+    rp_syms = _risk_profile().get("symbols")
+    results = []
+    for pos in positions:
+        sym = _ths_pref(pos.get("symbol", ""))
+        try:
+            snap = await psych_snapshot(sym)
+            sig = _signal_from_snapshot(sym, snap, rp_syms)
+        except Exception:
+            sig = {"direction": "watch", "confidence": 0, "trap_risk": 0,
+                   "capital_flow": "", "regime": "", "evidence": []}
+        adv = _position_advice(pos, sig)
+        sv = (rp_syms or {}).get(sym)
+        if sv and sv.get("verdict") == "停":
+            adv["risk_note"] = f"G12 判停品种"
+        elif sv and sv.get("verdict") == "减":
+            adv["risk_note"] = "手数减半品种"
+        else:
+            adv["risk_note"] = ""
+        results.append(adv)
+    return {"ok": True, "positions": results, "count": len(results)}
+
+
 @app.post("/api/psych/{symbol}/ai")
 async def psych_ai(symbol: str):
     symbol = symbol.strip().upper()
