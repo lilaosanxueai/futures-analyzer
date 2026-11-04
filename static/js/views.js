@@ -1357,6 +1357,21 @@ ${(() => {
     }).join("");
   }
 
+  // 盘前就绪检查
+  const btnPremarket = $("#btnPremarket");
+  if (btnPremarket) btnPremarket.addEventListener("click", async () => {
+    btnPremarket.disabled = true;
+    try {
+      const d = await api("/api/premarket-check");
+      const checks = d.checks || [];
+      const summary = d.ready ? "✅ 全部就绪" : "⚠️ 有待处理项";
+      alert(summary + "\n\n" + checks.map((c) =>
+        (c.ok ? "✅" : "❌") + " " + c.name + ": " + c.detail
+      ).join("\n"));
+    } catch (e) { alert("检查失败：" + e.message); }
+    btnPremarket.disabled = false;
+  });
+
   // 盘面信号：四方资金 → 多/空/观望 + 短中长三期
   async function loadSignals() {
     const el = $("#signalBody");

@@ -43,6 +43,10 @@ class Assistant:
         self.root.configure(bg=BG)
         self.root.minsize(320, 240)
         self._drag = None
+        self._alert_mode = False
+        self._alert_text = ""
+        self._flash_on = False
+        self._flash_count = 0
 
         self._build_title()
         self._build_body()
@@ -105,14 +109,39 @@ class Assistant:
     def refresh(self):
         self.status_var.set(datetime.now().strftime("%H:%M:%S"))
         s = api("/api/shield")
+
+        # ★ 高危检测：查事件流有无 fatal 级 + 盾状态
+        ss = api("/api/shield-state")
+        ev = api("/api/monitor/events?limit=3")
+        has_fatal = False
+        fatal_text = ""
+        if ev:
+            items = ev.get("events") or ev.get("items") or []
+            for it in items:
+                if it.get("level") == "fatal":
+                    has_fatal = True
+                    fatal_text = str(it.get("text", ""))[:50]
+                    break
+        # 有持仓+有fatal → 闪红
+        pos_count = (ss or {}).get("active_positions", 0)
+        if has_fatal and pos_count > 0:
+            self._alert_mode = True
+            self._alert_text = fatal_text
+        else:
+            self._alert_mode = False
+
         if not s:
             self.shield_var.set("⚠ 服务离线")
             self.root.configure(bg="#2d1110")
+        elif self._alert_mode:
+            self.shield_var.set("🔴 " + (self._alert_text or "高危警报"))
+            self._flash()
         else:
             self.shield_var.set(
                 f"🛡 拦截 {s.get('blocked_today', 0)} · 违规 {s.get('forced_today', 0)}"
                 f" · 连胜 {s.get('streak', 0)} 天")
             self.root.configure(bg=BG)
+            self._flash_on = False
 
         for w in self.pos_frame.winfo_children():
             w.destroy()
@@ -203,6 +232,28 @@ class Assistant:
                  font=(FONT, 10)).pack()
         tk.Label(box, text="开仓后自动显示操作建议", bg=BG_CARD, fg=FG_DIM,
                  font=(FONT, 8)).pack(pady=(2, 12))
+
+    def _flash(self):
+        """高危模式：窗口红/暗交替闪烁"""
+        self._flash_count += 1
+        self._flash_on = not self._flash_on
+        color = "#5d1116" if self._flash_on else "#2d0508"
+        self.root.configure(bg=color)
+        # 同时更新子元素背景
+        for w in self.root.winfo_children():
+            try:
+                w.configure(bg=color)
+                for c in w.winfo_children():
+                    c.configure(bg=color)
+                    for gc in c.winfo_children():
+                        gc.configure(bg=color)
+            except tk.TclError:
+                pass
+        # 500ms 后下一闪（最多持续到下次 refresh）
+        if self._alert_mode and self._flash_count < 16:
+            self.root.after(500, self._flash)
+        else:
+            self._flash_count = 0
 
     def run(self):
         self.root.mainloop()

@@ -438,7 +438,7 @@ _THS_SCANNING = {"busy": False}  # UIA 若卡死（期货通无响应）防扫�
 
 
 async def _ths_scan_once() -> dict:
-    """读一次期货通：窗口→UIA文本→解析→更新状态（in-flight 防堆积）"""
+    """读一次期货通：窗口→UIA文本→解析（行情+持仓+账户）→更新状态"""
     if _THS_SCANNING["busy"]:
         return {"ok": False, "err": "上一次读取尚未返回（期货通无响应？），跳过本轮"}
     _THS_SCANNING["busy"] = True
@@ -452,7 +452,27 @@ async def _ths_scan_once() -> dict:
             except Exception as e:
                 return {"ok": False, "err": f"UIA 读取失败：{e}"}
             quotes, positions = _ths_parse(texts)
-            return {"ok": True, "texts": len(texts), "quotes": quotes, "positions": positions}
+            # 提取账户数据（权益/可用资金/使用率——全方位盾的资金监控用）
+            account = {}
+            for t in texts:
+                ts = str(t)
+                if "权益" in ts and ":" in ts:
+                    try:
+                        account["equity"] = float(ts.split(":")[1].replace(",", "").strip())
+                    except ValueError:
+                        pass
+                elif "可用资金" in ts and ":" in ts:
+                    try:
+                        account["available"] = float(ts.split(":")[1].replace(",", "").strip())
+                    except ValueError:
+                        pass
+                elif "资金使用率" in ts and "%" in ts:
+                    try:
+                        account["usage_pct"] = float(ts.split(":")[1].replace("%", "").strip())
+                    except ValueError:
+                        pass
+            return {"ok": True, "texts": len(texts), "quotes": quotes,
+                    "positions": positions, "account": account}
 
         r = await asyncio.to_thread(_run)
     finally:
@@ -462,9 +482,11 @@ async def _ths_scan_once() -> dict:
         THS_SYNC["last"] = {"ok": False, "err": r.get("err"), "ts": int(time.time() * 1000)}
         return r
     THS_SYNC.update(quotes=r["quotes"], positions=r["positions"],
+                    account=r.get("account") or {},
                     last={"ok": True, "texts": r["texts"], "ts": int(time.time() * 1000)})
     _ths_log(f"读取成功：{r['texts']} 元素 / {len(r['quotes'])} 条报价 / {len(r['positions'])} 笔持仓")
-    return {"ok": True, "quotes": r["quotes"], "positions": r["positions"], "texts": r["texts"]}
+    return {"ok": True, "quotes": r["quotes"], "positions": r["positions"],
+            "texts": r["texts"], "account": r.get("account") or {}}
 
 
 def _ths_pref(code: str) -> str:
@@ -553,21 +575,233 @@ async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
 
 
 async def ths_sync_loop():
-    """盯屏同步循环：开启后交易时段每 60 秒读一次期货通；镜像开关时差分落账"""
+    """盯屏同步循环：有持仓时 15 秒高频扫描，空仓时 60 秒低频。
+    全方位盾：扫描 → 风险评估 → 自动预警 → 自动日志 → 组合风控"""
     cfg = load_config().get("ths_sync") or {}
     THS_SYNC["enabled"] = bool(cfg.get("scan"))
     THS_SYNC["mirror"] = bool(cfg.get("mirror"))
-    await asyncio.sleep(90)
+    _SHIELD_STATE["prev_positions"] = {}
+    await asyncio.sleep(60)
     while True:
+        interval = 60
         try:
             now = datetime.now()
             if THS_SYNC["enabled"] and is_trading_time(now):
                 r = await _ths_scan_once()
-                if THS_SYNC["mirror"] and r.get("ok") and r.get("positions") is not None:
-                    await _ths_mirror_sync(r["positions"])
+                pos = r.get("positions") or []
+                if pos:
+                    interval = 15  # ★ 有持仓 → 高频模式
+                    await _comprehensive_shield(pos, r)
+                else:
+                    # 持仓消失 → 自动平仓日志
+                    if _SHIELD_STATE["prev_positions"]:
+                        await _shield_close_log()
+                    _SHIELD_STATE["prev_positions"] = {}
         except Exception:
             pass
-        await asyncio.sleep(60)
+        await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------- 全方位盾引擎
+
+SHIELD_STATE_DEFAULTS = {
+    "prev_positions": {},       # {symbol: {lots, entry, direction, first_seen}}
+    "daily_pnl": 0.0,          # 当日已实现盈亏
+    "alert_repeat": {},         # {key: last_ts} — 高危预警每 60s 重复
+    "trade_log": [],            # 自动交易日志（不依赖镜像）
+}
+_SHIELD_STATE = dict(SHIELD_STATE_DEFAULTS)
+
+
+async def _comprehensive_shield(positions: list[dict], scan_result: dict):
+    """全方位盾：一次扫描 → 十维风险检查 → 预警/建议/日志。
+    这是自动的、强制的、不可关闭的——安全气囊不打招呼。"""
+    now = datetime.now()
+    now_ms = int(time.time() * 1000)
+    rp = _risk_profile()
+    rp_syms = rp.get("symbols", {})
+    cfg = load_config()["discipline"]
+    alerts = []  # (level, symbol, text) — 聚合后一次性推送
+
+    # ═══ ① G12/G13 红线 ═══
+    for pos in positions:
+        sym = _ths_pref(pos.get("symbol", ""))
+        direction = pos.get("direction", "long")
+        lots = pos.get("lots") or 1
+        entry = pos.get("avg_entry") or 0
+        pnl = pos.get("float_pnl") or 0
+        side = "多" if direction == "long" else "空"
+        sv = rp_syms.get(sym, {})
+
+        if sv.get("verdict") == "停":
+            alerts.append(("fatal", sym,
+                f"🚫 G12 判停！{pos['symbol']} {side} — 历史 {sv.get('total',0):+.0f}点/{sv.get('n',0)}笔"))
+        if sv.get("dir_ban") == direction:
+            dp = sv.get(f"{'long' if direction=='long' else 'short'}_pts", 0)
+            alerts.append(("fatal", sym,
+                f"🚫 G12 方向禁令！{pos['symbol']} {side} 累计 {dp:+.0f} 点"))
+        if sv.get("verdict") == "减" and lots > 1:
+            alerts.append(("warn", sym,
+                f"⚠️ {pos['symbol']} 应减半（当前 {lots} 手）"))
+
+    hour = now.hour
+    for bh in rp.get("bad_hours", []):
+        if bh["hour"] == hour:
+            alerts.append(("warn", "", f"⏰ G13 失血时段 {hour:02d}:00（历史均 {bh['avg']:+.1f} 点）"))
+
+    # ═══ ② 持仓变化检测（加仓/减仓）═══
+    for pos in positions:
+        sym_key = pos.get("symbol", "")
+        prev = _SHIELD_STATE["prev_positions"].get(sym_key)
+        lots = pos.get("lots") or 1
+        pnl = pos.get("float_pnl") or 0
+        if prev:
+            delta = lots - prev.get("lots", 0)
+            if delta > 0 and pnl < 0:
+                alerts.append(("fatal", sym_key,
+                    f"🚫 亏损加仓/摊平！{sym_key} 从 {prev['lots']} 手加到 {lots} 手（浮动 {pnl:+.0f} 点）"))
+            elif delta > 0:
+                alerts.append(("warn", sym_key, f"⚠️ {sym_key} 加仓 {delta} 手（现 {lots} 手）"))
+            elif delta < 0:
+                _ths_log(f"{sym_key} 减仓 {abs(delta)} 手（{prev['lots']}→{lots}）")
+        else:
+            # 新持仓
+            _ths_log(f"发现新持仓：{sym_key} {'多' if pos['direction']=='long' else '空'} {lots} 手 @ {pos.get('avg_entry')}")
+
+    # ═══ ③ 资金风险监控（保证金占用/风险度）═══
+    acct = THS_SYNC.get("account") or {}
+    equity = acct.get("equity")
+    avail = acct.get("available")
+    if equity and equity > 0 and avail is not None:
+        usage_pct = acct.get("usage_pct") or (1 - avail / equity) * 100
+        if usage_pct > 50:
+            alerts.append(("warn", "", f"💰 保证金占用 {usage_pct:.0f}%（权益 {equity:,.0f} 可用 {avail:,.0f}）"))
+        elif usage_pct > 30:
+            alerts.append(("info", "", f"💰 保证金占用 {usage_pct:.0f}%"))
+
+    # ═══ ④ 组合风险（相关性/集中度）═══
+    pos_syms = {_ths_pref(p.get("symbol", "")) for p in positions}
+    CORR = {
+        "黑色系": {"RB", "HC", "I", "SF", "SM"},
+        "化工": {"MA", "TA", "EG", "SA", "FG", "V", "PP", "EG", "BU"},
+        "油脂油料": {"M", "Y", "P", "OI", "RM", "A"},
+        "有色": {"CU", "AL", "ZN", "NI"},
+    }
+    for group_name, members in CORR.items():
+        overlap = pos_syms & members
+        if len(overlap) >= 3:
+            alerts.append(("warn", "", f"🔗 {group_name} 同向持仓 {len(overlap)} 个（{', '.join(sorted(overlap))}）— 隐形杠杆"))
+
+    # ═══ ⑤ 日亏停手线 ═══
+    total_floating = sum(p.get("float_pnl") or 0 for p in positions)
+    daily_stop = float(cfg.get("daily_stop", 0) or 0)
+    if daily_stop > 0:
+        total_daily = _SHIELD_STATE["daily_pnl"] + total_floating
+        if total_daily < -daily_stop:
+            alerts.append(("fatal", "",
+                f"🛑 日亏停手线触发！今日累计 {total_daily:+.0f} 点（含浮动），超过 -{daily_stop:.0f} 上限"))
+
+    # ═══ ⑥ 高危预警重复推送（每 60s 不沉默）═══
+    for level, sym, text in alerts:
+        if level != "fatal":
+            continue
+        key = f"{sym}:{text[:20]}"
+        last = _SHIELD_STATE["alert_repeat"].get(key, 0)
+        if now_ms - last < 60000:  # 60 秒内已推过
+            continue
+        _SHIELD_STATE["alert_repeat"][key] = now_ms
+        _emit_event({
+            "id": f"shield-{now_ms}-{sym}", "ts": now_ms,
+            "kind": "diag", "etype": "SHIELD", "level": level,
+            "symbol": sym, "name": "", "dir": "down", "price": None,
+            "text": text, "chg5": 0, "chg15": 0, "threshold": 0,
+            "intl": False, "ai": "",
+        }, feishu=True, feishu_text=f"🛡️ 全方位盾预警\n{text}")
+
+    # ═══ ⑦ 自动交易日志（不依赖镜像）═══
+    new_prev = {}
+    for pos in positions:
+        sym_key = pos.get("symbol", "")
+        prev = _SHIELD_STATE["prev_positions"].get(sym_key)
+        if not prev:
+            # 新持仓 → 创建日志
+            _SHIELD_STATE["trade_log"].append({
+                "symbol": sym_key, "direction": pos.get("direction"),
+                "lots": pos.get("lots"), "entry": pos.get("avg_entry"),
+                "first_seen": now_ms, "last_pnl": pos.get("float_pnl"),
+                "date": now.strftime("%Y-%m-%d"),
+            })
+        else:
+            # 更新现有
+            for log in _SHIELD_STATE["trade_log"]:
+                if log["symbol"] == sym_key and "closed_ts" not in log:
+                    log["last_pnl"] = pos.get("float_pnl")
+                    log["lots"] = pos.get("lots")
+        new_prev[sym_key] = {
+            "lots": pos.get("lots"), "entry": pos.get("avg_entry"),
+            "direction": pos.get("direction"), "first_seen": prev["first_seen"] if prev else now_ms,
+        }
+    _SHIELD_STATE["prev_positions"] = new_prev
+
+    # 清理过期 repeat keys
+    _SHIELD_STATE["alert_repeat"] = {
+        k: v for k, v in _SHIELD_STATE["alert_repeat"].items() if now_ms - v < 300000
+    }
+
+
+async def _shield_close_log():
+    """持仓消失 → 自动记录平仓（不依赖镜像）+ AI 即时复盘"""
+    now_ms = int(time.time() * 1000)
+    for sym, prev in _SHIELD_STATE["prev_positions"].items():
+        pnl = None
+        lots = prev.get("lots", 1)
+        entry = prev.get("entry", 0)
+        direction = prev.get("direction", "long")
+        for log in _SHIELD_STATE["trade_log"]:
+            if log["symbol"] == sym and "closed_ts" not in log:
+                pnl = log.get("last_pnl")
+                log["closed_ts"] = now_ms
+                log["final_pnl"] = pnl
+                break
+        _ths_log(f"持仓消失：{sym}（浮动 {pnl:+.0f} 点）→ 自动记录平仓")
+        _emit_event({
+            "id": f"shield-close-{now_ms}-{sym}", "ts": now_ms,
+            "kind": "diag", "etype": "SHIELD_CLOSE", "level": "info",
+            "symbol": sym, "name": "", "dir": "up", "price": None,
+            "text": f"📋 {sym} 平仓（浮动 {pnl:+.0f} 点）— 已记录",
+            "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+        })
+        # ★ AI 即时复盘（150 字一句话教训，后台运行不阻塞）
+        asyncio.create_task(_shield_ai_review(sym, direction, lots, entry, pnl))
+    # 限制日志长度
+    _SHIELD_STATE["trade_log"] = _SHIELD_STATE["trade_log"][-100:]
+
+
+async def _shield_ai_review(symbol: str, direction: str, lots: float, entry: float, pnl):
+    """平仓后 AI 一句话复盘（异步后台，不阻塞扫描循环）"""
+    try:
+        side = "做多" if direction == "long" else "做空"
+        result = "盈利" if (pnl or 0) > 0 else "亏损"
+        prompt = (
+            f"你是反幻想交易教练。一笔交易刚刚平仓，用一句话（30字内）点评核心教训：\n"
+            f"- {symbol} {side} {lots}手 @ {entry}，结果 {pnl:+.0f} 点（{result}）\n"
+            f"只输出一句话，直击要害，不废话。"
+        )
+        text = await _call_ai_simple(
+            [{"role": "user", "content": prompt}], max_tokens=100)
+        if text and text.strip():
+            _ths_log(f"AI 复盘 {symbol}: {text.strip()[:60]}")
+            _emit_event({
+                "id": f"shield-review-{int(time.time()*1000)}-{symbol}",
+                "ts": int(time.time() * 1000),
+                "kind": "diag", "etype": "SHIELD_REVIEW", "level": "info",
+                "symbol": _ths_pref(symbol), "name": "", "dir": "up",
+                "price": None,
+                "text": f"💬 {symbol} {pnl:+.0f}点 | {text.strip()[:60]}",
+                "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+            })
+    except Exception:
+        pass  # AI 失败不影响主流程
 
 
 _BACKUP_STATE = {"day": ""}
@@ -655,6 +889,21 @@ async def _static_cache_headers(request: Request, call_next):
 
 
 # ------- 期货通盯屏同步端点（THS_SYNC 状态与 ths_sync_loop 定义在 lifespan 之前）-------
+
+@app.get("/api/shield-state")
+async def shield_state():
+    """全方位盾状态：当前风险概览"""
+    positions = THS_SYNC.get("positions") or []
+    return {
+        "ok": True,
+        "active_positions": len(positions),
+        "monitoring": THS_SYNC["enabled"],
+        "scan_interval": "15s" if positions else "60s",
+        "trade_log_count": len(_SHIELD_STATE["trade_log"]),
+        "trade_log": _SHIELD_STATE["trade_log"][-10:],
+        "prev_positions": list(_SHIELD_STATE["prev_positions"].keys()),
+        "account": THS_SYNC.get("account") or {},
+    }
 
 @app.get("/api/ths-sync")
 async def ths_sync_get():
@@ -3615,13 +3864,25 @@ _POS_HEALTH_LAST: dict[str, str] = {}  # symbol → last health（变化才推�
 
 
 async def _pos_health_monitor():
-    """持仓健康监控：每次盯屏扫描后评估，健康状态变化时推事件流+飞书"""
+    """持仓健康监控：基于 THS 扫描结果（不依赖镜像），健康状态变化时推事件流+飞书"""
     while True:
         await asyncio.sleep(45)
         try:
             if not is_trading_time(datetime.now()):
                 continue
+            # ★ 优先用 THS 实时持仓（不管镜像开没开），兜底用应用内记录
             positions = THS_SYNC.get("positions") or []
+            if not positions:
+                # 兜底：应用内镜像/手动持仓
+                trades = _load_trades()
+                positions = []
+                for t in trades:
+                    if _is_real_live(t) or t.get("source") == "ths-sync":
+                        positions.append({
+                            "symbol": t["symbol"], "direction": t["direction"],
+                            "lots": t.get("lots", 1), "avg_entry": t.get("entry"),
+                            "float_pnl": None,
+                        })
             if not positions:
                 _POS_HEALTH_LAST.clear()
                 continue
@@ -3664,8 +3925,25 @@ async def _pos_health_monitor():
 
 @app.get("/api/position-advice")
 async def position_advice():
-    """持仓实时健康 + 操作建议（结合 THS 持仓 + 方向信号 + 实录风控）"""
+    """持仓实时健康 + 操作建议。
+    优先用 THS 实时扫描持仓（不依赖镜像），兜底用应用内记录。"""
+    # ★ THS 实时持仓（不管镜像开没开）
     positions = THS_SYNC.get("positions") or []
+    if not positions:
+        # 兜底：应用内持仓
+        trades = _load_trades()
+        for t in trades:
+            if (t.get("status") == "open" and
+                (t.get("source") in (None, "", "ths-sync"))):
+                q = _quote_cache.get(t["symbol"], (0, {}))[1] or {}
+                price = q.get("last") or t.get("entry")
+                sign = 1 if t["direction"] == "long" else -1
+                pnl = round(sign * ((price or t.get("entry", 0)) - t.get("entry", 0)), 1) if price else None
+                positions.append({
+                    "symbol": t["symbol"], "direction": t["direction"],
+                    "lots": t.get("lots", 1), "avg_entry": t.get("entry"),
+                    "float_pnl": pnl,
+                })
     if not positions:
         return {"ok": True, "positions": [], "note": "当前无持仓"}
     rp_syms = _risk_profile().get("symbols")
@@ -5690,7 +5968,7 @@ async def alerts_del(alert_id: str):
 @app.get("/api/shield")
 async def shield_status():
     """🛡️ 盾状态：今日拦截/违规、持仓风险敞口、日亏停手线消耗、纪律连胜、活跃预警"""
-    trades = _load_trades()
+    trades = _load_full_trades()  # 完整历史：行为指标（连胜/违规）需要全量数据
     cfg = load_config()["discipline"]
     today = datetime.now().strftime("%Y-%m-%d")
     acct = float(cfg.get("account_size") or 0)
@@ -5739,15 +6017,18 @@ async def shield_status():
     all_dates = sorted(t.get("date") for t in trades if t.get("date"))
     earliest = all_dates[0] if all_dates else None
     streak = 0
-    d = datetime.now().date()
-    if today in viol_days:
-        d -= timedelta(days=1)
-    while streak < 999:
-        ds = d.strftime("%Y-%m-%d")
-        if ds in viol_days or (earliest and ds < earliest):
-            break
-        streak += 1
-        d -= timedelta(days=1)
+    if not all_dates:
+        streak = 0  # 无任何记录 = 未证明任何事，不是 999
+    else:
+        d = datetime.now().date()
+        if today in viol_days:
+            d -= timedelta(days=1)
+        while streak < 999:
+            ds = d.strftime("%Y-%m-%d")
+            if ds in viol_days or (earliest and ds < earliest):
+                break
+            streak += 1
+            d -= timedelta(days=1)
     return {
         "ok": True, "today": today,
         "blocked_today": blocked_today, "forced_today": forced_today,
