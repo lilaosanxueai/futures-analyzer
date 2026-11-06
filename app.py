@@ -3975,15 +3975,6 @@ PSYCH_AI_PROMPT = """你是反幻想交易教练。以下是程序实时计算�
 结尾固定一句：以上为资金博弈推演，不构成投资建议。"""
 
 
-@app.post("/api/psych/{symbol}/ai")
-async def psych_ai(symbol: str):
-    symbol = symbol.strip().upper()
-    try:
-        snap = await psych_snapshot(symbol)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"快照获取失败：{e}")
-
-
 # ---------------------------------------------------------------- 方向研判引擎（四方资金 → 多/空/观望）
 
 _SIGNAL_WEIGHTS = {
