@@ -167,6 +167,7 @@ DEFAULT_CONFIG = {
         "mirror": False,             # 持仓差分镜像落账（只动 ths-sync 单）
     },
     "ths_symbol_map": {},            # THS 品种代码/名称映射（扫描时自动更新，持久化）
+    "ths_allowlist": [],             # THS 同步品种白名单（前缀，空=全部接收）——过滤扫描页面里混入的非自选品种
     # 风控参数（诊断引擎的预警阈值，用户按自身账户设定，AI 不代定）
     "discipline": {
         "account_size": 0.0,       # 账户权益（0=未设置，风险类检查跳过）
@@ -515,13 +516,18 @@ async def _ths_scan_once() -> dict:
                     last={"ok": True, "texts": r["texts"], "ts": int(time.time() * 1000)})
     # ★ 自动同步自选：THS 的品种 = 应用的品种（品种/代码/名称都以 THS 为准）
     if r["quotes"]:
+        # ★ 白名单：期货通页面混入的非自选品种（行情面板等）一律不收
+        allow = set(load_config().get("ths_allowlist") or [])
         ths_conts = set()
         sym_map = {}  # 连续合约 → {ths_code, ths_name}
         for q in r["quotes"]:
             code = q.get("code", "")
             m2 = re.match(r"^([A-Za-z]{1,2})\d{3,4}$", code)
             if m2:
-                cont = m2.group(1).upper() + "0"
+                pfx = m2.group(1).upper()
+                cont = pfx + "0"
+                if allow and pfx not in allow:
+                    continue
                 ths_conts.add(cont)
                 # THS 名称格式：菜粕2701（原始名通常已含月份，只补缺失时才拼接）
                 ths_name = q.get("name", "")
@@ -532,7 +538,7 @@ async def _ths_scan_once() -> dict:
                     display_name = f"{base_name}{month}"
                 else:
                     display_name = base_name or code
-                sym_map[cont] = {"ths_code": code, "ths_name": display_name,
+                sym_map[cont] = {"ths_code": _ths_display_code(code), "ths_name": display_name,
                                  "base_name": base_name}
         if ths_conts:
             _MONITOR["watch"] = ths_conts
@@ -552,6 +558,22 @@ async def _ths_scan_once() -> dict:
 def _ths_pref(code: str) -> str:
     m = re.match(r"^([A-Za-z]{1,2})", code or "")
     return (m.group(1).upper() + "0") if m else (code or "")
+
+
+# 大商所/上期能源 交易所行情代码用小写（c/v/m/sc），郑商所/上期所/中金所用大写——与期货通显示一致
+_THS_LOWER_PREFIX = {
+    "A", "B", "BB", "C", "CS", "EB", "EG", "FB", "I", "J", "JD", "JM", "L",
+    "LH", "LG", "M", "P", "PG", "PL", "PP", "RR", "V", "Y",
+    "SC", "LU", "NR", "EC", "BC",
+}  # 大商所 + 上期能源：小写；郑商所/上期所/中金所：大写
+
+
+def _ths_display_code(code: str) -> str:
+    m = re.match(r"^([A-Za-z]{1,2})(\d{3,4})$", code or "")
+    if not m:
+        return (code or "").upper()
+    pfx, month = m.group(1), m.group(2)
+    return (pfx.lower() if pfx.upper() in _THS_LOWER_PREFIX else pfx.upper()) + month
 
 
 async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
