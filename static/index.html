@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261107g">
+<link rel="stylesheet" href="/static/style.css?v=20261107h">
 </head>
 <body>
 
@@ -222,47 +222,42 @@
       <div class="trades-left">
         <div class="card">
           <div class="card-head">
-            <h2>🐑 散户缺陷画像 <span class="muted small">11 维 · 真实交易数据判定</span></h2>
-            <button class="btn ghost sm" id="btnShieldWeekly">📋 盾周报</button>
-          </div>
-          <div id="flawBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head">
-            <h2>👤 交易者画像（AI 记忆）</h2>
-            <button class="btn ghost sm" id="btnPfSynthesize2">🧠 AI 综合画像</button>
+            <h2>👤 交易画像 <span class="muted small">真实记录提炼 · AI 记忆 + 缺陷 + 规则</span></h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnPfSynthesize2">🧠 综合画像</button>
+              <button class="btn ghost sm" id="btnShieldWeekly">📋 盾周报</button>
+            </div>
           </div>
           <div id="pfSummaryBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
           <div style="padding:0 14px 10px;display:flex;gap:8px">
             <input id="pfLesson2" placeholder="补充新教训" style="flex:1;font-size:12px">
             <button class="btn ghost sm" id="btnPfLesson2">添加</button>
           </div>
+          <div class="sec-divider"></div>
+          <div class="sec-title">🐑 11 维缺陷判定</div>
+          <div id="flawBody" style="padding:6px 14px 10px"><div class="empty">加载中…</div></div>
+          <div class="sec-divider"></div>
+          <div class="sec-title">📋 从你的交易挖出的规则</div>
+          <div id="mineBody" style="padding:6px 14px 10px"><div class="empty">加载中…</div></div>
         </div>
       </div>
       <div class="trades-right">
         <div class="card">
-          <div class="card-head"><h2>📈 月度进步曲线 <span class="muted small">真实记录 · 我在变好吗</span></h2></div>
-          <div id="monthlyBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>🛡️ 实录风控 <span class="muted small">历史战绩 → 硬性风控线（已接入开仓闸门 G12/G13）</span></h2></div>
+          <div class="card-head"><h2>🛡️ 品种交易数据 <span class="muted small">实录风控 → G12/G13 硬性拦截线</span></h2></div>
           <div id="riskBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
         <div class="card">
-          <div class="card-head"><h2>📋 个性化规则 <span class="muted small">从你的真实交易挖掘</span></h2></div>
-          <div id="mineBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>🚪 出场质量 <span class="muted small">执行纪律温度计</span></h2></div>
-          <div id="exitQBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>🎭 情绪画像 <span class="muted small">什么心情在亏钱</span></h2></div>
-          <div id="moodBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>🏆 违规成绩单 <span class="muted small">强行 vs 听劝</span></h2></div>
-          <div id="violationBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+          <div class="card-head"><h2>📈 成长与纪律 <span class="muted small">月度曲线 · 出场 · 情绪 · 违规</span></h2></div>
+          <div id="monthlyBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
+          <div class="sec-divider"></div>
+          <div class="sec-title">🚪 出场质量</div>
+          <div id="exitQBody" style="padding:6px 14px 10px"><div class="empty">加载中…</div></div>
+          <div class="sec-divider"></div>
+          <div class="sec-title">🎭 情绪画像</div>
+          <div id="moodBody" style="padding:6px 14px 10px"><div class="empty">加载中…</div></div>
+          <div class="sec-divider"></div>
+          <div class="sec-title">🏆 违规成绩单</div>
+          <div id="violationBody" style="padding:6px 14px 10px"><div class="empty">加载中…</div></div>
         </div>
         <div class="card">
           <div class="card-head">
@@ -479,8 +474,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261107g"></script>
-<script src="/static/js/views.js?v=20261107g"></script>
-<script src="/static/js/chat.js?v=20261107g"></script>
+<script src="/static/js/base.js?v=20261107h"></script>
+<script src="/static/js/views.js?v=20261107h"></script>
+<script src="/static/js/chat.js?v=20261107h"></script>
 </body>
 </html>

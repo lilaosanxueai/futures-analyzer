@@ -199,6 +199,13 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
 #newsCard #newsList, #hotCard #hotList { flex: 1; }
 #intlCard .intl-row { flex: 1; }
 
+/* ---- 卡内分节（人格分析整合卡） ---- */
+.sec-divider { border-top: 1px dashed var(--line-soft); margin: 2px 0; }
+.sec-title {
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em; padding: 8px 14px 2px;
+}
+
 /* ---- 期货通数据源状态条（真实交易页） ---- */
 .ths-src-strip {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
