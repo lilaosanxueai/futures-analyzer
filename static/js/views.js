@@ -854,7 +854,8 @@ ${(() => {
     el.style.color = "";
   }
   // ⚡ 一键模拟：现价入场 + ATR 建议止损 + 2:1 目标 + 建议手数（基于账户风险预算）
-  $("#btnSimSetup").addEventListener("click", async () => {
+  const _btnSimSetup = $("#btnSimSetup");
+  if (_btnSimSetup) _btnSimSetup.addEventListener("click", async () => {
     const sym = $("#tfSymbol").value;
     if (!sym) { alert("先选品种"); return; }
     const btn = $("#btnSimSetup");
@@ -907,7 +908,8 @@ ${(() => {
       }
     } catch (e) { /* ignore */ }
   }
-  $("#tfSymbol").addEventListener("change", autoFillPrice);
+  const _tfSymbol = $("#tfSymbol");
+  if (_tfSymbol) _tfSymbol.addEventListener("change", autoFillPrice);
   ["tfStop", "tfLots", "tfTarget"].forEach((id) => {
     const el = $("#" + id);
     if (el) {
@@ -915,9 +917,10 @@ ${(() => {
       el.addEventListener("input", () => { ensureMults().then(updateRiskPreview); });
     }
   });
-  ensureMults().then(updateRiskPreview);
 
-  $("#tradeForm").addEventListener("submit", async (e) => {
+  // 手动模拟表单已移除（模拟全走自动引擎）；绑定保留兼容，元素不存在即跳过
+  const _tradeForm = $("#tradeForm");
+  if (_tradeForm) _tradeForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const warnBox = $("#tradeWarnings");
     warnBox.classList.add("hidden");

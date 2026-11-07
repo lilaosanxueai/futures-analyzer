@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261107f">
+<link rel="stylesheet" href="/static/style.css?v=20261107g">
 </head>
 <body>
 
@@ -203,35 +203,10 @@
           <div class="card-head"><h2>🎯 解禁试炼场 <span class="muted small">实盘判停品种 → 模拟重建优势</span></h2></div>
           <div id="trialBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
-        <div class="card">
-          <div class="card-head"><h2>＋ 记一笔模拟（开仓即检）</h2></div>
-          <form id="tradeForm" class="trade-form">
-            <div class="form-row">
-              <select id="tfSymbol" class="select" required><option value="">品种</option></select>
-              <select id="tfDir" class="select" required>
-                <option value="long">做多</option>
-                <option value="short">做空</option>
-              </select>
-            </div>
-            <div class="form-row four">
-              <input id="tfEntry" type="number" step="any" placeholder="开仓价" required>
-              <input id="tfStop" type="number" step="any" placeholder="止损点数（必填）" required>
-              <input id="tfTarget" type="number" step="any" placeholder="目标点数">
-              <input id="tfLots" type="number" step="any" placeholder="手数" value="1">
-            </div>
-            <div class="form-row">
-              <input id="tfNote" placeholder="开仓理由（写给诊断引擎和未来的自己）">
-              <button type="button" class="btn ghost sm" id="btnSimSetup" title="自动填入现价+ATR建议止损+2:1目标+建议手数">⚡ 一键模拟</button>
-              <button type="submit" class="btn primary">记入日志</button>
-            </div>
-            <div class="mini-note" id="riskPreview" style="margin-top:6px"></div>
-          </form>
-          <div id="tradeWarnings" class="trade-warnings hidden"></div>
-        </div>
       </div>
       <div class="trades-right">
         <div class="card">
-          <div class="card-head"><h2>🤖 模拟交易日志 <span class="muted small">系统自动 + 手动模拟</span></h2></div>
+          <div class="card-head"><h2>🤖 模拟交易日志 <span class="muted small">AI 信号过滤 · 系统全自动</span></h2></div>
           <table class="table trades-table">
             <thead><tr><th>日期</th><th>品种</th><th>方向</th><th class="r">开仓价</th><th class="r">止损</th><th class="r">目标</th><th class="r">浮动/结果</th><th>操作</th></tr></thead>
             <tbody id="simTradesBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
@@ -504,8 +479,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261107f"></script>
-<script src="/static/js/views.js?v=20261107f"></script>
-<script src="/static/js/chat.js?v=20261107f"></script>
+<script src="/static/js/base.js?v=20261107g"></script>
+<script src="/static/js/views.js?v=20261107g"></script>
+<script src="/static/js/chat.js?v=20261107g"></script>
 </body>
 </html>
