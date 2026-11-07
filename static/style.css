@@ -193,12 +193,11 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
   align-items: stretch;   /* 同排卡片等高——模块整体更长 */
 }
 /* 拉伸后内容区吃满卡片，而不是留白 */
-#deskCard, #shieldCard, #newsAlertCard, #intlHotCard { display: flex; flex-direction: column; }
+#deskCard, #shieldCard, #newsAlertCard, #intlCard, #hotCard { display: flex; flex-direction: column; }
 #deskBody { flex: 1; overflow-y: auto; }
 #shieldGrid { flex: 1; }
-#newsAlertCard #newsList, #intlHotCard #hotList { flex: 1; }
-/* 宽屏下外盘·热度横跨两列，下排不再右侧留白 */
-@media (min-width: 1100px) { #intlHotCard { grid-column: span 2; } }
+#newsAlertCard #newsList, #hotCard #hotList { flex: 1; }
+#intlCard .intl-row { flex: 1; }
 
 /* ---- 市场脉搏条 ---- */
 .pulse-bar {
