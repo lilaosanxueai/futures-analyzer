@@ -551,6 +551,23 @@ async def _ths_scan_once() -> dict:
             except Exception:
                 pass
     _ths_log(f"读取成功：{r['texts']} 元素 / {len(r['quotes'])} 条报价 / {len(r['positions'])} 笔持仓")
+    # ★ 账户权益历史化：每次扫描记录（≥5 分钟间隔），90 天窗口——真金白银的资金曲线
+    try:
+        _eq = (r.get("account") or {}).get("equity")
+        if _eq and float(_eq) > 0:
+            now_ms2 = int(time.time() * 1000)
+            _eq_file = BASE_DIR / "equity_history.json"
+            hist = []
+            if _eq_file.exists():
+                hist = json.loads(_eq_file.read_text(encoding="utf-8"))
+            if not hist or now_ms2 - hist[-1].get("ts", 0) >= 5 * 60 * 1000:
+                hist.append({"ts": now_ms2, "equity": float(_eq),
+                             "available": (r.get("account") or {}).get("available")})
+                cutoff = now_ms2 - 90 * 86400 * 1000
+                hist = [h for h in hist if h.get("ts", 0) > cutoff][-26000:]
+                _atomic_write(_eq_file, json.dumps(hist, ensure_ascii=False))
+    except Exception:
+        pass  # 权益记录失败不影响盯屏
     return {"ok": True, "quotes": r["quotes"], "positions": r["positions"],
             "texts": r["texts"], "account": r.get("account") or {}}
 
@@ -1248,6 +1265,7 @@ async def _compute_trading_desk():
         try:
             snap = await psych_snapshot(sym)
             sig = _signal_from_snapshot(sym, snap, rp_syms)
+            _track_signal(sym, sig)   # ★ 命中率自校准：交易台主路径也落账
         except Exception:
             sig = {"direction": "watch", "confidence": 0, "evidence": [], "trap_risk": 0,
                    "regime": "", "capital_flow": "", "last": None, "change_pct": None,
@@ -4286,7 +4304,7 @@ async def signal_one(symbol: str):
 
 @app.get("/api/signals")
 async def signals_batch(symbols: str = ""):
-    """批量方向研判（自选品种或指定列表）"""
+    """批量方向研判（自选品种或指定列表）+ 信号追踪落账"""
     if symbols:
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:10]
     else:
@@ -4297,10 +4315,156 @@ async def signals_batch(symbols: str = ""):
     for sym in syms:
         try:
             snap = await psych_snapshot(sym)
-            results.append(_signal_from_snapshot(sym, snap, rp_syms))
+            sig = _signal_from_snapshot(sym, snap, rp_syms)
+            results.append(sig)
+            _track_signal(sym, sig)   # ★ 命中率自校准：方向信号落账，次日结算
         except Exception:
             continue
     return {"ok": True, "signals": results, "count": len(results)}
+
+
+# ═══════════════ 信号命中率自校准（系统吃自己的狗粮）═══════════════
+# 信号引擎每天给方向判断——它的判断也该被验证。口径：
+# · 只记 direction ∈ {long, short} 且置信 ≥50 的事件（watch 不算预测）
+# · 兑现 = 次日收盘 vs 次日开盘：做多事件要 close>open，做空反之
+# · 隔日跳空没法预知，开盘进/收盘出是唯一公平口径
+
+_SIG_TRACK_FILE = BASE_DIR / "signal_track.json"
+_SIG_TRACK: dict = {"events": [], "loaded": False}
+
+
+def _sig_track_load() -> None:
+    if _SIG_TRACK["loaded"]:
+        return
+    try:
+        if _SIG_TRACK_FILE.exists():
+            d = json.loads(_SIG_TRACK_FILE.read_text(encoding="utf-8"))
+            _SIG_TRACK["events"] = d.get("events") or []
+    except Exception:
+        _SIG_TRACK["events"] = []
+    _SIG_TRACK["loaded"] = True
+
+
+def _sig_track_save() -> None:
+    try:
+        _atomic_write(_SIG_TRACK_FILE, json.dumps({"events": _SIG_TRACK["events"]}, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _track_signal(sym: str, sig: dict) -> None:
+    """方向信号落账：同品种同方向 4 小时内不重复记（一轮扫描只留一条）。"""
+    if sig.get("direction") not in ("long", "short") or (sig.get("confidence") or 0) < 50:
+        return
+    try:
+        _sig_track_load()
+        now_ms = int(time.time() * 1000)
+        today = datetime.now().strftime("%Y-%m-%d")
+        evs = _SIG_TRACK["events"]
+        # 去重：同品种同方向当日已有未结算事件 → 更新置信峰值即可
+        for e in evs:
+            if (e.get("symbol") == sym and e.get("direction") == sig["direction"]
+                    and e.get("date") == today and e.get("settled") is None):
+                e["confidence"] = max(e.get("confidence", 0), sig.get("confidence", 0))
+                return
+        evs.append({
+            "symbol": sym, "direction": sig["direction"],
+            "confidence": sig.get("confidence", 0),
+            "date": today, "ts": now_ms, "settled": None,
+        })
+        # 只留 60 天
+        cutoff = now_ms - 60 * 86400 * 1000
+        _SIG_TRACK["events"] = [e for e in evs if e.get("ts", 0) > cutoff][-5000:]
+        _sig_track_save()
+    except Exception:
+        pass
+
+
+async def _sig_settle_daily() -> dict:
+    """结算：事件日 T+1 的日线 open/close → 判兑现。返回更新数量。"""
+    _sig_track_load()
+    evs = _SIG_TRACK["events"]
+    pending = [e for e in evs if e.get("settled") is None and e.get("date")]
+    if not pending:
+        return {"settled": 0}
+    # 按品种批量拉日线（缓存 60s，重复调用便宜）
+    bars_map: dict[str, list] = {}
+    for sym in {e["symbol"] for e in pending}:
+        try:
+            bars_map[sym] = await get_daily(sym, max_age=3600)
+        except Exception:
+            bars_map[sym] = []
+    by_date: dict[tuple, dict] = {}
+    for sym, bars in bars_map.items():
+        for b in bars:
+            d = str(b.get("date") or b.get("datetime") or "")[:10]
+            if d:
+                by_date[(sym, d)] = b
+    n = 0
+    for e in pending:
+        # 找事件日之后第一个交易日（跳过周末/休市）
+        nxt = None
+        sym_bars = bars_map.get(e["symbol"]) or []
+        dates = [str(b.get("date") or b.get("datetime") or "")[:10] for b in sym_bars]
+        try:
+            i = dates.index(e["date"])
+            if i + 1 < len(dates):
+                nxt = dates[i + 1]
+        except ValueError:
+            continue
+        if not nxt:
+            # 次日日线未出（周末/事件日就是最新）→ 留待下次
+            continue
+        b = by_date.get((e["symbol"], nxt)) or {}
+        o, c = b.get("open"), b.get("close")
+        if o is None or c is None:
+            continue
+        e["next_date"] = nxt
+        e["ret_pct"] = round((c - o) / o * 100, 2)
+        e["hit"] = (e["direction"] == "long" and c > o) or (e["direction"] == "short" and c < o)
+        e["settled"] = int(time.time() * 1000)
+        n += 1
+    if n:
+        _sig_track_save()
+    return {"settled": n}
+
+
+@app.get("/api/signal-accuracy")
+async def signal_accuracy(settle: int = 1):
+    """信号引擎战绩：命中率/平均幅度/分品种/分置信档——系统对自己的信号 accountable。"""
+    stats: dict = {"total": 0, "hit": 0, "ret_signed": [], "by_conf": {}, "by_symbol": {}}
+    if settle:
+        await _sig_settle_daily()
+    _sig_track_load()
+    for e in _SIG_TRACK["events"]:
+        if e.get("settled") is None or e.get("hit") is None:
+            continue
+        stats["total"] += 1
+        stats["hit"] += 1 if e["hit"] else 0
+        sg = e["ret_pct"] if e["direction"] == "long" else -e["ret_pct"]  # 方向化收益
+        stats["ret_signed"].append(sg)
+        band = f"{int(e.get('confidence', 0) // 10) * 10}-{int(e.get('confidence', 0) // 10) * 10 + 9}"
+        stats["by_conf"].setdefault(band, {"n": 0, "hit": 0})
+        stats["by_conf"][band]["n"] += 1
+        stats["by_conf"][band]["hit"] += 1 if e["hit"] else 0
+        stats["by_symbol"].setdefault(e["symbol"], {"n": 0, "hit": 0})
+        stats["by_symbol"][e["symbol"]]["n"] += 1
+        stats["by_symbol"][e["symbol"]]["hit"] += 1 if e["hit"] else 0
+    n = stats["total"]
+    rets = stats.pop("ret_signed")
+    out = {
+        "ok": True, "total": n,
+        "hit_rate": round(stats["hit"] / n * 100, 1) if n else None,
+        "avg_ret_pct": round(sum(rets) / len(rets), 3) if rets else None,
+        "cum_ret_pct": round(sum(rets), 2) if rets else None,
+        "pending": sum(1 for e in _SIG_TRACK["events"] if e.get("settled") is None),
+        "by_conf": {k: {"n": v["n"], "hit_rate": round(v["hit"] / v["n"] * 100, 1)}
+                    for k, v in sorted(stats["by_conf"].items())},
+        "by_symbol": {k: {"n": v["n"], "hit_rate": round(v["hit"] / v["n"] * 100, 1)}
+                      for k, v in sorted(stats["by_symbol"].items(), key=lambda kv: -kv[1]["n"])},
+        "note": "口径：方向信号(置信≥50) → 次日开盘进/收盘出的方向化收益",
+    }
+    return out
 
 
 def _position_advice(pos: dict, sig: dict) -> dict:

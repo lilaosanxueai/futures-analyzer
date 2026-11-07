@@ -449,6 +449,27 @@
     return '<div class="event' + lvl + '"><div class="ehead"><span class="etime">' + hhmm + "</span>" + head + "</div>" + body + "</div>";
   }
 
+  // ★ 语音播报（中文 TTS，浏览器原生，零依赖）：盯着盘时用耳朵收致命警
+  let _lastSpeakTs = 0;
+  function speakAlert(ev) {
+    try {
+      if (!("speechSynthesis" in window)) return;
+      if (!localStorage.getItem("fa_voice_on")) return;   // 默认关，盾卡开关打开后播报
+      const now = Date.now();
+      if (now - _lastSpeakTs < 8000) return;              // 8s 内最多一条，避免连环轰炸
+      _lastSpeakTs = now;
+      const u = new SpeechSynthesisUtterance(ev.text.replace(/[🚨🚫🛑⚠️💡🔄💰📊🔗⏰🛡️📺]/g, "").slice(0, 60));
+      u.lang = "zh-CN"; u.rate = 1.05; u.volume = 1;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    } catch (e) { /* ignore */ }
+  }
+  FA.toggleVoice = function (on) {
+    if (on) localStorage.setItem("fa_voice_on", "1");
+    else localStorage.removeItem("fa_voice_on");
+    if (on) { try { const u = new SpeechSynthesisUtterance("语音播报已开启"); u.lang = "zh-CN"; speechSynthesis.speak(u); } catch (e) {} }
+  };
+
   async function pollEvents() {
     const el = $("#eventList");
     if (!el) return;
@@ -467,6 +488,7 @@
           desktopNotify(ev);
           beepAlert();           // ★ 声音警报
           flashTitle(true);      // ★ 标题闪烁
+          speakAlert(ev);        // ★ 语音播报（开关控制）
         }
       });
       // 无 fatal 事件时停止闪烁
@@ -615,8 +637,14 @@
         : '<span class="pb-ok">🛡️ 安全</span>';
       el.innerHTML = sess + '<span class="pb-chips">' + chips.join(" · ") + "</span>" +
         alertChip + '<span class="muted small pb-sys">' +
-        (d.ths_ok ? "📺已连" : "📺未连") + " · 自选" + (d.watch_n || 0) + "</span>";
+        (d.ths_ok ? "📺已连" : "📺未连") + " · 自选" + (d.watch_n || 0) +
+        ' · <a class="link-btn" id="pbVoice">' + (localStorage.getItem("fa_voice_on") ? "🔊播报开" : "🔇播报关") + "</a></span>";
       el.classList.toggle("pb-alarm", !!d.fatal);
+      const vb = $("#pbVoice");
+      if (vb) vb.addEventListener("click", () => {
+        FA.toggleVoice(!localStorage.getItem("fa_voice_on"));
+        vb.textContent = localStorage.getItem("fa_voice_on") ? "🔊播报开" : "🔇播报关";
+      });
     } catch (e) { /* ignore */ }
   }
   FA.pollPulse = pollPulse;
