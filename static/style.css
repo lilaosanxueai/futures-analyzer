@@ -205,6 +205,17 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
   font-size: 11px; font-weight: 700; color: var(--muted);
   text-transform: uppercase; letter-spacing: .04em; padding: 8px 14px 2px;
 }
+/* 折叠区（默认收起，点开看全量） */
+details.fold { margin: 4px 0; }
+details.fold > summary {
+  cursor: pointer; font-size: 12px; color: var(--muted); font-weight: 600;
+  padding: 5px 8px; border-radius: 6px; user-select: none; list-style: none;
+}
+details.fold > summary::before { content: "▸ "; }
+details.fold[open] > summary::before { content: "▾ "; }
+details.fold > summary:hover { background: var(--panel-2); color: var(--text-strong); }
+details.fold > *:not(summary) { animation: foldIn .18s ease; }
+@keyframes foldIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
 /* ---- 期货通数据源状态条（真实交易页） ---- */
 .ths-src-strip {

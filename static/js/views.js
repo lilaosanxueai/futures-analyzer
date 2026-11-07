@@ -540,20 +540,31 @@ ${(() => {
       const flaws = d.flaws || [];
       const saved = d.blocked_count || 0;
       const savedLine = saved
-        ? '<div class="mini-note" style="margin-bottom:6px;color:var(--up)">🛡️ 闸门已拦下 ' + saved +
-          ' 次开仓尝试（每次都是统计上最亏钱的模式——防线在干活）</div>'
+        ? '<div class="mini-note" style="margin-bottom:6px;color:var(--up)">🛡️ 闸门已拦下 ' + saved + " 次危险开仓</div>"
         : "";
-      el.innerHTML = savedLine + (flaws.length
-        ? flaws.map((f) => {
-            const cls = f.severity >= 70 ? "high" : f.severity >= 45 ? "mid" : "low";
-            return '<div class="flaw-item">' +
-              '<div class="f-head"><b>' + esc(f.name) + "</b>" +
-              '<span class="trap ' + cls + '"><span class="trap-bar"><i style="width:' + Math.min(100, f.severity) + '%"></i></span><span class="trap-num">' + f.severity + "</span></span></div>" +
-              '<div class="f-evi">' + esc(f.evidence) + "</div>" +
-              '<div class="f-anti">💡 ' + esc(f.antidote) + "</div>" +
-              "</div>";
-          }).join("")
-        : (saved ? "" : '<div class="empty">暂无交易数据（至少 3 笔）——导入交割单或记几笔后，这里会画出你的缺陷画像</div>'));
+      if (!flaws.length && !saved) {
+        el.innerHTML = '<div class="empty">暂无交易数据（至少 3 笔）——记录几笔后自动画像</div>';
+        return;
+      }
+      const fullItem = (f) => {
+        const cls = f.severity >= 70 ? "high" : f.severity >= 45 ? "mid" : "low";
+        return '<div class="flaw-item">' +
+          '<div class="f-head"><b>' + esc(f.name) + "</b>" +
+          '<span class="trap ' + cls + '"><span class="trap-bar"><i style="width:' + Math.min(100, f.severity) + '%"></i></span><span class="trap-num">' + f.severity + "</span></span></div>" +
+          '<div class="f-evi">' + esc(f.evidence) + '</div>' +
+          '<div class="f-anti">💡 ' + esc(f.antidote) + "</div></div>";
+      };
+      // ★ 首屏只留 Top3 紧凑行（名称+严重度），其余折叠
+      const top = flaws.slice(0, 3), rest = flaws.slice(3);
+      const compactRow = (f) => {
+        const cls = f.severity >= 70 ? "high" : f.severity >= 45 ? "mid" : "low";
+        return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0">' +
+          '<b style="flex:1;font-size:13px">' + esc(f.name) + "</b>" +
+          '<span class="trap ' + cls + '"><span class="trap-bar"><i style="width:' + Math.min(100, f.severity) + '%"></i></span><span class="trap-num">' + f.severity + "</span></span></div>";
+      };
+      el.innerHTML = savedLine +
+        top.map(compactRow).join("") +
+        (rest.length ? '<details class="fold"><summary>其余 ' + rest.length + " 维缺陷（点开看证据与解药）</summary>" + rest.map(fullItem).join("") + "</details>" : "");
     } catch (e) {
       el.innerHTML = '<div class="empty">画像加载失败：' + esc(e.message) + "</div>";
     }
@@ -1019,11 +1030,16 @@ ${(() => {
     try {
       const d = await api("/api/notes");
       if (!(d.items || []).length) { el.innerHTML = '<div class="empty">暂无心得</div>'; return; }
-      el.innerHTML = d.items.map((n) =>
+      const item = (n) =>
         '<div class="note-item"><div class="n-head"><span class="n-title">' + esc(n.title) + "</span>" +
         '<span class="n-meta">' + esc(n.date) + (n.symbol ? " · " + esc(n.symbol) : "") + (n.tags ? " · #" + esc(n.tags) : "") + (n.synced ? " · 已同步" : "") + "</span>" +
         '<button class="link-btn danger" style="margin-left:auto" data-id="' + n.id + '">删</button></div>' +
-        '<div class="n-content">' + esc(n.content) + "</div></div>").join("");
+        '<div class="n-content">' + esc(n.content) + "</div></div>";
+      // ★ 最新 2 条展开，历史折叠
+      const latest = d.items.slice(0, 2), older = d.items.slice(2);
+      el.innerHTML = latest.map(item).join("") + (older.length
+        ? '<details class="fold"><summary>历史心得 ' + older.length + " 条 ▾</summary>" + older.map(item).join("") + "</details>"
+        : "");
       $$(".note-item .link-btn", el).forEach((b) => {
         b.addEventListener("click", async () => {
           await api("/api/notes/" + b.getAttribute("data-id"), { method: "DELETE" });
@@ -1718,10 +1734,10 @@ ${(() => {
       const rv = d.revenge || {};
       statsHtml += stat("报复交易实绩", rv.total + " 点/" + (rv.n || 0) + " 笔", (rv.total || 0) > 0 ? "num-up" : "num-down");
 
-      // 品种表：内嵌条形 + 判定行高亮 + 点击跳品种博弈
+      // 品种表：内嵌条形 + 判定行高亮 + 点击跳品种博弈（★ 低样本 <3 笔折叠）
       const vBadge = (v) => v === "停" ? '<span class="badge fatal">停</span>'
         : v === "减" ? '<span class="badge warn">减半</span>' : '<span class="badge info">留</span>';
-      const rows = entries.map(([s, v]) => {
+      const rowOf = ([s, v]) => {
         const w = Math.max(4, Math.round(Math.abs(v.total) / maxAbs * 72));
         const bar = '<i class="risk-bar" style="width:' + w + 'px;background:var(--' + (v.total > 0 ? "up" : "down") + ')"></i>';
         const dir = v.dir_ban
@@ -1732,7 +1748,13 @@ ${(() => {
           '</td><td style="white-space:nowrap">' + bar + '<span class="' + (v.total > 0 ? "num-up" : "num-down") + '">' +
           (v.total > 0 ? "+" : "") + v.total + "</span></td><td>" + v.win_rate + "%</td><td>" + (v.plr == null ? "—" : v.plr) +
           "</td><td>" + dir + "</td><td>" + vBadge(v.verdict) + "</td></tr>";
-      }).join("");
+      };
+      const main = entries.filter(([, v]) => v.n >= 3);
+      const minor = entries.filter(([, v]) => v.n < 3);
+      const rows = main.map(rowOf).join("") + (minor.length
+        ? '<tr><td colspan="7" style="padding:0"><details class="fold"><summary>低样本品种 ' + minor.length + " 个（不足 3 笔，仅供参考）▾</summary><table class=\"table\"><tbody>" +
+          minor.map(rowOf).join("") + "</tbody></table></details></td></tr>"
+        : "");
 
       // 24 小时失血热力条（高度=|累计点|，红=赚绿=亏（红涨绿跌），⚠=G13 拦截时段）
       const badSet = new Set((d.bad_hours || []).map((h) => h.hour));
@@ -1761,7 +1783,8 @@ ${(() => {
         (rows || '<tr><td colspan="7" class="empty">无数据</td></tr>') + "</tbody></table>" +
         '<div style="margin-top:10px"><b>⏰ 24 小时盈亏分布</b><span class="muted small">（条高=累计点数·红盈绿亏·⚠=G13 拦截时段，悬停看明细）</span>' +
         '<div class="hour-strip">' + cells.join("") + "</div></div>" +
-        '<div class="mini-note" style="margin-top:8px">判定规则：' + esc(d.rules.stop + "；" + d.rules.reduce + "；" + d.rules.dir_ban + "；" + d.rules.bad_hour) + "</div>";
+        '<details class="fold" style="margin-top:6px"><summary>判定规则 ▾</summary><div class="mini-note">' +
+        esc(d.rules.stop + "；" + d.rules.reduce + "；" + d.rules.dir_ban + "；" + d.rules.bad_hour) + "</div></details>";
 
       $$("#riskBody tr.risk-row").forEach((tr) => {
         tr.addEventListener("click", () => FA.openPsych(tr.getAttribute("data-sym")));
@@ -1776,11 +1799,12 @@ ${(() => {
       const d = await api("/api/mine-rules");
       const rules = d.rules || [];
       el.innerHTML = rules.length
-        ? rules.map((r) =>
-          '<div class="flaw-item"><div class="f-head"><b>' + esc(r.rule.slice(0, 50)) + "</b></div>" +
-          '<div class="f-evi">' + esc(r.evidence) + '</div>' +
-          '<div class="f-anti">💡 ' + esc(r.action) + "</div></div>").join("")
-        : '<div class="empty">记录不足 5 笔——导入交割单后自动挖掘</div>';
+        ? '<details class="fold"><summary>挖出 ' + rules.length + " 条个性化规则（点开看证据与动作）</summary>" +
+          rules.map((r) =>
+            '<div class="flaw-item"><div class="f-head"><b>' + esc(r.rule.slice(0, 50)) + "</b></div>" +
+            '<div class="f-evi">' + esc(r.evidence) + '</div>' +
+            '<div class="f-anti">💡 ' + esc(r.action) + "</div></div>").join("") + "</details>"
+        : '<div class="empty">记录不足 5 笔——记录几笔后自动挖掘</div>';
     } catch (e) { el.innerHTML = '<div class="empty">加载失败</div>'; }
     const eq = $("#exitQBody");
     if (eq) {
