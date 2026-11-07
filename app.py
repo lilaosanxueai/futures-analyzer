@@ -695,6 +695,35 @@ SHIELD_STATE_DEFAULTS = {
 }
 _SHIELD_STATE = dict(SHIELD_STATE_DEFAULTS)
 
+_SHIELD_STATE_FILE = BASE_DIR / "shield_state.json"
+
+
+def _save_shield_state() -> None:
+    """盾状态落盘：重启不丢今日交易日志/持仓快照——日亏停手线跨重启仍然有效。"""
+    try:
+        st = dict(_SHIELD_STATE)
+        st["saved_at"] = int(time.time() * 1000)
+        _atomic_write(_SHIELD_STATE_FILE, json.dumps(st, ensure_ascii=False))
+    except Exception:
+        pass  # 落盘失败不影响盾运行（最坏情况=重启后今日统计重来）
+
+
+def _load_shield_state() -> None:
+    """启动恢复盾状态；超过 7 天的日志清理。"""
+    try:
+        if not _SHIELD_STATE_FILE.exists():
+            return
+        d = json.loads(_SHIELD_STATE_FILE.read_text(encoding="utf-8"))
+        week_ago = int(time.time() * 1000) - 7 * 86400 * 1000
+        _SHIELD_STATE["trade_log"] = [l for l in (d.get("trade_log") or []) if (l.get("first_seen") or 0) > week_ago][-100:]
+        _SHIELD_STATE["prev_positions"] = d.get("prev_positions") or {}
+        repeat = {k: v for k, v in (d.get("alert_repeat") or {}).items() if v > week_ago}
+        _SHIELD_STATE["alert_repeat"] = repeat
+        _ths_log(f"盾状态已恢复：{len(_SHIELD_STATE['trade_log'])} 条日志 / "
+                 f"{len(_SHIELD_STATE['prev_positions'])} 个持仓快照")
+    except Exception:
+        pass  # 损坏则按全新状态跑
+
 
 async def _comprehensive_shield(positions: list[dict], scan_result: dict):
     """全方位盾：一次扫描 → 十维风险检查 → 预警/建议/日志。
@@ -898,10 +927,11 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
         }
     _SHIELD_STATE["prev_positions"] = new_prev
 
-    # 清理过期 repeat keys
+    # 清理过期 repeat keys（阈值需 ≥ info 15min 节流窗，否则低级预警会提前复活）
     _SHIELD_STATE["alert_repeat"] = {
-        k: v for k, v in _SHIELD_STATE["alert_repeat"].items() if now_ms - v < 300000
+        k: v for k, v in _SHIELD_STATE["alert_repeat"].items() if now_ms - v < 20 * 60 * 1000
     }
+    _save_shield_state()
 
 
 async def _shield_close_log():
@@ -930,6 +960,7 @@ async def _shield_close_log():
         asyncio.create_task(_shield_ai_review(sym, direction, lots, entry, pnl))
     # 限制日志长度
     _SHIELD_STATE["trade_log"] = _SHIELD_STATE["trade_log"][-100:]
+    _save_shield_state()
 
 
 async def _shield_ai_review(symbol: str, direction: str, lots: float, entry: float, pnl):
@@ -1025,6 +1056,8 @@ async def lifespan(_app):
             _ths_log(f"启动恢复自选 {len(_saved_map)} 个品种（持久化）")
     except Exception:
         pass
+    # ★ 启动恢复盾状态（今日交易日志/持仓快照——重启不再失忆）
+    _load_shield_state()
     warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
     autosim_task = asyncio.create_task(auto_sim_loop())

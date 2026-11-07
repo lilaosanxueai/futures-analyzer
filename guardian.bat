@@ -2,6 +2,14 @@
 title FuturesAnalyzer Guardian
 cd /d "C:\Users\10166\.agents\skills\futures-analyzer"
 
+rem ---- 单实例锁：mkdir 原子性，日期做名防陈旧锁（每天最多一个守护） ----
+set "LOCKDIR=%TEMP%\fa_guardian_lock_%date:~0,4%%date:~5,2%%date:~8,2%"
+md "%LOCKDIR%" 2>nul
+if errorlevel 1 (
+  echo guardian already running today - exit
+  exit /b 0
+)
+
 :loop
 rem Port 8300 already listening? -> recheck in 5 min
 powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 8300 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
