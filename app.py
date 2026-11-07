@@ -4372,8 +4372,12 @@ def _sig_track_save() -> None:
 
 
 def _track_signal(sym: str, sig: dict) -> None:
-    """方向信号落账：同品种同方向 4 小时内不重复记（一轮扫描只留一条）。"""
+    """方向信号落账：同品种同方向 4 小时内不重复记（一轮扫描只留一条）。
+    ★ 附带翻转检测：方向相对上次记忆翻转且置信 ≥60 → 事件流播报（收盘后不吵）。"""
     if sig.get("direction") not in ("long", "short") or (sig.get("confidence") or 0) < 50:
+        # watch/低置信也更新记忆，避免"多(45)→多(70)"被误判为翻转
+        if sig.get("direction") in ("long", "short", "watch"):
+            _SIG_TRACK.setdefault("last_dir", {})[sym] = sig.get("direction")
         return
     try:
         _sig_track_load()
@@ -4385,16 +4389,35 @@ def _track_signal(sym: str, sig: dict) -> None:
             if (e.get("symbol") == sym and e.get("direction") == sig["direction"]
                     and e.get("date") == today and e.get("settled") is None):
                 e["confidence"] = max(e.get("confidence", 0), sig.get("confidence", 0))
-                return
-        evs.append({
-            "symbol": sym, "direction": sig["direction"],
-            "confidence": sig.get("confidence", 0),
-            "date": today, "ts": now_ms, "settled": None,
-        })
+                break
+        else:
+            evs.append({
+                "symbol": sym, "direction": sig["direction"],
+                "confidence": sig.get("confidence", 0),
+                "date": today, "ts": now_ms, "settled": None,
+            })
         # 只留 60 天
         cutoff = now_ms - 60 * 86400 * 1000
         _SIG_TRACK["events"] = [e for e in evs if e.get("ts", 0) > cutoff][-5000:]
         _sig_track_save()
+
+        # ── 翻转播报（只在交易时段；watch↔方向 不算翻转，方向↔方向 才算）──
+        last_dir = _SIG_TRACK.setdefault("last_dir", {}).get(sym)
+        conf = sig.get("confidence", 0)
+        if (last_dir in ("long", "short") and sig["direction"] != last_dir
+                and conf >= 60 and is_trading_time()):
+            _emit_event({
+                "id": f"sigflip-{now_ms}-{sym}", "ts": now_ms,
+                "kind": "diag", "etype": "SIG_FLIP",
+                "level": "warn" if conf < 75 else "fatal",
+                "symbol": sym, "name": "", "dir": "up" if sig["direction"] == "long" else "down",
+                "price": sig.get("last"),
+                "text": f"🔄 信号翻转：{sym} {'看多' if last_dir == 'long' else '看空'} → "
+                        f"{'看多' if sig['direction'] == 'long' else '看空'}（置信 {conf}%）——"
+                        f"原方向持仓/计划需要重新审视",
+                "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+            })
+        _SIG_TRACK["last_dir"][sym] = sig["direction"]
     except Exception:
         pass
 
@@ -8572,6 +8595,38 @@ async def _generate_report() -> str:
             seg.append(f"- 失血时段（G13 拦截）：{bh}")
         seg.append(f"- 解禁试炼：{tr_txt}")
         parts.append("【实录风控红线（你的战绩划定的）】\n" + "\n".join(seg))
+    except Exception:
+        pass
+
+    # ★ 系统自检：信号引擎战绩 + 资金曲线 + 今日盾动态（系统对自己同样 accountable）
+    try:
+        _sig_track_load()
+        settled = [e for e in _SIG_TRACK["events"] if e.get("settled") and e.get("hit") is not None]
+        seg2 = []
+        if len(settled) >= 10:
+            hits = sum(1 for e in settled if e["hit"])
+            rets = [e["ret_pct"] if e["direction"] == "long" else -e["ret_pct"] for e in settled]
+            verdict = "可用作参考" if hits / len(settled) >= 0.5 else "低于抛硬币——连系统信号也别信"
+            seg2.append(f"- 信号引擎战绩：{len(settled)}次命中{hits}（{hits / len(settled) * 100:.0f}%），"
+                        f"方向化累计{sum(rets):+.1f}%——{verdict}")
+        elif settled:
+            seg2.append(f"- 信号引擎战绩：样本 {len(settled)} 次（满 10 次开始汇报）")
+        _eq_file2 = BASE_DIR / "equity_history.json"
+        if _eq_file2.exists():
+            hist = json.loads(_eq_file2.read_text(encoding="utf-8"))
+            if len(hist) >= 2:
+                today_str2 = datetime.now().strftime("%Y-%m-%d")
+                day_pts = [h for h in hist if datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d") == today_str2]
+                seg2.append(f"- 资金曲线：{hist[0]['equity']:,.0f} → {hist[-1]['equity']:,.0f}"
+                            f"（{len(hist)}点，区间{hist[-1]['equity'] - hist[0]['equity']:+,.0f}）"
+                            + (f"，今日{day_pts[-1]['equity'] - day_pts[0]['equity']:+,.0f}" if len(day_pts) >= 2 else ""))
+        today_str3 = datetime.now().strftime("%Y-%m-%d")
+        tlog = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today_str3]
+        if tlog:
+            closed_pnl2 = sum(l.get("final_pnl") or 0 for l in tlog if "closed_ts" in l)
+            seg2.append(f"- 今日盾日志：{len(tlog)} 笔开仓（自动记录），已平累计 {closed_pnl2:+.0f} 点")
+        if seg2:
+            parts.append("【系统自检（引擎战绩 / 资金 / 盾动态）】\n" + "\n".join(seg2))
     except Exception:
         pass
 
