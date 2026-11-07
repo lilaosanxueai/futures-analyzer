@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261107c">
+<link rel="stylesheet" href="/static/style.css?v=20261107d">
 </head>
 <body>
 
@@ -71,15 +71,20 @@
           <div class="hint">点击行进入品种博弈分析 · 持仓变化 = 今日实时 vs 昨收盘</div>
         </div>
 
+        <div class="card" id="signalCard">
+          <div class="card-head"><h2>📡 信号雷达 <span class="muted small">六维研判 · 自选全景</span></h2></div>
+          <div id="signalCardBody" style="padding:4px 10px;flex:1;overflow-y:auto"><div class="empty">扫描中…</div></div>
+        </div>
+
         <div class="card" id="deskCard">
           <div class="card-head">
-            <h2>💹 交易台 <span class="muted small">信号 · 计划 · 持仓 · 建议</span></h2>
+            <h2>💹 交易台 <span class="muted small">持仓 · 建议</span></h2>
             <div class="head-actions">
               <button class="btn ghost sm" id="btnDeskScan" title="立即扫描期货通">▶ 扫描</button>
               <button class="btn ghost sm" id="btnThsMirror" title="持仓自动镜像成交易记录">🪞 镜像</button>
             </div>
           </div>
-          <div id="deskBody" style="padding:8px 14px"><div class="empty">加载中…</div></div>
+          <div id="deskBody" style="padding:8px 14px;flex:1;overflow-y:auto"><div class="empty">加载中…</div></div>
         </div>
 
         <div class="card" id="shieldCard">
@@ -88,17 +93,25 @@
           <div class="stat-grid" id="shieldGrid" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
 
-        <div class="card" id="newsAlertCard">
+        <div class="card" id="alertCard">
           <div class="card-head">
-            <h2>📰 要闻 · 预警</h2>
+            <h2>🔔 盾预警事件</h2>
             <div class="head-actions">
               <button class="btn ghost sm" id="btnMonitorCfg">盯盘设置</button>
               <button class="btn ghost sm" id="btnMonitorTest">测试</button>
             </div>
           </div>
-          <div class="events" id="eventList" style="max-height:300px;overflow-y:auto"><div class="empty">暂无事件</div></div>
-          <div style="border-top:1px solid var(--line-soft);margin:0 0 4px"></div>
-          <div class="news-list" id="newsList" style="max-height:360px;overflow-y:auto"><span class="empty">加载中…</span></div>
+          <div class="events" id="eventList" style="flex:1;overflow-y:auto"><div class="empty">暂无事件</div></div>
+        </div>
+
+        <div class="card" id="premarketCard">
+          <div class="card-head"><h2>✅ 盘前自检 <span class="muted small">开战前的 8 项检查</span></h2></div>
+          <div id="premarketBody" style="padding:6px 14px;flex:1;overflow-y:auto"><div class="empty">检查中…</div></div>
+        </div>
+
+        <div class="card" id="newsCard">
+          <div class="card-head"><h2>📰 市场要闻</h2></div>
+          <div class="news-list" id="newsList" style="flex:1;overflow-y:auto"><span class="empty">加载中…</span></div>
         </div>
 
         <div class="card" id="intlCard">
@@ -525,8 +538,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261107c"></script>
-<script src="/static/js/views.js?v=20261107c"></script>
-<script src="/static/js/chat.js?v=20261107c"></script>
+<script src="/static/js/base.js?v=20261107d"></script>
+<script src="/static/js/views.js?v=20261107d"></script>
+<script src="/static/js/chat.js?v=20261107d"></script>
 </body>
 </html>

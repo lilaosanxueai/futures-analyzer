@@ -12,7 +12,7 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "work") { loadDesk(); }
+      if (v === "work") { loadDesk(); loadSignalsCard(); loadPremarket(); }
       if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); fillSymbolReviewOptions(); loadSettle(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); loadMonthly(); loadNotes(); }
@@ -2179,7 +2179,64 @@ ${(() => {
   FA.loadPlans = loadPlans;
   FA.loadSignals = loadSignals;
 
+  // ================================================================ 信号雷达 / 盘前自检（工作台）
+  async function loadSignalsCard() {
+    const el = $("#signalCardBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/trading-desk");
+      const items = d.items || [];
+      if (!items.length) {
+        el.innerHTML = '<div class="empty">暂无信号（自选为空时走 Core16 兜底，稍候）</div>';
+        return;
+      }
+      const dirChip = (dir, conf) => {
+        if (dir === "long") return '<span class="badge bull">多 ' + conf + "</span>";
+        if (dir === "short") return '<span class="badge bear">空 ' + conf + "</span>";
+        return '<span class="badge neutral">观望 ' + conf + "</span>";
+      };
+      const rows = items.map((it) => {
+        const cls = it.direction === "long" ? "bull" : it.direction === "short" ? "bear" : "neutral";
+        const ev = (it.evidence && it.evidence[0]) || it.regime || "";
+        const pos = it.position ? ' <span style="color:var(--accent)">●持</span>' : "";
+        return '<tr data-sym="' + esc(it.symbol) + '" style="cursor:pointer">' +
+          '<td><b>' + esc(it.ths_name || it.symbol) + "</b>" + pos + "</td>" +
+          '<td class="r">' + dirChip(it.direction, it.confidence) + "</td>" +
+          '<td class="r muted small" style="max-width:46%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(ev) + '">' + esc(ev) + "</td></tr>";
+      }).join("");
+      el.innerHTML = '<table class="table" style="font-size:12px"><thead><tr><th>品种</th><th class="r">信号</th><th class="r">核心证据</th></tr></thead><tbody>' + rows + "</tbody></table>";
+      $$("#signalCardBody tr[data-sym]").forEach((tr) => {
+        tr.addEventListener("click", () => FA.openPsych(tr.getAttribute("data-sym")));
+      });
+    } catch (e) {
+      el.innerHTML = '<div class="empty">信号加载失败：' + esc(e.message) + "</div>";
+    }
+  }
+
+  async function loadPremarket() {
+    const el = $("#premarketBody");
+    if (!el) return;
+    try {
+      const d = await api("/api/premarket-check");
+      const rows = (d.checks || []).map((c) =>
+        '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line-soft)">' +
+        '<span>' + (c.ok ? "✅" : "❌") + "</span><b>" + esc(c.name) + "</b>" +
+        '<span class="muted small" style="margin-left:auto">' + esc(c.detail) + "</span></div>").join("");
+      const allOk = (d.checks || []).every((c) => c.ok);
+      el.innerHTML = '<div style="padding:4px 0 6px;font-weight:700;color:' + (allOk ? "var(--down)" : "var(--warn)") + '">' +
+        (allOk ? "🟢 全部就绪" : d.summary || "⚠️ 有待处理项") + "</div>" + rows;
+    } catch (e) {
+      el.innerHTML = '<div class="empty">自检失败：' + esc(e.message) + "</div>";
+    }
+  }
+  FA.loadSignalsCard = loadSignalsCard;
+  FA.loadPremarket = loadPremarket;
+
   // 页面加载时初始调用 + 60s 自动刷新
-  setTimeout(() => { if (FA.state.currentView === "work") loadDesk(); }, 1000);
+  setTimeout(() => {
+    if (FA.state.currentView === "work") { loadDesk(); loadSignalsCard(); loadPremarket(); }
+  }, 1200);
   setInterval(() => { if (FA.state.currentView === "work") loadDesk(); }, 60000);
+  setInterval(() => { if (FA.state.currentView === "work") loadSignalsCard(); }, 60000);
+  setInterval(() => { if (FA.state.currentView === "work") loadPremarket(); }, 120000);
 })();
