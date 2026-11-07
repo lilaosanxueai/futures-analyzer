@@ -2248,8 +2248,18 @@ ${(() => {
         '<span>' + (c.ok ? "✅" : "❌") + "</span><b>" + esc(c.name) + "</b>" +
         '<span class="muted small" style="margin-left:auto">' + esc(c.detail) + "</span></div>").join("");
       const allOk = (d.checks || []).every((c) => c.ok);
+      // ★ 全绿自动折叠成一行；有异常强制展开；可手动开合
+      const expanded = !allOk || FA.state.pmExpand;
+      const toggle = '<div style="padding:2px 0"><a class="link-btn" id="pmToggle">' +
+        (expanded ? "收起明细 ▴" : "展开 8 项明细 ▾") + "</a></div>";
       el.innerHTML = '<div style="padding:4px 0 6px;font-weight:700;color:' + (allOk ? "var(--down)" : "var(--warn)") + '">' +
-        (allOk ? "🟢 全部就绪" : d.summary || "⚠️ 有待处理项") + "</div>" + rows;
+        (allOk ? "🟢 全部就绪" : d.summary || "⚠️ 有待处理项") + "</div>" +
+        (expanded ? rows + toggle : toggle);
+      const tg = $("#pmToggle");
+      if (tg) tg.addEventListener("click", () => {
+        FA.state.pmExpand = !FA.state.pmExpand;
+        loadPremarket();
+      });
     } catch (e) {
       el.innerHTML = '<div class="empty">自检失败：' + esc(e.message) + "</div>";
     }
