@@ -190,8 +190,13 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 10px;
-  align-items: start;
+  align-items: stretch;   /* 同排卡片等高——模块整体更长 */
 }
+/* 拉伸后内容区吃满卡片，而不是留白 */
+#deskCard, #shieldCard, #newsAlertCard, #intlHotCard { display: flex; flex-direction: column; }
+#deskBody { flex: 1; overflow-y: auto; }
+#shieldGrid { flex: 1; }
+#newsAlertCard #newsList, #intlHotCard #hotList { flex: 1; }
 .trades-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 .notes-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 @media (max-width: 1200px) {
