@@ -675,11 +675,14 @@ async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
 
 async def ths_sync_loop():
     """盯屏同步循环：有持仓时 15 秒高频扫描，空仓时 60 秒低频。
-    全方位盾：扫描 → 风险评估 → 自动预警 → 自动日志 → 组合风控"""
+    全方位盾：扫描 → 风险评估 → 自动预警 → 自动日志 → 组合风控
+    ★ 失明告警：交易时段内连续 3 次读取失败 → fatal（10 分钟节流）——盾不能瞎了没人知道"""
     cfg = load_config().get("ths_sync") or {}
     THS_SYNC["enabled"] = bool(cfg.get("scan"))
     THS_SYNC["mirror"] = bool(cfg.get("mirror"))
     _SHIELD_STATE["prev_positions"] = {}
+    _scan_fail_streak = 0
+    _blind_last_ts = 0
     await asyncio.sleep(60)
     while True:
         interval = 60
@@ -687,15 +690,31 @@ async def ths_sync_loop():
             now = datetime.now()
             if THS_SYNC["enabled"] and is_trading_time(now):
                 r = await _ths_scan_once()
-                pos = r.get("positions") or []
-                if pos:
-                    interval = 15  # ★ 有持仓 → 高频模式
-                    await _comprehensive_shield(pos, r)
+                if r.get("ok"):
+                    _scan_fail_streak = 0
+                    pos = r.get("positions") or []
+                    if pos:
+                        interval = 15  # ★ 有持仓 → 高频模式
+                        await _comprehensive_shield(pos, r)
+                    else:
+                        # 持仓消失 → 自动平仓日志
+                        if _SHIELD_STATE["prev_positions"]:
+                            await _shield_close_log()
+                        _SHIELD_STATE["prev_positions"] = {}
                 else:
-                    # 持仓消失 → 自动平仓日志
-                    if _SHIELD_STATE["prev_positions"]:
-                        await _shield_close_log()
-                    _SHIELD_STATE["prev_positions"] = {}
+                    _scan_fail_streak += 1
+                    now_ms = int(time.time() * 1000)
+                    if _scan_fail_streak >= 3 and now_ms - _blind_last_ts > 10 * 60 * 1000:
+                        _blind_last_ts = now_ms
+                        _ths_log(f"⚠ 盯屏失明：连续 {_scan_fail_streak} 次读取失败（{r.get('err', '?')}）")
+                        _emit_event({
+                            "id": f"shield-blind-{now_ms}", "ts": now_ms,
+                            "kind": "diag", "etype": "SHIELD", "level": "fatal",
+                            "symbol": "", "name": "", "dir": "down", "price": None,
+                            "text": f"👁️ 盯屏失明！连续 {_scan_fail_streak} 次读取期货通失败——"
+                                    f"盾已看不到你的持仓，检查期货通窗口是否被关/卡死",
+                            "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                        }, feishu=True, feishu_text="🛡️ 盯屏失明告警\n盾已看不到持仓，请检查期货通窗口")
         except Exception:
             pass
         await asyncio.sleep(interval)
@@ -8283,6 +8302,31 @@ def _position_context() -> str:
         pts = [float(t["result_pts"]) for t in recent_closed]
         wins = sum(1 for x in pts if x > 0)
         lines.append(f"近5笔盈亏：{'/'.join(f'{x:+.0f}' for x in pts)}（胜率{wins}/{len(pts)}）")
+    # ★ 系统自检块：信号引擎战绩 + 资金曲线 + 今日盾状态（教练要对自己的信号 accountable）
+    try:
+        _sig_track_load()
+        settled = [e for e in _SIG_TRACK["events"] if e.get("settled") and e.get("hit") is not None]
+        if len(settled) >= 10:
+            hits = sum(1 for e in settled if e["hit"])
+            lines.append(f"系统信号战绩（次日开收口径）：{len(settled)}次命中{hits}"
+                         f"（{hits / len(settled) * 100:.0f}%）——低于50%时你必须提示用户连系统信号也别信")
+    except Exception:
+        pass
+    try:
+        _eq_file = BASE_DIR / "equity_history.json"
+        if _eq_file.exists():
+            hist = json.loads(_eq_file.read_text(encoding="utf-8"))
+            if len(hist) >= 5:
+                first, last = hist[0]["equity"], hist[-1]["equity"]
+                lines.append(f"账户权益曲线：{first:,.0f} → {last:,.0f}（{len(hist)}个采样点，"
+                             f"区间{'+' if last >= first else ''}{last - first:,.0f}）")
+    except Exception:
+        pass
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today]
+    if today_log:
+        closed = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
+        lines.append(f"今日自动日志：{len(today_log)}笔，已平累计{closed:+.0f}点")
     return "\n【仓位状态（AI 上下文）】\n" + "\n".join(lines)
 
 
