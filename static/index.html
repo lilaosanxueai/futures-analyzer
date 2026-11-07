@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261107d">
+<link rel="stylesheet" href="/static/style.css?v=20261107e">
 </head>
 <body>
 
@@ -153,27 +153,6 @@
   <section class="view" id="view-real">
     <div class="trades-grid">
       <div class="trades-left">
-        <div class="card" style="border:2px dashed var(--primary);text-align:center;padding:20px">
-          <h2 style="margin-bottom:8px">📥 导入交割单 / 成交流水</h2>
-          <p class="muted" style="font-size:13px;margin-bottom:12px">
-            期货公司 App 导出「成交流水/交割单」CSV → 选择文件或拖拽到此处<br>
-            或直接从 Excel 复制粘贴到文本框 · 列名自动识别 · 重复导入自动去重
-          </p>
-          <input type="file" id="importFile" accept=".csv,.txt,.xlsx,.xls" multiple style="margin-bottom:8px;font-size:13px">
-          <div class="mini-note" style="margin-bottom:6px">支持 .csv / .txt / .xlsx / .xls · 可一次选多个文件（逐个解析汇总）</div>
-          <textarea id="importText" rows="4" placeholder="或把成交流水粘贴到这里（Excel 选中区域 Ctrl+C，此处 Ctrl+V）…" style="width:100%;font-size:12px"></textarea>
-          <div style="display:flex;gap:8px;justify-content:center;margin-top:8px">
-            <button class="btn" id="btnImportCheck">解析预览</button>
-            <button class="btn primary" id="btnImportCommit" disabled>确认导入</button>
-          </div>
-          <div id="importPreview" class="hidden" style="margin-top:10px;text-align:left"></div>
-        </div>
-
-        <div class="card hidden" id="settleCard" style="border:2px solid var(--warn)">
-          <div class="card-head"><h2>📦 导入持仓清算 <span class="muted small">结算单遗留的历史仓位 · 由你决定怎么出清</span></h2></div>
-          <div id="settleBody" style="padding:10px 14px"></div>
-        </div>
-
         <div class="card">
           <div class="card-head"><h2>📊 行为统计</h2>
             <div class="head-actions"><button class="btn ghost sm" id="btnRiskCfg">⚙ 风控参数</button></div>
@@ -181,26 +160,12 @@
           <div id="statsBody" class="stats-body"><div class="empty">加载中…</div></div>
           <canvas id="equityChart" class="mini-chart" style="height:120px"></canvas>
         </div>
-
-        <div class="card">
-          <div class="card-head"><h2>🔔 我的价格预警</h2>
-            <div class="head-actions"><button class="btn ghost sm" id="btnAlertAdd">＋ 新增</button></div>
-          </div>
-          <div id="alertMgrBody" style="padding:8px 14px"><div class="empty">加载中…</div></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h2>🚨 问题预警</h2>
-            <div class="head-actions"><button class="btn ghost sm" id="btnDiagRefresh">↻ 重新诊断</button></div>
-          </div>
-          <div id="diagBody"><div class="empty">加载中…</div></div>
-        </div>
       </div>
 
       <div class="trades-right">
         <div class="card">
           <div class="card-head">
-            <h2>📒 真实交易日志</h2>
+            <h2>📒 真实交易日志 <span class="muted small">期货通实时对接</span></h2>
             <div class="head-actions">
               <select id="srSymbol" class="select sm" style="max-width:165px;font-size:11px" title="分品种复盘（品种=真实交易记录中出现过的）">
                 <option value="">分品种复盘…</option>
@@ -211,8 +176,9 @@
               <button class="btn ghost sm" id="btnGateBt">📊 闸门回测</button>
             </div>
           </div>
+          <div id="thsSrcStrip" class="ths-src-strip"><span class="muted small">期货通对接状态读取中…</span></div>
           <table class="table trades-table">
-            <thead><tr><th>日期</th><th>品种</th><th>方向</th><th class="r">开仓价</th><th class="r">止损</th><th class="r">目标</th><th class="r">浮动/结果</th><th>操作</th></tr></thead>
+            <thead><tr><th>日期</th><th>品种</th><th>方向</th><th class="r">开仓价</th><th class="r">止损</th><th class="r">目标</th><th class="r">浮动/结果</th><th>来源</th></tr></thead>
             <tbody id="tradesBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
           </table>
         </div>
@@ -538,8 +504,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261107d"></script>
-<script src="/static/js/views.js?v=20261107d"></script>
-<script src="/static/js/chat.js?v=20261107d"></script>
+<script src="/static/js/base.js?v=20261107e"></script>
+<script src="/static/js/views.js?v=20261107e"></script>
+<script src="/static/js/chat.js?v=20261107e"></script>
 </body>
 </html>

@@ -199,6 +199,16 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
 #newsCard #newsList, #hotCard #hotList { flex: 1; }
 #intlCard .intl-row { flex: 1; }
 
+/* ---- 期货通数据源状态条（真实交易页） ---- */
+.ths-src-strip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 14px; font-size: 12px;
+  background: color-mix(in srgb, var(--accent, #2563eb) 4%, transparent);
+  border-bottom: 1px solid var(--line-soft);
+}
+.ths-src-strip b { color: var(--text-strong); }
+.ths-src-strip.src-ok { background: color-mix(in srgb, var(--down) 5%, transparent); }
+
 /* ---- 市场脉搏条 ---- */
 .pulse-bar {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;

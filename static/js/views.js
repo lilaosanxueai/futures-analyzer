@@ -13,7 +13,7 @@
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
       if (v === "work") { loadDesk(); loadSignalsCard(); loadPremarket(); }
-      if (v === "real") { loadTrades(); loadStats(); loadDiagnosis(); loadAlertMgr(); fillSymbolReviewOptions(); loadSettle(); }
+      if (v === "real") { loadTrades(); loadStats(); fillSymbolReviewOptions(); loadThsSrc(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); loadMonthly(); loadNotes(); }
       if (v === "notes") loadNotes(); // 兼容旧入口
@@ -506,7 +506,8 @@ ${(() => {
       el.innerHTML = '<div class="empty">诊断失败：' + esc(e.message) + "</div>";
     }
   }
-  $("#btnDiagRefresh").addEventListener("click", () => { $("#diagBody").innerHTML = '<div class="empty">重新诊断中…</div>'; setTimeout(loadDiagnosis, 500); });
+  const _btnDiagRefresh = $("#btnDiagRefresh");
+  if (_btnDiagRefresh) _btnDiagRefresh.addEventListener("click", () => { $("#diagBody").innerHTML = '<div class="empty">重新诊断中…</div>'; setTimeout(loadDiagnosis, 500); });
 
   async function loadStats() {
     const el = $("#statsBody");
@@ -644,7 +645,7 @@ ${(() => {
           try {
             const r = await api("/api/import-opens/settle", { method: "POST", body: JSON.stringify({ symbol: sym, direction: dir, mode, price }) });
             alert(mode === "delete" ? "已删除 " + r.removed + " 笔记录" : "已了结 " + r.settled + " 笔 @ " + r.price);
-            loadSettle(); loadTrades(); loadStats(); loadDiagnosis(); fillSymbolReviewOptions();
+            loadSettle(); loadTrades(); loadStats(); loadThsSrc(); fillSymbolReviewOptions();
           } catch (e) { alert("失败：" + e.message); b.disabled = false; }
         });
       });
@@ -655,7 +656,7 @@ ${(() => {
     const body = $("#tradesBody");
     try {
       const d = await api("/api/trades?source=real");
-      if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无记录：用上方表单记第一笔</td></tr>'; return; }
+      if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无记录——期货通持仓出现/消失会自动记录到这里</td></tr>'; return; }
       // 持仓置顶（可操作的最优先），其余保持接口序（新入库在前）；分页渲染防几百行一次性铺满
       FA.state.tradesShown = FA.state.tradesShown || 80;
       const opens = d.items.filter((x) => x.status === "open").sort((a, b) => (b.ts || 0) - (a.ts || 0));
@@ -684,6 +685,9 @@ ${(() => {
         const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + (t.note.length > 14 ? "…" : "") + "</span>" : "";
         const viol = (t.violation || []).length
           ? '<span title="强行开仓：' + esc(t.violation.join("；")) + '" style="color:var(--danger)">🚫</span> ' : "";
+        const srcChip = t.source === "ths-sync"
+          ? '<span class="badge neutral" title="期货通持仓实时镜像">📺期货通</span>'
+          : '<span class="badge neutral" title="手动/导入">✍️手动</span>';
         return "<tr>" +
           "<td>" + esc(t.date) + "</td>" +
           "<td><b>" + esc(t.symbol) + "</b>" + note + "</td>" +
@@ -692,7 +696,7 @@ ${(() => {
           '<td class="r">' + (t.stop_points || '<span style="color:var(--danger)">无</span>') + "</td>" +
           '<td class="r">' + (t.target_points || "--") + "</td>" +
           '<td class="r">' + pnlHtml + "</td>" +
-          "<td>" + actions + "</td></tr>";
+          "<td>" + (t.status === "open" ? actions + "<br>" : "") + srcChip + "</td></tr>";
       }).join("") +
         (ordered.length > shown.length
           ? '<tr><td colspan="8" style="text-align:center"><button class="link-btn" id="btnTradesMore">📊 加载更多（已显 ' + shown.length + " / " + ordered.length + " 笔）</button></td></tr>"
@@ -747,7 +751,7 @@ ${(() => {
             if (!confirm(`平仓价 ${lv.price}，浮动 ${pnl > 0 ? "+" : ""}${pnl.toFixed(1)} 点。确认？`)) return;
             try {
               await api("/api/trades/" + id, { method: "PATCH", body: JSON.stringify({ exit: lv.price }) });
-              loadTrades(); loadStats(); loadDiagnosis();
+              loadTrades(); loadStats(); loadThsSrc();
             } catch (err) { alert("平仓失败：" + err.message); }
             return;
           }
@@ -773,7 +777,7 @@ ${(() => {
             else body.status = "closed";
             await api("/api/trades/" + id, { method: "PATCH", body: JSON.stringify(body) });
           }
-          loadTrades(); loadStats(); loadDiagnosis();
+          loadTrades(); loadStats(); loadThsSrc();
         });
       });
       const moreBtn = $("#btnTradesMore");
@@ -786,6 +790,27 @@ ${(() => {
   function submitTrade(payload) {
     return api("/api/trades", { method: "POST", body: JSON.stringify(payload) });
   }
+
+  // 📺 期货通数据源状态条（真实交易页：对接状态 + 今日自动记录数）
+  async function loadThsSrc() {
+    const el = $("#thsSrcStrip");
+    if (!el) return;
+    try {
+      const [sync, shield] = await Promise.all([api("/api/ths-sync"), api("/api/shield-state")]);
+      const last = sync.last || {};
+      const lastTxt = last.ts ? new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) : "从未";
+      const dy = shield.daily || {};
+      const scanOk = last.ok;
+      el.innerHTML =
+        (scanOk ? "🟢" : "⚪") + " 盯屏 <b>" + (sync.enabled ? "开" : "关") + "</b>" +
+        " · 镜像 <b>" + (sync.mirror ? "开" : "关") + "</b>" +
+        ' <span class="muted small">上次读取 ' + esc(lastTxt) + "</span>" +
+        ' · 今日自动记录 <b>' + (dy.trades_today || 0) + "</b> 笔" +
+        ' <span class="muted small">（持仓出现→自动记开仓，消失→按现价自动平仓）</span>';
+      el.classList.toggle("src-ok", !!sync.mirror);
+    } catch (e) { el.innerHTML = '<span class="muted small">期货通状态读取失败</span>'; }
+  }
+  setInterval(() => { if (FA.state.currentView === "real") loadThsSrc(); }, 30000);
 
   // 开仓表单实时风险金额：点数 → 真金白银的痛感前置
   let _mults = null, _acctSize = 0, _feeRef = {};
@@ -950,14 +975,14 @@ ${(() => {
             d = await submitTrade(Object.assign({}, payload, { force: 1 }));
             renderTradeResult(d, warnBox);
             $("#tfEntry").value = ""; $("#tfNote").value = "";
-            loadTrades(); loadStats(); loadDiagnosis();
+            loadTrades(); loadStats(); loadThsSrc();
           } catch (err) { alert("保存失败：" + err.message); }
         });
         return;
       }
       renderTradeResult(d, warnBox);
       $("#tfEntry").value = ""; $("#tfNote").value = "";
-      loadTrades(); loadStats(); loadDiagnosis();
+      loadTrades(); loadStats(); loadThsSrc();
     } catch (err) {
       alert("保存失败：" + err.message);
     }
@@ -1920,7 +1945,7 @@ ${(() => {
           alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
         }
         $("#importText").value = ""; impFile.value = "";
-        loadTrades(); loadStats(); loadDiagnosis(); loadFlaws();
+        loadTrades(); loadStats(); loadThsSrc(); loadFlaws();
       } catch (e) {
         alert("导入失败：" + e.message);
       }
