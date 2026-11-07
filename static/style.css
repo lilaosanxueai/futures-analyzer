@@ -188,7 +188,7 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
 .view.active { display: block; }
 .work-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
   gap: 10px;
   align-items: stretch;   /* 同排卡片等高——模块整体更长 */
 }
@@ -197,6 +197,28 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
 #deskBody { flex: 1; overflow-y: auto; }
 #shieldGrid { flex: 1; }
 #newsAlertCard #newsList, #intlHotCard #hotList { flex: 1; }
+/* 宽屏下外盘·热度横跨两列，下排不再右侧留白 */
+@media (min-width: 1100px) { #intlHotCard { grid-column: span 2; } }
+
+/* ---- 市场脉搏条 ---- */
+.pulse-bar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 14px; margin-bottom: 10px; font-size: 13px;
+}
+.pulse-bar.pb-alarm { border-color: var(--up); animation: shieldPulse 1.6s ease-in-out infinite; }
+.pb-sess { font-weight: 700; }
+.pb-sess.day { color: var(--up); }
+.pb-sess.night { color: var(--accent, #2563eb); }
+.pb-sess.break, .pb-sess.closed { color: var(--muted); }
+.pb-chips b { color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.pb-chips b.num-up { color: var(--up); } .pb-chips b.num-down { color: var(--down); }
+.pb-pos { color: var(--accent, #2563eb); }
+.pb-warn { color: var(--warn); font-weight: 600; }
+.pb-danger { color: var(--up); font-weight: 700; }
+.pb-fatal { color: var(--up); font-weight: 700; }
+.pb-ok { color: var(--down); }
+.pb-sys { margin-left: auto; }
 .trades-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 .notes-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 @media (max-width: 1200px) {

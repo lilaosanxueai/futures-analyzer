@@ -201,7 +201,7 @@
   }
 
   function capitalBadge(cap) {
-    if (!cap || !cap.state5) return '<span class="badge neutral">数据不足</span>';
+    if (!cap || !cap.state5) return '<span class="muted">--</span>';
     const st = cap.state5;
     const cls = st === "增仓上行" ? "bull" : st === "增仓下行" ? "bear" : "neutral";
     return '<span class="badge ' + cls + '">' + st + "</span>";
@@ -576,6 +576,51 @@
   }
   FA.pollShield = pollShield;
 
+  // ---------- 💓 市场脉搏条（时段+倒计时+账户+日内+告警，15s 一轮） ----------
+  function _fmtCountdown(s) {
+    if (s >= 86400) return Math.floor(s / 86400) + "天" + Math.floor((s % 86400) / 3600) + "小时";
+    if (s >= 3600) return Math.floor(s / 3600) + "小时" + Math.floor((s % 3600) / 60) + "分";
+    return Math.floor(s / 60) + "分" + (s % 60) + "秒";
+  }
+  async function pollPulse() {
+    const el = $("#pulseBar");
+    if (!el) return;
+    try {
+      const d = await FA.api("/api/market-pulse");
+      const s = d.session || {};
+      const st = s.state || "closed";
+      const dot = st === "day" ? "🟢" : st === "night" ? "🌙" : st === "break" ? "☕" : "⚪";
+      const sess = '<span class="pb-sess ' + st + '">' + dot + " " + FA.esc(s.label || "--") +
+        (st === "day" || st === "night" ? "" : ' <span class="muted small">· ' + FA.esc(s.next_label || "") +
+          " " + _fmtCountdown(s.countdown_s || 0) + "后</span>") + "</span>";
+      const ac = d.account || {};
+      const dy = d.daily || {};
+      const pc = (v) => (v > 0 ? "num-up" : v < 0 ? "num-down" : "");
+      const sg = (v) => (v > 0 ? "+" : "") + v;
+      const chips = [];
+      if (ac.equity != null) {
+        chips.push("权益 <b>" + Number(ac.equity).toLocaleString() + "</b>");
+        if (ac.available != null) chips.push("可用 <b>" + Number(ac.available).toLocaleString() + "</b>");
+        if (ac.usage_pct != null) {
+          const uCls = ac.usage_pct >= 90 ? "pb-danger" : ac.usage_pct > 50 ? "pb-warn" : "";
+          chips.push('占用 <b class="' + uCls + '">' + ac.usage_pct.toFixed(0) + "%</b>");
+        }
+      }
+      chips.push('持仓 <b' + (d.positions ? ' class="pb-pos"' : "") + ">" + (d.positions || 0) + "</b>");
+      chips.push('今日 <b class="' + pc(dy.total_pnl || 0) + '">' + sg(dy.total_pnl || 0) + "点</b>" +
+        '<span class="muted small">(' + (dy.trades_today || 0) + "笔)</span>");
+      const alertChip = d.fatal
+        ? '<span class="pb-fatal">🔴 告警 ' + d.fatal + "</span>"
+        : d.warn ? '<span class="pb-warn">🟡 预警 ' + d.warn + "</span>"
+        : '<span class="pb-ok">🛡️ 安全</span>';
+      el.innerHTML = sess + '<span class="pb-chips">' + chips.join(" · ") + "</span>" +
+        alertChip + '<span class="muted small pb-sys">' +
+        (d.ths_ok ? "📺已连" : "📺未连") + " · 自选" + (d.watch_n || 0) + "</span>";
+      el.classList.toggle("pb-alarm", !!d.fatal);
+    } catch (e) { /* ignore */ }
+  }
+  FA.pollPulse = pollPulse;
+
   // ---------- 🛡️ 全方位盾实时层（活动预警 + 期货通持仓 + 日结，15 秒一轮） ----------
   async function pollShieldLive() {
     const el = $("#shieldLive");
@@ -645,12 +690,13 @@
 
   // ---------- 启动轮询 ----------
   FA.startPolling = function () {
-    pollQuotes(); pollIntl(); pollEvents(); pollNews(); pollShield(); pollShieldLive(); pollHot();
+    pollQuotes(); pollIntl(); pollEvents(); pollNews(); pollShield(); pollShieldLive(); pollPulse(); pollHot();
     loadDirectory().then(pollPsych);
     clearInterval(quoteTimer);
     quoteTimer = setInterval(pollQuotes, 5000);
     setInterval(pollEvents, 15000);
     setInterval(pollShieldLive, 15000);
+    setInterval(pollPulse, 15000);
     setInterval(pollIntl, 30000);
     setInterval(pollPsych, 60000);
     setInterval(pollNews, 300000);

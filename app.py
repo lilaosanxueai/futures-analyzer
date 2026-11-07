@@ -1016,6 +1016,15 @@ async def _warmup():
 
 @asynccontextmanager
 async def lifespan(_app):
+    # ★ 启动即恢复自选：从持久化 symbol_map 回填（周末/THS 未开时看板不空转）
+    try:
+        _saved_map = load_config().get("ths_symbol_map") or {}
+        if _saved_map:
+            _MONITOR["watch"] = set(_saved_map.keys())
+            THS_SYNC["symbol_map"] = dict(_saved_map)
+            _ths_log(f"启动恢复自选 {len(_saved_map)} 个品种（持久化）")
+    except Exception:
+        pass
     warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
     autosim_task = asyncio.create_task(auto_sim_loop())
@@ -1081,15 +1090,95 @@ async def shield_state():
     }
 
 
-_DESK_CACHE: dict = {"data": None, "ts": 0.0}
+_DESK_CACHE: dict = {"data": None, "ts": 0.0, "refreshing": False}
+
+
+# 中国期货时段（简化模型：夜盘21-23 / 日盘 9-10:15,10:30-11:30,13:30-15；周六全天+周日休市）
+def _market_session(now: Optional[datetime] = None) -> dict:
+    from datetime import timedelta
+    now = now or datetime.now()
+    wd, t = now.weekday(), now.time()  # 5=六 6=日
+    h, m = t.hour, t.minute
+
+    def _next(day_offset: int, hh: int, mm: int) -> datetime:
+        d = now + timedelta(days=day_offset)
+        return d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+    def _pack(state: str, label: str, next_dt: datetime, next_label: str) -> dict:
+        return {"state": state, "label": label, "next_label": next_label,
+                "next_ts": int(next_dt.timestamp() * 1000),
+                "countdown_s": max(0, int((next_dt - now).total_seconds()))}
+
+    if wd == 5 or wd == 6:                       # 周末 → 周一 09:00
+        days = 7 - wd if wd == 5 else 1
+        return _pack("closed", "周末休市", _next(days, 9, 0), "周一日盘 09:00")
+    if wd == 4 and h >= 23:                      # 周五深夜（夜盘已收）→ 周一
+        return _pack("closed", "周末休市", _next(3, 9, 0), "周一日盘 09:00")
+    if h >= 23 or h < 3:                         # 夜盘后凌晨
+        return _pack("closed", "隔夜休市", _next(1, 9, 0) if h >= 23 else _next(0, 9, 0), "日盘 09:00")
+    if h >= 21:                                  # 夜盘
+        return _pack("night", "夜盘交易中", _next(1, 9, 0), "日盘 09:00")
+    if h < 9:                                    # 盘前
+        return _pack("closed", "盘前", _next(0, 9, 0), "日盘 09:00")
+    if h == 9 or (h == 10 and m < 15):           # 日盘第一节
+        return _pack("day", "日盘交易中", _next(0, 10, 15), "小节休息 10:15")
+    if h == 10 and m < 30:                       # 小节休息
+        return _pack("break", "小节休息", _next(0, 10, 30), "日盘 10:30")
+    if h == 10 or (h == 11 and m < 30):          # 日盘第二节
+        return _pack("day", "日盘交易中", _next(0, 11, 30), "午间休市 11:30")
+    if h == 11 or h == 12 or (h == 13 and m < 30):   # 午休
+        return _pack("break", "午间休市", _next(0, 13, 30), "日盘 13:30")
+    if h == 13 or h == 14:                       # 日盘下午
+        return _pack("day", "日盘交易中", _next(0, 15, 0), "收盘 15:00")
+    return _pack("closed", "已收盘", _next(0 if h < 21 else 1, 21, 0), "夜盘 21:00")
+
+
+@app.get("/api/market-pulse")
+async def market_pulse():
+    """市场脉搏：时段+倒计时 + 账户 + 日内盈亏 + 告警汇总（工作台顶部条，15s 一刷）"""
+    positions = THS_SYNC.get("positions") or []
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today_str]
+    closed_pnl = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
+    floating = sum(p.get("float_pnl") or 0 for p in positions)
+    alerts = _SHIELD_STATE.get("active_alerts") or []
+    return {
+        "ok": True,
+        "session": _market_session(),
+        "account": THS_SYNC.get("account") or {},
+        "daily": {
+            "trades_today": len(today_log),
+            "closed_pnl": round(closed_pnl, 1),
+            "floating_pnl": round(floating, 1),
+            "total_pnl": round(closed_pnl + floating, 1),
+        },
+        "positions": len(positions),
+        "watch_n": len(_MONITOR["watch"]),
+        "fatal": sum(1 for a in alerts if a.get("level") == "fatal"),
+        "warn": sum(1 for a in alerts if a.get("level") == "warn"),
+        "ths_ok": bool((THS_SYNC.get("last") or {}).get("ok")),
+        "mirror": THS_SYNC.get("mirror", False),
+    }
 
 
 @app.get("/api/trading-desk")
 async def trading_desk():
     """统一交易台：信号 + 计划 + THS持仓 + 建议 → 一张表。
-    60 秒缓存：首次 ~20 秒（拉快照），后续秒回。"""
+    60s 新鲜直回；过期但有旧数据 → 先回旧的、后台刷新（UI 永不等 30s 冷算）。"""
     now_loop = asyncio.get_event_loop().time()
     if _DESK_CACHE["data"] and now_loop - _DESK_CACHE["ts"] < 60:
+        return _DESK_CACHE["data"]
+    if _DESK_CACHE["data"]:
+        if not _DESK_CACHE["refreshing"]:
+            _DESK_CACHE["refreshing"] = True
+
+            async def _bg_refresh():
+                try:
+                    result = await _compute_trading_desk()
+                    _DESK_CACHE.update(data=result, ts=asyncio.get_event_loop().time())
+                finally:
+                    _DESK_CACHE["refreshing"] = False
+            asyncio.create_task(_bg_refresh())
         return _DESK_CACHE["data"]
     result = await _compute_trading_desk()
     _DESK_CACHE.update(data=result, ts=now_loop)

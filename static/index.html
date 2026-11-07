@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261106l">
+<link rel="stylesheet" href="/static/style.css?v=20261107b">
 </head>
 <body>
 
@@ -49,6 +49,7 @@
 
   <!-- ============ 工作台 ============ -->
   <section class="view active" id="view-work">
+    <div class="pulse-bar" id="pulseBar"><span class="muted small">市场脉搏加载中…</span></div>
     <div class="work-grid">
         <div class="card" id="watchCard">
           <div class="card-head">
@@ -307,7 +308,12 @@
           <div id="violationBody" style="padding:10px 14px"><div class="empty">加载中…</div></div>
         </div>
         <div class="card">
-          <div class="card-head"><h2>✍️ 交易心得</h2></div>
+          <div class="card-head">
+            <h2>✍️ 交易心得</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnAiReview" title="AI 汇总近期对话与心得 → 复盘报告">🤖 AI 复盘</button>
+            </div>
+          </div>
           <form id="noteForm" class="note-form">
             <div class="form-row">
               <input id="nfTitle" placeholder="标题（可空）">
@@ -322,6 +328,16 @@
             </div>
           </form>
           <div id="notesList" class="notes-list" style="max-height:300px;overflow-y:auto"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="card" id="reviewCard" style="display:none">
+          <div class="card-head">
+            <h2>🤖 AI 复盘</h2>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btnReviewSave" title="存入飞书《AI 复盘报告》">☁️ 存飞书</button>
+            </div>
+          </div>
+          <div class="md-block" id="reviewBody" style="padding:10px 14px"></div>
         </div>
       </div>
     </div>
@@ -506,8 +522,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261106l"></script>
-<script src="/static/js/views.js?v=20261106l"></script>
-<script src="/static/js/chat.js?v=20261106l"></script>
+<script src="/static/js/base.js?v=20261107b"></script>
+<script src="/static/js/views.js?v=20261107b"></script>
+<script src="/static/js/chat.js?v=20261107b"></script>
 </body>
 </html>

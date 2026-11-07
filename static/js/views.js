@@ -1030,8 +1030,11 @@ ${(() => {
     } catch (e) { alert("同步失败：" + e.message); }
   });
 
-  $("#btnAiReview").addEventListener("click", async () => {
+  // AI 复盘（元素已迁到人格分析区；缺失时静默跳过，绝不炸整个 IIFE）
+  const _btnAiReview = $("#btnAiReview");
+  if (_btnAiReview) _btnAiReview.addEventListener("click", async () => {
     const card = $("#reviewCard"), body = $("#reviewBody");
+    if (!card || !body) return;
     card.style.display = ""; body.innerHTML = '<span class="typing">AI 复盘生成中（约 30-60 秒）…</span>';
     $("#btnReviewSave").style.display = "";
     try {
@@ -1048,7 +1051,8 @@ ${(() => {
     }
   });
 
-  $("#btnReviewSave").addEventListener("click", async () => {
+  const _btnReviewSave = $("#btnReviewSave");
+  if (_btnReviewSave) _btnReviewSave.addEventListener("click", async () => {
     if (!FA._lastReview) { alert("还没有生成复盘报告"); return; }
     try {
       await api("/api/ai/review-save", { method: "POST", body: JSON.stringify({ report: FA._lastReview.report, stats: FA._lastReview.stats }) });
