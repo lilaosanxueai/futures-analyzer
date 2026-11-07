@@ -12,7 +12,7 @@
       FA.state.currentView = v;
       $$(".view").forEach((s) => s.classList.remove("active"));
       $("#view-" + v).classList.add("active");
-      if (v === "work") { loadDesk(); loadSignalsCard(); loadPremarket(); }
+      if (v === "work") { loadDesk(); loadSignalsCard(); }
       if (v === "real") { loadTrades(); loadStats(); fillSymbolReviewOptions(); loadThsSrc(); }
       if (v === "sim") { loadSimTrades(); loadSimStats(); loadVersus(); loadTrial(); }
       if (v === "persona") { loadFlaws(); loadMineRules(); loadProfileSummary(); loadMoodAndViolation(); loadRiskProfile(); loadMonthly(); loadNotes(); }
@@ -2264,41 +2264,13 @@ ${(() => {
       el.innerHTML = '<div class="empty">信号加载失败：' + esc(e.message) + "</div>";
     }
   }
-
-  async function loadPremarket() {
-    const el = $("#premarketBody");
-    if (!el) return;
-    try {
-      const d = await api("/api/premarket-check");
-      const rows = (d.checks || []).map((c) =>
-        '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line-soft)">' +
-        '<span>' + (c.ok ? "✅" : "❌") + "</span><b>" + esc(c.name) + "</b>" +
-        '<span class="muted small" style="margin-left:auto">' + esc(c.detail) + "</span></div>").join("");
-      const allOk = (d.checks || []).every((c) => c.ok);
-      // ★ 全绿自动折叠成一行；有异常强制展开；可手动开合
-      const expanded = !allOk || FA.state.pmExpand;
-      const toggle = '<div style="padding:2px 0"><a class="link-btn" id="pmToggle">' +
-        (expanded ? "收起明细 ▴" : "展开 8 项明细 ▾") + "</a></div>";
-      el.innerHTML = '<div style="padding:4px 0 6px;font-weight:700;color:' + (allOk ? "var(--down)" : "var(--warn)") + '">' +
-        (allOk ? "🟢 全部就绪" : d.summary || "⚠️ 有待处理项") + "</div>" +
-        (expanded ? rows + toggle : toggle);
-      const tg = $("#pmToggle");
-      if (tg) tg.addEventListener("click", () => {
-        FA.state.pmExpand = !FA.state.pmExpand;
-        loadPremarket();
-      });
-    } catch (e) {
-      el.innerHTML = '<div class="empty">自检失败：' + esc(e.message) + "</div>";
-    }
-  }
   FA.loadSignalsCard = loadSignalsCard;
-  FA.loadPremarket = loadPremarket;
+  // 盘前自检卡已从工作台移除——后端 /api/premarket-check 随叫随算，顶栏「盘前」按钮保留入口
 
   // 页面加载时初始调用 + 60s 自动刷新
   setTimeout(() => {
-    if (FA.state.currentView === "work") { loadDesk(); loadSignalsCard(); loadPremarket(); }
+    if (FA.state.currentView === "work") { loadDesk(); loadSignalsCard(); }
   }, 1200);
   setInterval(() => { if (FA.state.currentView === "work") loadDesk(); }, 60000);
   setInterval(() => { if (FA.state.currentView === "work") loadSignalsCard(); }, 60000);
-  setInterval(() => { if (FA.state.currentView === "work") loadPremarket(); }, 120000);
 })();
