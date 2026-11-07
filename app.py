@@ -257,24 +257,27 @@ _AK_DEGRADE_PAUSE = 90.0
 _AK_DEGRADE_THRESHOLD = 3
 
 
-async def call_ak(func, *args, **kwargs):
+async def call_ak(func, *args, probe: bool = False, **kwargs):
+    """probe=True：健康探测专用——失败不计数、不触发/延长熔断（观测不应反过来加重故障）"""
     global _AK_EXECUTOR
     loop = asyncio.get_running_loop()
     if loop.time() < _ak_degrade["until"]:
         raise TimeoutError("数据源限流降温中（连续超时自动暂停约 90 秒），稍后自动恢复")
     last_err = None
-    for attempt in range(_AK_MAX_TRIES):
+    for attempt in range(1 if probe else _AK_MAX_TRIES):
         try:
             fut = loop.run_in_executor(_AK_EXECUTOR, partial(func, *args, **kwargs))
             result = await asyncio.wait_for(fut, timeout=_AK_CALL_TIMEOUT)
-            _ak_degrade["fails"] = 0
+            if not probe:
+                _ak_degrade["fails"] = 0
             return result
         except (asyncio.TimeoutError, OSError) as e:
             last_err = e
-            _ak_degrade["fails"] += 1
-            if _ak_degrade["fails"] >= _AK_DEGRADE_THRESHOLD:
-                _ak_degrade["until"] = loop.time() + _AK_DEGRADE_PAUSE
-                _ak_degrade["fails"] = 0
+            if not probe:
+                _ak_degrade["fails"] += 1
+                if _ak_degrade["fails"] >= _AK_DEGRADE_THRESHOLD:
+                    _ak_degrade["until"] = loop.time() + _AK_DEGRADE_PAUSE
+                    _ak_degrade["fails"] = 0
             _AK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="akshare")
             if attempt + 1 < _AK_MAX_TRIES:
                 await asyncio.sleep(1.0 + attempt)
@@ -1760,8 +1763,9 @@ _intl_cache: dict = {"ts": 0.0, "items": [], "by_sym": {}}
 INTL_TTL = 30.0
 
 
-async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
-    """日线数据（带缓存：收盘后基本不变）。国际品种自动分流到外盘历史接口。"""
+async def get_daily(symbol: str, max_age: float = 60.0, probe: bool = False) -> list[dict]:
+    """日线数据（带缓存：收盘后基本不变）。国际品种自动分流到外盘历史接口。
+    probe=True：健康探测路径——失败不触发熔断（观测不加重故障）。"""
     symbol = symbol.upper()
     loop_now = asyncio.get_event_loop().time()
     cached = _daily_cache.get(symbol)
@@ -1769,7 +1773,7 @@ async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
         return cached[1]
 
     if symbol in _INTL_HIST_MAP:
-        df = await call_ak(ak.futures_foreign_hist, symbol=_INTL_HIST_MAP[symbol])
+        df = await call_ak(ak.futures_foreign_hist, symbol=_INTL_HIST_MAP[symbol], probe=probe)
         records = [
             {
                 "date": str(r["date"])[:10],
@@ -1789,7 +1793,7 @@ async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
     # 日线一律用主连（symbol 本身）：连续合约的持仓量为全市场口径、时间连续，
     # 资金博弈推断（增减仓×价格）依赖持仓可比性；具体月份合约的持仓是
     # 生命周期滚仓（新主力从 0 滚到满仓），跨日比较会把换月误判成资金进出。
-    df = await call_ak(ak.futures_zh_daily_sina, symbol=symbol)
+    df = await call_ak(ak.futures_zh_daily_sina, symbol=symbol, probe=probe)
     records = df.to_dict("records")
     today = datetime.now().strftime("%Y-%m-%d")
     ttl = DAILY_TTL_CLOSED if records and str(records[-1].get("date")) < today else max_age
@@ -1797,15 +1801,15 @@ async def get_daily(symbol: str, max_age: float = 60.0) -> list[dict]:
     return records
 
 
-async def get_minute(symbol: str, period: str) -> list[dict]:
-    """分钟 K 线（标准化字段，带缓存）"""
+async def get_minute(symbol: str, period: str, probe: bool = False) -> list[dict]:
+    """分钟 K 线（标准化字段，带缓存）。probe=True：探测路径不触发熔断。"""
     symbol = symbol.upper()
     key = (symbol, period)
     loop_now = asyncio.get_event_loop().time()
     cached = _minute_cache.get(key)
     if cached and loop_now - cached[0] < MINUTE_TTL:
         return cached[1]
-    df = await call_ak(ak.futures_zh_minute_sina, symbol=symbol, period=period)
+    df = await call_ak(ak.futures_zh_minute_sina, symbol=symbol, period=period, probe=probe)
     rows = [
         {
             "datetime": str(r.get("datetime") or r.get("date") or ""),
@@ -8815,11 +8819,11 @@ async def _selfcheck_run(ping_ai: bool = False) -> list:
         return f"RB0 {q.get('last')}"
 
     async def probe_kline():
-        d = await get_daily("RB0")
+        d = await get_daily("RB0", probe=True)
         return f"{len(d)} 根日线"
 
     async def probe_minute():
-        rows = await get_minute("RB0", "1")
+        rows = await get_minute("RB0", "1", probe=True)
         return f"{len(rows)} 根分钟线"
 
     async def probe_intl():
