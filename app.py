@@ -555,6 +555,7 @@ async def _ths_scan_once() -> dict:
                 pass
     _ths_log(f"读取成功：{r['texts']} 元素 / {len(r['quotes'])} 条报价 / {len(r['positions'])} 笔持仓")
     # ★ 账户权益历史化：每次扫描记录（≥5 分钟间隔），90 天窗口——真金白银的资金曲线
+    # ★ 附带回撤熔断：当日回撤 ≥2% 或 7 日高点回撤 ≥5% → fatal（资金曲线的活体防线）
     try:
         _eq = (r.get("account") or {}).get("equity")
         if _eq and float(_eq) > 0:
@@ -569,6 +570,35 @@ async def _ths_scan_once() -> dict:
                 cutoff = now_ms2 - 90 * 86400 * 1000
                 hist = [h for h in hist if h.get("ts", 0) > cutoff][-26000:]
                 _atomic_write(_eq_file, json.dumps(hist, ensure_ascii=False))
+
+                # ── 回撤熔断（当日样本 ≥3 才判，避免首笔噪声）──
+                today_key = datetime.now().strftime("%Y-%m-%d")
+                day_pts = [h for h in hist
+                           if datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d") == today_key]
+                if len(day_pts) >= 3:
+                    day_start, last_eq = day_pts[0]["equity"], day_pts[-1]["equity"]
+                    dd_day = (last_eq - day_start) / day_start * 100
+                    week_peak = max(h["equity"] for h in hist if h["ts"] > now_ms2 - 7 * 86400 * 1000) \
+                        if any(h["ts"] > now_ms2 - 7 * 86400 * 1000 for h in hist) else None
+                    dd_week = (last_eq - week_peak) / week_peak * 100 if week_peak else 0
+                    _msg = None
+                    if dd_week <= -5:
+                        _msg = (f"🛑 周回撤熔断！权益距 7 日高点 {week_peak:,.0f} 已回撤 {abs(dd_week):.1f}%"
+                                f"（现 {last_eq:,.0f}）——降仓或停手，先保住本金")
+                    elif dd_day <= -2:
+                        _msg = (f"⚠️ 当日回撤 {abs(dd_day):.1f}%（{day_start:,.0f} → {last_eq:,.0f}）"
+                                f"——离日亏停手线不远了，停止开新仓")
+                    if _msg:
+                        _rk = "drawdown"
+                        if now_ms2 - _SHIELD_STATE["alert_repeat"].get(_rk, 0) >= 10 * 60 * 1000:
+                            _SHIELD_STATE["alert_repeat"][_rk] = now_ms2
+                            _emit_event({
+                                "id": f"drawdown-{now_ms2}", "ts": now_ms2,
+                                "kind": "diag", "etype": "DRAWDOWN", "level": "fatal",
+                                "symbol": "", "name": "", "dir": "down", "price": None,
+                                "text": _msg, "chg5": 0, "chg15": 0, "threshold": 0,
+                                "intl": False, "ai": "",
+                            }, feishu=True, feishu_text="🛡️ 回撤熔断告警\n" + _msg)
     except Exception:
         pass  # 权益记录失败不影响盯屏
     return {"ok": True, "quotes": r["quotes"], "positions": r["positions"],
@@ -758,6 +788,7 @@ def _load_shield_state() -> None:
         _SHIELD_STATE["prev_positions"] = d.get("prev_positions") or {}
         repeat = {k: v for k, v in (d.get("alert_repeat") or {}).items() if v > week_ago}
         _SHIELD_STATE["alert_repeat"] = repeat
+        _SHIELD_STATE["last_loss_close_ts"] = d.get("last_loss_close_ts") or 0
         _ths_log(f"盾状态已恢复：{len(_SHIELD_STATE['trade_log'])} 条日志 / "
                  f"{len(_SHIELD_STATE['prev_positions'])} 个持仓快照")
     except Exception:
@@ -954,6 +985,21 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                 "first_seen": now_ms, "last_pnl": pos.get("float_pnl"),
                 "date": now.strftime("%Y-%m-%d"),
             })
+            # ★ 亏损后冲动再开仓（G11 活体版）：亏平后 30 分钟内新仓 → 当场 fatal（直接发，⑦在推送段之后）
+            last_loss = _SHIELD_STATE.get("last_loss_close_ts") or 0
+            if last_loss and now_ms - last_loss < 30 * 60 * 1000:
+                gap_min = (now_ms - last_loss) / 60000
+                _rk = f"revenge:{sym_key}"
+                if now_ms - _SHIELD_STATE["alert_repeat"].get(_rk, 0) >= 60000:
+                    _SHIELD_STATE["alert_repeat"][_rk] = now_ms
+                    _emit_event({
+                        "id": f"shield-revenge-{now_ms}-{sym_key}", "ts": now_ms,
+                        "kind": "diag", "etype": "SHIELD", "level": "fatal",
+                        "symbol": _ths_pref(sym_key), "name": "", "dir": "down", "price": None,
+                        "text": f"🚫 亏损后 {gap_min:.0f} 分钟就再开仓！历史实锤：亏后下一笔均 -17 点/胜率 44%"
+                                f"（vs 赢后 +2/62%）——冷静期 30 分钟是铁律",
+                        "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                    }, feishu=True, feishu_text=f"🛡️ 报复性开仓拦截警报\n{sym_key} 亏损平仓后 {gap_min:.0f} 分钟内再开仓——这是统计上最亏钱的模式")
         else:
             # 更新现有
             for log in _SHIELD_STATE["trade_log"]:
@@ -997,9 +1043,32 @@ async def _shield_close_log():
         })
         # ★ AI 即时复盘（150 字一句话教训，后台运行不阻塞）
         asyncio.create_task(_shield_ai_review(sym, direction, lots, entry, pnl))
+        # ★ 亏损平仓 → 启动 30 分钟冷静期：+25 分钟主动提醒（亏损模式活体防线）
+        if pnl is not None and pnl < 0:
+            _SHIELD_STATE["last_loss_close_ts"] = now_ms
+            asyncio.create_task(_cooldown_reminder(sym, pnl))
     # 限制日志长度
     _SHIELD_STATE["trade_log"] = _SHIELD_STATE["trade_log"][-100:]
     _save_shield_state()
+
+
+async def _cooldown_reminder(symbol: str, pnl: float) -> None:
+    """亏损平仓后 25 分钟主动提醒：冷静期还剩 5 分钟——把统计铁律送到眼前。"""
+    try:
+        await asyncio.sleep(25 * 60)
+        if not is_trading_time():
+            return
+        now_ms = int(time.time() * 1000)
+        _emit_event({
+            "id": f"cooldown-{now_ms}-{symbol}", "ts": now_ms,
+            "kind": "diag", "etype": "COOLDOWN", "level": "warn",
+            "symbol": _ths_pref(symbol), "name": "", "dir": "up", "price": None,
+            "text": f"🧘 {symbol} 亏损 {pnl:+.0f} 点平仓已 25 分钟——冷静期还剩 5 分钟。"
+                    f"历史：亏后下一笔均 -17 点/胜率 44%，忍住就是赚",
+            "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+        })
+    except Exception:
+        pass  # 提醒失败无副作用
 
 
 async def _shield_ai_review(symbol: str, direction: str, lots: float, entry: float, pnl):
