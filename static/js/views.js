@@ -1824,9 +1824,19 @@ ${(() => {
     try {
       const d = await api("/api/profile");
       const p = d.profile || {};
-      el.innerHTML = (p.ai_summary ? md(p.ai_summary) : '<div class="empty">点击「🧠 AI 综合画像」从真实记录推导你的交易风格</div>') +
-        (p.style ? '<div class="kv"><span class="k">风格</span><span class="v">' + esc(p.style) + "</span></div>" : "") +
-        (p.risk_preference ? '<div class="kv"><span class="k">风险偏好</span><span class="v">' + esc(p.risk_preference) + "</span></div>" : "");
+      // 断尾守卫：字段生成时可能被 max_tokens 截断（结尾无终止标点）→ 裁到最后一个完整子句
+      const trimBroken = (t) => {
+        if (!t || typeof t !== "string") return t;
+        if (/[。！？.!？]\s*$/.test(t)) return t;
+        const cut = Math.max(t.lastIndexOf("。"), t.lastIndexOf("！"), t.lastIndexOf("？"), t.lastIndexOf("；"));
+        return cut > 10 ? t.slice(0, cut) + "。" : t;
+      };
+      const ai = p.ai_summary || "";
+      // 去重：AI 摘要已包含的内容不再单独铺 kv 行
+      const inAi = (v) => !v || (ai && ai.includes(String(v).slice(0, 15)));
+      el.innerHTML = (ai ? md(ai) : '<div class="empty">点击「🧠 综合画像」从真实记录推导你的交易风格</div>') +
+        (p.style && !inAi(p.style) ? '<div class="kv"><span class="k">风格</span><span class="v">' + esc(trimBroken(p.style)) + "</span></div>" : "") +
+        (p.risk_preference && !inAi(p.risk_preference) ? '<div class="kv"><span class="k">风险偏好</span><span class="v">' + esc(trimBroken(p.risk_preference)) + "</span></div>" : "");
     } catch (e) { /* ignore */ }
   }
 

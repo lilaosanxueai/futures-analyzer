@@ -8424,12 +8424,22 @@ async def synthesize_profile():
     p["ai_summary_ts"] = int(datetime.now().timestamp() * 1000)
     try:
         import re as _re
+
+        def _clean_field(txt: str, cap: int = 200) -> str:
+            """截到 cap 内的最后一个完整子句——绝不入库半句话"""
+            t = txt.strip()[:cap]
+            if t and not t[-1] in "。！？.!?":
+                cut = max(t.rfind("。"), t.rfind("！"), t.rfind("？"), t.rfind("；"))
+                if cut > 10:
+                    t = t[:cut] + "。"
+            return t
+
         m = _re.search(r"交易风格[^\n：:]*[：:]\s*([^\n]+)", report)
         if m:
-            p["style"] = m.group(1).strip()[:100]
+            p["style"] = _clean_field(m.group(1))
         m = _re.search(r"风险偏好[^\n：:]*[：:]\s*([^\n]+)", report)
         if m:
-            p["risk_preference"] = m.group(1).strip()[:50]
+            p["risk_preference"] = _clean_field(m.group(1))
         for lm in _re.finditer(r"^\s*(?:[-*]\s*)?(\S[^\n]{8,80})$", report.split("核心教训")[-1].split("**教练总评**")[0], _re.M):
             txt = lm.group(1).strip().lstrip("-* ").strip()
             if txt and not any(txt[:12] in x for x in p.get("lessons", [])):
