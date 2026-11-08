@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261108b">
+<link rel="stylesheet" href="/static/style.css?v=20261108c">
 </head>
 <body>
 
@@ -296,7 +296,10 @@
       <div class="card chat-card" id="chatCard" style="height:auto;min-height:600px">
         <div class="card-head">
           <h2>AI 反幻想教练</h2>
-          <select id="chatSymbol" class="select sm" title="关联品种（对话上下文）"><option value="">不关联品种</option></select>
+          <div class="head-actions">
+            <button class="btn ghost sm" id="btnReplayQuiz" title="从你的历史伤疤里出题：给题面前10日K线，考你这天怎么做">🎬 回放考</button>
+            <select id="chatSymbol" class="select sm" title="关联品种（对话上下文）"><option value="">不关联品种</option></select>
+          </div>
         </div>
         <div class="chat-log" id="chatLog" style="flex:1;min-height:350px">
           <div class="chat-welcome">
@@ -326,6 +329,14 @@
     </div>
   </section>
 </main>
+
+<!-- 回放考试弹窗 -->
+<div class="modal-mask hidden" id="replayModal">
+  <div class="modal">
+    <div class="modal-head"><h2>🎬 回放考试 <span class="muted small">历史伤疤 · 你当时会怎么做</span></h2><button class="btn ghost sm" data-close="replayModal">✕</button></div>
+    <div class="modal-body" id="replayBody"><div class="empty">出题中…</div></div>
+  </div>
+</div>
 
 <!-- 设置弹窗 -->
 <div class="modal-mask hidden" id="settingsModal">
@@ -469,8 +480,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261108b"></script>
-<script src="/static/js/views.js?v=20261108b"></script>
-<script src="/static/js/chat.js?v=20261108b"></script>
+<script src="/static/js/base.js?v=20261108c"></script>
+<script src="/static/js/views.js?v=20261108c"></script>
+<script src="/static/js/chat.js?v=20261108c"></script>
 </body>
 </html>

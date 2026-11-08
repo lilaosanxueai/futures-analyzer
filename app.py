@@ -3822,6 +3822,109 @@ class ChatIn(BaseModel):
     light: int = 0  # 1=跳过行情上下文（复盘/周报等与实时盘面无关的调用）
 
 
+# ---------------------------------------------------------------- 回放训练场（历史伤疤 → 模拟考）
+# 分钟线只回溯 ~3 天 → 考题用日线粒度：给出题日前 10 根日线，考"这一天你打算怎么做"，
+# 揭晓你当时真实做了什么 + 结局 + AI 点评。题库=档案里 ≤-50 点的 29 道伤疤题。
+
+_REPLAY_PENDING: dict[str, dict] = {}
+
+
+@app.get("/api/replay/quiz")
+async def replay_quiz():
+    """出题：随机抽一道伤疤题，只给题面（前 10 日日线+背景），不给结局。"""
+    archive = [t for t in _load_full_trades()
+               if t.get("status") == "closed" and (t.get("result_pts") or 0) <= -50
+               and t.get("date") and t.get("symbol")]
+    if not archive:
+        raise HTTPException(status_code=404, detail="题库为空：需要已平仓的亏损记录")
+    import random
+    trade = random.choice(archive)
+    bars = await get_daily(trade["symbol"], max_age=3600)
+    dates = [str(b.get("date") or "")[:10] for b in bars]
+    try:
+        i = dates.index(trade["date"])
+    except ValueError:
+        # 题日不在日线（数据边界）→ 换一题（最多 5 次）
+        for _ in range(5):
+            trade = random.choice(archive)
+            try:
+                bars = await get_daily(trade["symbol"], max_age=3600)
+                dates = [str(b.get("date") or "")[:10] for b in bars]
+                i = dates.index(trade["date"])
+                break
+            except ValueError:
+                continue
+        else:
+            raise HTTPException(status_code=502, detail="该题日线数据不可用，稍后再试")
+    prior = bars[max(0, i - 10):i]           # 题面前 10 根（不含题日）
+    next_bar = bars[i] if i < len(bars) else {}
+    lines = []
+    for b in prior:
+        hold = _num(b.get("hold"))
+        hold_s = f" 持{int(hold):+d}" if hold else ""
+        lines.append(f"{str(b.get('date'))[:10]} 开{_num(b.get('open')):.0f} 高{_num(b.get('high')):.0f} "
+                     f"低{_num(b.get('low')):.0f} 收{_num(b.get('close')):.0f}{hold_s}")
+    quiz_id = f"rq-{int(time.time()*1000)}"
+    _REPLAY_PENDING[quiz_id] = {"trade": trade, "next_bar": next_bar}
+    # 只留 5 道待答
+    for k in list(_REPLAY_PENDING)[:-5]:
+        _REPLAY_PENDING.pop(k, None)
+    return {
+        "ok": True, "quiz_id": quiz_id,
+        "symbol": trade["symbol"], "name": _PREFIX_CN.get(_variety_prefix(trade["symbol"]), ""),
+        "date": trade["date"], "prior_bars": lines,
+        "prompt": f"以上是 {trade['symbol']} 在 {trade['date']} 之前的 10 根日线（开高低收+持仓变化）。"
+                  f"这一天即将开盘——你打算怎么做？做多/做空/观望，为什么？",
+    }
+
+
+class ReplayAnswerIn(BaseModel):
+    quiz_id: str
+    action: str          # long / short / watch
+    reason: str = ""
+
+
+@app.post("/api/replay/answer")
+async def replay_answer(body: ReplayAnswerIn):
+    """揭晓：真实交易 + 题日行情 + AI 点评你的答案 vs 实际。"""
+    pend = _REPLAY_PENDING.pop(body.quiz_id, None)
+    if not pend:
+        raise HTTPException(status_code=404, detail="考题已过期（每题只能答一次），请重新出题")
+    t = pend["trade"]
+    nb = pend["next_bar"]
+    actual_dir = "做多" if t["direction"] == "long" else "做空"
+    nb_line = ""
+    if nb:
+        o, h, l, c = (_num(nb.get(k)) for k in ("open", "high", "low", "close"))
+        day_chg = ((c - o) / o * 100) if o else 0
+        nb_line = (f"当日行情：开{o:.0f} 高{h:.0f} 低{l:.0f} 收{c:.0f}"
+                   f"（开→收 {'+' if day_chg>=0 else ''}{day_chg:.1f}%）")
+    hit = (body.action == t["direction"])
+    try:
+        grade = await _call_ai_simple([{"role": "user", "content":
+            f"交易回放考试点评（60字内，直击要害）：\n"
+            f"历史伤疤：{t['symbol']} {t['date']} {actual_dir} {t.get('lots',1)}手 @{t.get('entry')}"
+            f" → 平仓 {t.get('exit')}，结果 {t.get('result_pts'):+.0f} 点。{nb_line}\n"
+            f"考生答案：{ {'long':'做多','short':'做空','watch':'观望'}[body.action] }，理由：{body.reason[:100] or '（没写）'}\n"
+            f"点评要点：方向对错本身不重要，重要的是理由里有没有当时该看到的风险信号；"
+            f"若考生选择观望则表扬——回避伤疤本身就是进步。"
+        }], max_tokens=160)
+    except Exception:
+        grade = ""
+    return {
+        "ok": True,
+        "reveal": {
+            "actual": f"{t['symbol']} {t['date']} 实际{actual_dir} {t.get('lots',1)}手 @ {t.get('entry')}"
+                      f" → {t.get('exit')}，结果 {t.get('result_pts'):+.0f} 点",
+            "note": (t.get("note") or "")[:80],
+            "day_bar": nb_line,
+        },
+        "your_action": {"long": "做多", "short": "做空", "watch": "观望"}[body.action],
+        "same_as_actual": hit,
+        "grade": grade.strip() if grade else "",
+    }
+
+
 def _build_api_messages(chat_messages: list[ChatMessage], system: str) -> list[dict]:
     """构造 API 消息：带图消息转 OpenAI 多模态 content 数组。
     仅保留最后一条带图消息的图片，历史图片剥除，避免 token 反复计入。"""

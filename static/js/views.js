@@ -2241,6 +2241,57 @@ ${(() => {
   FA.loadPlans = loadPlans;
   FA.loadSignals = loadSignals;
 
+  // ================================================================ 🎬 回放考试（历史伤疤模拟考）
+  const _btnReplayQuiz = $("#btnReplayQuiz");
+  if (_btnReplayQuiz) _btnReplayQuiz.addEventListener("click", loadReplayQuiz);
+  async function loadReplayQuiz() {
+    const modal = $("#replayModal"), body = $("#replayBody");
+    if (!modal || !body) return;
+    modal.classList.remove("hidden");
+    body.innerHTML = '<span class="typing">从伤疤库出题中（拉日线，约 5-20 秒）…</span>';
+    try {
+      const d = await api("/api/replay/quiz");
+      const bars = (d.prior_bars || []).map((l) => '<div style="font-family:monospace;font-size:12px">' + esc(l) + "</div>").join("");
+      body.innerHTML =
+        '<div style="margin-bottom:8px"><b>' + esc(d.name || d.symbol) + " " + esc(d.symbol) +
+        "</b> · " + esc(d.date) + ' 开盘在即 <span class="muted small">（前 10 日 · 开高低收±持仓）</span></div>' +
+        '<div style="background:var(--panel-2);border-radius:6px;padding:8px 10px;margin-bottom:10px">' + bars + "</div>" +
+        '<div style="font-weight:600;margin-bottom:8px">' + esc(d.prompt) + "</div>" +
+        '<div style="display:flex;gap:6px;margin-bottom:8px">' +
+        '<button class="btn" data-rp-act="long">做多</button>' +
+        '<button class="btn" data-rp-act="short">做空</button>' +
+        '<button class="btn ghost" data-rp-act="watch">观望</button></div>' +
+        '<textarea id="rpReason" rows="2" placeholder="理由（写清靠什么赚钱——这是判分重点）" style="width:100%;font-size:12px"></textarea>' +
+        '<div id="rpResult"></div>';
+      $$("#replayBody [data-rp-act]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          const reason = $("#rpReason") ? $("#rpReason").value.trim() : "";
+          if (!reason) { alert("先写理由——没有理由的选择不值得考"); return; }
+          const res = $("#rpResult");
+          res.innerHTML = '<span class="typing">揭晓中（AI 点评约 10-30 秒）…</span>';
+          try {
+            const r = await api("/api/replay/answer", { method: "POST",
+              body: JSON.stringify({ quiz_id: d.quiz_id, action: b.getAttribute("data-rp-act"), reason }) });
+            const sameTxt = r.same_as_actual ? "⚠️ 你和当时选了同方向" : r.your_action === "观望" ? "🛡️ 你选择观望——回避伤疤就是进步" : "✅ 你的方向与当时不同";
+            res.innerHTML =
+              '<div style="border-top:1px dashed var(--line-soft);margin-top:10px;padding-top:8px">' +
+              '<div style="font-weight:700;color:var(--danger);margin-bottom:4px">📖 揭晓</div>' +
+              '<div class="mini-note">' + esc(r.reveal.actual) + "</div>" +
+              (r.reveal.day_bar ? '<div class="mini-note">' + esc(r.reveal.day_bar) + "</div>" : "") +
+              (r.reveal.note ? '<div class="muted small">' + esc(r.reveal.note) + "</div>" : "") +
+              '<div style="margin:6px 0"><b>' + sameTxt + "</b></div>" +
+              (r.grade ? '<div class="md-block" style="background:var(--panel-2);border-radius:6px;padding:8px 10px">' + md(r.grade) + "</div>" : "") +
+              '<button class="btn ghost sm" id="rpNext" style="margin-top:8px">🎬 下一题</button></div>';
+            const nx = $("#rpNext");
+            if (nx) nx.addEventListener("click", loadReplayQuiz);
+          } catch (e) { res.innerHTML = '<span style="color:var(--danger)">揭晓失败：' + esc(e.message) + "</span>"; }
+        });
+      });
+    } catch (e) {
+      body.innerHTML = '<div class="empty">出题失败：' + esc(e.message) + "</div>";
+    }
+  }
+
   // ================================================================ 信号雷达 / 盘前自检（工作台）
   async function loadSignalsCard() {
     const el = $("#signalCardBody");
