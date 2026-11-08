@@ -27,7 +27,7 @@ import akshare as ak
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -168,6 +168,10 @@ DEFAULT_CONFIG = {
     },
     "ths_symbol_map": {},            # THS 品种代码/名称映射（扫描时自动更新，持久化）
     "ths_allowlist": [],             # THS 同步品种白名单（前缀，空=全部接收）——过滤扫描页面里混入的非自选品种
+    "remote_access": {               # 手机远程（同 WiFi）：开启后绑 0.0.0.0，非本机请求必须带 token
+        "enabled": False,
+        "token": "",
+    },
     # 风控参数（诊断引擎的预警阈值，用户按自身账户设定，AI 不代定）
     "discipline": {
         "account_size": 0.0,       # 账户权益（0=未设置，风险类检查跳过）
@@ -1200,6 +1204,89 @@ async def _static_cache_headers(request: Request, call_next):
     elif p == "/" or p.endswith(".html"):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ------- 手机远程访问（同 WiFi）：非本机请求必须带 token，否则 401 -------
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else "") or ""
+
+
+def _is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+
+
+def _lan_ip() -> str:
+    import socket as _sock
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "?.?.?.?"
+
+
+@app.middleware("http")
+async def _remote_token_gate(request: Request, call_next):
+    ra = load_config().get("remote_access") or {}
+    if ra.get("enabled"):
+        host = _client_ip(request)
+        if not _is_loopback(host):
+            want = ra.get("token") or ""
+            given = (request.query_params.get("key") or request.headers.get("x-remote-token", ""))
+            via_cookie = request.cookies.get("fa_key") == want
+            if given != want and not via_cookie:
+                return JSONResponse({"ok": False, "detail": "远程访问需带访问码（设置→手机访问查看）"},
+                                    status_code=401)
+            resp = await call_next(request)
+            # 首次凭 URL ?key= 进入 → 种 Cookie，此后页面内 API 请求自动携带
+            if given == want and want and not via_cookie:
+                resp.set_cookie("fa_key", want, max_age=30 * 86400, samesite="lax")
+            return resp
+    return await call_next(request)
+
+
+class RemoteAccessIn(BaseModel):
+    enabled: Optional[bool] = None
+    regenerate: int = 0
+
+
+@app.get("/api/remote-access")
+async def remote_access_get():
+    ra = load_config().get("remote_access") or {}
+    return {"ok": True, "enabled": bool(ra.get("enabled")),
+            "token": ra.get("token", ""),
+            "lan_url": f"http://{_lan_ip()}:8300/?key={ra.get('token', '')}" if ra.get("enabled") else ""}
+
+
+@app.post("/api/remote-access")
+async def remote_access_post(body: RemoteAccessIn):
+    cfg = load_config()
+    ra = cfg.setdefault("remote_access", {"enabled": False, "token": ""})
+    if body.regenerate or not ra.get("token"):
+        import secrets
+        ra["token"] = secrets.token_hex(4)   # 8 位短码：同 WiFi 场景够用且好输
+    if body.enabled is not None:
+        ra["enabled"] = bool(body.enabled)
+    save_config(cfg)
+    note = ""
+    if ra["enabled"]:
+        note = "已开启——服务需重启后生效；手机与电脑须同一 WiFi"
+        # 防火墙放行（需管理员；失败不影响绑定，只在局域网内被拦时需要手动放行）
+        import subprocess
+        try:
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 "name=futures-analyzer-8300", "dir=in", "action=allow",
+                 "protocol=TCP", "localport=8300"],
+                capture_output=True, timeout=8, check=True)
+            note += "；防火墙已放行"
+        except Exception:
+            note += "；防火墙自动放行失败（需管理员）——若手机打不开，用管理员运行：netsh advfirewall firewall add rule name=futures-analyzer-8300 dir=in action=allow protocol=TCP localport=8300"
+        _ths_log(f"远程访问已开启：http://{_lan_ip()}:8300/?key={ra['token']}")
+    return {"ok": True, "enabled": ra["enabled"], "token": ra["token"],
+            "lan_url": f"http://{_lan_ip()}:8300/?key={ra['token']}" if ra["enabled"] else "", "note": note}
 
 
 # ------- 期货通盯屏同步端点（THS_SYNC 状态与 ths_sync_loop 定义在 lifespan 之前）-------
@@ -9146,4 +9233,7 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8300)
+    # 远程访问开启时绑 0.0.0.0（手机同 WiFi 可达），否则仅本机
+    _ra = load_config().get("remote_access") or {}
+    _host = "0.0.0.0" if _ra.get("enabled") else "127.0.0.1"
+    uvicorn.run(app, host=_host, port=8300)

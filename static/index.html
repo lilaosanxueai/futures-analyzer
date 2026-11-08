@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货心理博弈分析</title>
 <script>try{var T=["default","light","warm","cool","mint","cream","dark"];var t=localStorage.getItem("fa_theme");if(t==="dark")document.documentElement.setAttribute("data-theme","dark");else if(t&&T.indexOf(t)>=0&&t!=="default"&&t!=="light")document.documentElement.setAttribute("data-theme",t);else if(t&&T.indexOf(t)<0)localStorage.removeItem("fa_theme")}catch(e){}</script>
-<link rel="stylesheet" href="/static/style.css?v=20261108d">
+<link rel="stylesheet" href="/static/style.css?v=20261108e">
 </head>
 <body>
 
@@ -386,6 +386,19 @@
           <button class="btn ghost sm" id="btnFsTest">推送测试</button>
         </div>
       </div>
+      <div class="set-group">
+        <h3>📱 手机访问（同 WiFi）</h3>
+        <div class="form-row">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:6px;font-size:13px">
+            <input type="checkbox" id="setRemoteOn"> 开启（重启服务后生效）
+          </label>
+          <button class="btn ghost sm" id="btnRemoteToken">换访问码</button>
+        </div>
+        <div class="form-row">
+          <input id="setRemoteUrl" readonly placeholder="开启后这里显示手机访问地址" onclick="this.select()">
+        </div>
+        <div class="mini-note">手机与电脑连同一 WiFi，浏览器打开上面的地址即可看盘。非本机访问必须带访问码。</div>
+      </div>
     </div>
     <div class="modal-foot">
       <button class="btn primary" id="btnSaveSettings">保存 AI 配置</button>
@@ -485,8 +498,8 @@
   </div>
 </div>
 
-<script src="/static/js/base.js?v=20261108d"></script>
-<script src="/static/js/views.js?v=20261108d"></script>
-<script src="/static/js/chat.js?v=20261108d"></script>
+<script src="/static/js/base.js?v=20261108e"></script>
+<script src="/static/js/views.js?v=20261108e"></script>
+<script src="/static/js/chat.js?v=20261108e"></script>
 </body>
 </html>

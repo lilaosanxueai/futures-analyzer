@@ -283,6 +283,12 @@
       $("#setFsAppId").value = "";
       $("#setFsSecret").value = "";
       $("#setFsWebhook").value = "";
+      // 手机远程访问
+      try {
+        const ra = await api("/api/remote-access");
+        $("#setRemoteOn").checked = !!ra.enabled;
+        $("#setRemoteUrl").value = ra.lan_url || "";
+      } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
   });
   $("#setProvider").addEventListener("change", (e) => {
@@ -343,6 +349,20 @@
   $("#btnFsTest").addEventListener("click", async () => {
     try { await api("/api/feishu/push-test", { method: "POST" }); alert("测试消息已发送"); }
     catch (e) { alert("推送失败：" + e.message); }
+  });
+  $("#setRemoteOn").addEventListener("change", async (e) => {
+    try {
+      const d = await api("/api/remote-access", { method: "POST", body: JSON.stringify({ enabled: e.target.checked }) });
+      $("#setRemoteUrl").value = d.lan_url || "";
+      if (d.note) alert(d.note);
+    } catch (err) { alert("设置失败：" + err.message); e.target.checked = !e.target.checked; }
+  });
+  $("#btnRemoteToken").addEventListener("click", async () => {
+    try {
+      const d = await api("/api/remote-access", { method: "POST", body: JSON.stringify({ regenerate: 1 }) });
+      $("#setRemoteUrl").value = d.lan_url || "";
+      alert("新访问码：" + d.token + (d.enabled ? "\n" + d.note : "\n（当前未开启，勾选开启后重启生效）"));
+    } catch (err) { alert("失败：" + err.message); }
   });
 
   // ---------- 启动 ----------
