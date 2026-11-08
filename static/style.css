@@ -199,6 +199,14 @@ main { padding: 10px 14px 20px; max-width: none; margin: 0 auto; }
 #newsCard #newsList, #hotCard #hotList { flex: 1; }
 #intlCard .intl-row { flex: 1; }
 
+/* ---- 人格分析页：两列底边对齐（弹性列+末卡补高） ---- */
+#view-persona .trades-left, #view-persona .trades-right { display: flex; flex-direction: column; }
+#view-persona .trades-left > .card { flex: 0 0 auto; }
+#view-persona .trades-right > .card { flex: 0 0 auto; }
+#view-persona .trades-left > .card:nth-last-child(2) { flex: 1; }   /* 末张可见卡补高（最后是隐藏复盘卡） */
+#view-persona .trades-right > .card:last-child { flex: 1; }
+#view-persona .notes-list { flex: 1; }
+
 /* ---- 卡内分节（人格分析整合卡） ---- */
 .sec-divider { border-top: 1px dashed var(--line-soft); margin: 2px 0; }
 .sec-title {
