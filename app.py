@@ -1548,6 +1548,40 @@ async def _warmup():
     asyncio.create_task(_desk_warm())
 
 
+async def fills_auto_loop():
+    """交易日收盘后自动深采成交（15:05-15:59 / 23:05-23:59 窗口内试一次成功即止；
+    期货通未开则静默跳过等下一分钟；不动 UI 的部分用户无感——补采从此无需手点）。"""
+    done: set[str] = set()
+    while True:
+        try:
+            now = datetime.now()
+            if now.weekday() <= 4:
+                slot = None
+                if now.hour == 15 and now.minute >= 5:
+                    slot = "day"
+                elif now.hour == 23 and now.minute >= 5:
+                    slot = "night"
+                if slot:
+                    key = now.strftime("%Y-%m-%d-") + slot
+                    in_window = key not in done
+                    if in_window and _ths_hwnd() and not _THS_SCANNING["busy"]:
+                        _ths_log(f"收盘自动补采（{slot}）启动")
+                        r = await asyncio.to_thread(_ths_fills_deep_collect)
+                        if r.get("ok"):
+                            fills = r.get("fills") or []
+                            THS_SYNC["fills"] = fills
+                            _ths_fills_merge(fills)
+                            _ths_fills_to_trades()
+                            _shield_reconcile_from_fills()
+                            _ths_log(f"收盘自动补采完成：{len(fills)} 笔成交")
+                        done.add(key)
+                    elif not _ths_hwnd() and (now.hour == 15 and now.minute >= 55 or now.hour == 23 and now.minute >= 55):
+                        done.add(key)  # 窗口尾仍未开窗 → 放弃本时段
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     # ★ 启动即恢复自选：从持久化 symbol_map 回填（周末/THS 未开时看板不空转）
@@ -1575,9 +1609,11 @@ async def lifespan(_app):
     poshealth_task = asyncio.create_task(_pos_health_monitor())
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
+    fillsauto_task = asyncio.create_task(fills_auto_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
-              care_task, ths_task, backup_task, poshealth_task, report_task, selfcheck_task):
+              care_task, ths_task, backup_task, poshealth_task, report_task, selfcheck_task,
+              fillsauto_task):
         t.cancel()
 
 
@@ -9196,6 +9232,11 @@ def _save_reports(data: dict) -> None:
 
 async def _generate_report() -> str:
     """晨/夜报：自选品种博弈快照 + 持仓诊断 + 外盘锚 → AI 反幻想简报"""
+    # 先结算信号战绩——自检块永远带最新判决
+    try:
+        await _sig_settle_daily()
+    except Exception:
+        pass
     parts = []
     syms = sorted(set(_MONITOR["watch"]) | {"SC0", "AU0"})[:8]
     lines = []
