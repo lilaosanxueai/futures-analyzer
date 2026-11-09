@@ -463,11 +463,22 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
             return _ths_num(texts[i + 1 + j]) if (i + 1 + j) < len(texts) else None
         lots = _at(2)                # 总仓（+2 = 跳过方向dup + 总仓first）
         avg_entry = _at(10)          # 开仓均价
-        float_yuan = _at(14)         # 逐笔浮盈——THS 给的是【金额(元)】不是点数！
-        # ★ 元 → 点：金额 ÷ (乘数 × 手数)；下游（盾/建议/脉搏）全部以点为单位
+        pts_direct = _at(12)         # 盈利价差——THS 原生【点数】列
+        float_yuan = _at(14)         # 逐笔浮盈——THS【金额(元)】列
         _mult = CONTRACT_MULTIPLIER.get(_variety_prefix(t.upper()), 10)
-        _denom = (_mult * lots) if (lots and lots > 0 and float_yuan is not None) else None
-        float_pnl_pts = round(float_yuan / _denom, 1) if (_denom and float_yuan is not None) else None
+        # 点位优先用原生价差列；缺失时用 元 ÷ (乘数×手数) 换算；金额按乘数由点导出
+        if pts_direct is not None:
+            float_pnl_pts = pts_direct
+        elif float_yuan is not None and lots and lots > 0:
+            float_pnl_pts = round(float_yuan / (_mult * lots), 1)
+        else:
+            float_pnl_pts = None
+        # 交叉校验：价差(点) × 乘数×手数 应≈逐笔浮盈(元)；偏差>1元说明列序漂移，记日志
+        if pts_direct is not None and float_yuan is not None and lots:
+            _expect_yuan = pts_direct * _mult * lots
+            if abs(_expect_yuan - float_yuan) > 1:
+                _ths_log(f"⚠ 持仓盈亏两列不一致：{t} 价差{pts_direct}点×{_mult}×{lots}={_expect_yuan:.0f}元"
+                         f" vs 逐笔浮盈{float_yuan:.0f}元——列序可能漂移，需校准")
         positions.append({"symbol": t.upper(), "direction": dir_, "lots": lots,
                           "avg_entry": avg_entry, "float_pnl": float_pnl_pts,
                           "float_yuan": float_yuan, "mult": _mult,
