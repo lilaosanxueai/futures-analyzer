@@ -7814,12 +7814,44 @@ async def trades_stats(source: str = ""):
         if hit:
             revenge += 1
         break
+    # ★ 时间维度洞察（成交回报精确时间戳才有的口径）
+    timed = [t for t in closed_sorted if t.get("ts") and t.get("closed_ts")]
+    holds_min = [round((t["closed_ts"] - t["ts"]) / 60000, 1) for t in timed]
+    gaps_after = []          # 平仓 → 下一笔开仓 间隔（分钟）
+    gaps_after_loss = []
+    all_ts = sorted([t for t in trades if t.get("ts")], key=lambda t: t["ts"])
+    for i, c in enumerate(closed_sorted):
+        nxt = next((t for t in all_ts if t["ts"] > c["closed_ts"]), None)
+        if nxt is None:
+            continue
+        gap = round((nxt["ts"] - c["closed_ts"]) / 60000, 1)
+        if gap < 0 or gap > 600:
+            continue
+        gaps_after.append(gap)
+        if (c.get("result_pts") or 0) < 0:
+            gaps_after_loss.append(gap)
+    def _med(xs):
+        if not xs:
+            return None
+        xs = sorted(xs)
+        return xs[len(xs) // 2]
+    timing = {
+        "n_timed": len(timed),
+        "avg_hold_min": round(sum(holds_min) / len(holds_min), 1) if holds_min else None,
+        "min_hold_min": min(holds_min) if holds_min else None,
+        "max_hold_min": max(holds_min) if holds_min else None,
+        "median_gap_min": _med(gaps_after),
+        "median_gap_after_loss_min": _med(gaps_after_loss) if gaps_after_loss else None,
+        "fastest_reopen_min": min(gaps_after) if gaps_after else None,
+        "n_reopens_within_10min": sum(1 for g in gaps_after if g <= 10),
+    }
     return {
         "ok": True,
         "overview": _summary(closed),
         "open_count": sum(1 for t in trades if t["status"] == "open"),
         "abandoned_count": sum(1 for t in trades if t["status"] == "abandoned"),
         "by_symbol": {s: _summary(v) for s, v in sorted(by_symbol.items())},
+        "timing": timing,
         "behavior": {"no_stop": no_stop, "held_thru_stop": hold_loss, "revenge": revenge,
                      "forced": sum(1 for t in trades if t.get("violation")),
                      "blocked": len(_load_gate_log())},

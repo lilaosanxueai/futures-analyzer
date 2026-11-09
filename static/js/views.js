@@ -478,6 +478,17 @@ ${(() => {
           : "") +
         '<div class="kv-list">' +
         '<div class="kv"><span class="k">平均盈利 / 平均亏损</span><span class="v">' + fmtNum(o.avg_win, 1) + " / " + fmtNum(o.avg_loss, 1) + " 点</span></div>" +
+        (() => {
+          const tm = d.timing || {};
+          if (!tm.n_timed) return "";
+          const gapLoss = tm.median_gap_after_loss_min != null
+            ? ' · 亏后再开中位 <b style="' + (tm.median_gap_after_loss_min < 30 ? "color:var(--up)" : "") + '">' + tm.median_gap_after_loss_min + "分</b>" : "";
+          return '<div class="kv"><span class="k">⏱ 时间洞察（' + tm.n_timed + ' 笔精确计时）</span><span class="v">' +
+            "持时均 " + tm.avg_hold_min + "分（最短 " + tm.min_hold_min + "～最长 " + tm.max_hold_min + "分）" +
+            " · 平→再开中位 " + (tm.median_gap_min == null ? "--" : tm.median_gap_min + "分") + gapLoss +
+            (tm.n_reopens_within_10min ? ' · <b style="color:var(--up)">10分钟内再开 ' + tm.n_reopens_within_10min + " 次</b>" : "") +
+            "</span></div>";
+        })() +
         '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) +
         " · 强行开仓 " + (b.forced || 0) + ' <span style="color:var(--up)">· 闸门拦下 ' + (b.blocked || 0) + "</span></span></div>" +
         "</div>";
