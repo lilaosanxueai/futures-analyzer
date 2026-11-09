@@ -557,7 +557,7 @@ async def _ths_scan_once() -> dict:
                 save_config(cfg)
             except Exception:
                 pass
-    # ★ 成交回报：交易面板成交 tab 激活时在树中 → 解析+去重入库+新成交播报
+    # ★ 成交回报：交易面板成交 tab 激活时在树中 → 解析+去重入库+配对入真实交易
     try:
         fills = _ths_parse_fills(r["texts"])
         THS_SYNC["fills"] = fills
@@ -573,6 +573,17 @@ async def _ths_scan_once() -> dict:
                 "text": "🧾 成交回报 " + str(len(new_summaries)) + " 笔：" + "；".join(new_summaries[:4]),
                 "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
             })
+            # 新成交 → 尝试 FIFO 配对成完整交易记录（自动录入真实交易页）
+            paired = _ths_fills_to_trades()
+            if paired:
+                _ths_log(f"成交配对入账 {len(paired)} 笔：{'；'.join(paired[:5])}")
+                _emit_event({
+                    "id": f"fillpair-{int(time.time()*1000)}", "ts": int(time.time() * 1000),
+                    "kind": "diag", "etype": "FILL_PAIR", "level": "info",
+                    "symbol": "", "name": "", "dir": "up", "price": None,
+                    "text": "📒 成交自动入账 " + str(len(paired)) + " 笔：" + "；".join(paired[:4]),
+                    "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                })
     except Exception:
         pass  # 成交解析失败不影响主扫描
 
@@ -708,6 +719,96 @@ def _ths_fills_merge(new_fills: list[dict]) -> list[str]:
             f"×{f.get('lots') or 1}"
             + (f"（{float(f['pnl']):+.0f}点）" if f.get("pnl") not in (None, "") else "")
             for f in adds]
+
+
+def _fill_ts_ms(f: dict) -> int:
+    """成交行 HH:MM:SS + scan_date → epoch ms（夜盘跨零点：02:30 前归前一晚）"""
+    d = f.get("scan_date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        hh = int(f["time"][:2])
+        if hh < 3:  # 凌晨成交 → 交易日晚于日期一天（夜盘延续）
+            dt = datetime.strptime(d, "%Y-%m-%d") + timedelta(days=-1)
+            d = dt.strftime("%Y-%m-%d")
+        return int(datetime.strptime(f"{d} {f['time']}", "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+    except Exception:
+        return int(time.time() * 1000)
+
+
+def _ths_fills_to_trades() -> list[str]:
+    """成交回报 → 真实交易记录（FIFO 配对；官方逐笔盈亏优先）。
+    卖平=平多、买平=平空；开仓腿缺失也入账（entry 空，盈亏用官方值）。
+    镜像对账：同品种同方向当日 open 镜像单被成交回报精化（避免双记）。"""
+    from collections import defaultdict, deque
+    fills = _ths_fills_load()
+    if not fills:
+        return []
+    opens: dict[str, deque] = defaultdict(deque)
+    trades = _load_trades()
+    existing_ids = {t.get("id") for t in trades}
+    created = []
+    for f in sorted(fills, key=lambda x: (x.get("scan_date", ""), x.get("time", ""))):
+        if not f.get("contract") or not f.get("time"):
+            continue
+        contract = f["contract"]
+        if f.get("oc") == "开仓":
+            opens[contract].append(f)
+        elif f.get("oc") == "平仓":
+            direction = "long" if f.get("bs") == "卖" else "short"
+            oq = opens.get(contract)
+            o = oq.popleft() if oq else None
+            rec_id = f"fill-{f.get('seq') or f['time'] + contract}"
+            if rec_id in existing_ids:
+                continue
+            try:
+                lots = float(f.get("lots") or 1)
+                exit_ = float(f["price"])
+            except (ValueError, TypeError):
+                continue
+            entry = None
+            if o:
+                try:
+                    entry = float(o["price"])
+                except (ValueError, TypeError):
+                    entry = None
+            pnl = None
+            try:
+                pnl = float(f["pnl"]) if f.get("pnl") not in (None, "") else None
+            except ValueError:
+                pnl = None
+            if pnl is None and entry:
+                sign = 1 if direction == "long" else -1
+                pnl = round(sign * (exit_ - entry) * lots, 1)
+            fee = 0.0
+            for leg in (o, f):
+                try:
+                    fee += float((leg or {}).get("fee") or 0)
+                except ValueError:
+                    pass
+            day = f.get("scan_date") or datetime.now().strftime("%Y-%m-%d")
+            pref = _ths_pref(contract)
+            # 镜像对账：同品种同方向、当日 open 的镜像单 → 用精确数据了结（防双记）
+            for t in trades:
+                if (t.get("status") == "open" and t.get("symbol") == pref
+                        and t.get("direction") == direction and t.get("date") == day):
+                    t.update(status="closed", exit=exit_, result_pts=pnl,
+                             closed_ts=_fill_ts_ms(f),
+                             note=((t.get("note") or "") + "｜成交回报校准"))
+            trades.append({
+                "id": rec_id, "date": day, "symbol": pref, "contract": contract,
+                "direction": direction, "lots": lots,
+                "entry": entry, "exit": exit_,
+                "result_pts": pnl, "status": "closed",
+                "ts": _fill_ts_ms(o) if o else _fill_ts_ms(f),
+                "closed_ts": _fill_ts_ms(f),
+                "source": "ths-fill",
+                "note": f"成交回报直读 手续费{fee:.2f}" + ("" if o else "｜开仓腿缺失(捕获前已开)"),
+            })
+            existing_ids.add(rec_id)
+            created.append(f"{pref} {'多' if direction == 'long' else '空'} "
+                           f"{entry or '?'}→{exit_} {pnl if pnl is None else format(pnl, '+.0f')}点")
+    if created:
+        _save_trades(trades)
+    return created
 
 
 # 大商所/上期能源 交易所行情代码用小写（c/v/m/sc），郑商所/上期所/中金所用大写——与期货通显示一致
@@ -1346,6 +1447,14 @@ async def _remote_token_gate(request: Request, call_next):
 class RemoteAccessIn(BaseModel):
     enabled: Optional[bool] = None
     regenerate: int = 0
+
+
+@app.post("/api/fills/pair")
+async def fills_pair():
+    """手动触发成交回报→真实交易配对（补账/校验用；扫描钩子会自动跑）"""
+    paired = _ths_fills_to_trades()
+    return {"ok": True, "paired": len(paired), "items": paired[:20],
+            "fills_total": len(_ths_fills_load())}
 
 
 @app.get("/api/remote-access")

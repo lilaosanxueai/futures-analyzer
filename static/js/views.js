@@ -696,7 +696,9 @@ ${(() => {
         const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + (t.note.length > 14 ? "…" : "") + "</span>" : "";
         const viol = (t.violation || []).length
           ? '<span title="强行开仓：' + esc(t.violation.join("；")) + '" style="color:var(--danger)">🚫</span> ' : "";
-        const srcChip = t.source === "ths-sync"
+        const srcChip = t.source === "ths-fill"
+          ? '<span class="badge neutral" title="期货通成交回报直读（精确到秒/官方盈亏）">🧾回报</span>'
+          : t.source === "ths-sync"
           ? '<span class="badge neutral" title="期货通持仓实时镜像">📺期货通</span>'
           : '<span class="badge neutral" title="手动/导入">✍️手动</span>';
         return "<tr>" +
