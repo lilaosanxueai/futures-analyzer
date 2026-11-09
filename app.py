@@ -557,6 +557,25 @@ async def _ths_scan_once() -> dict:
                 save_config(cfg)
             except Exception:
                 pass
+    # ★ 成交回报：交易面板成交 tab 激活时在树中 → 解析+去重入库+新成交播报
+    try:
+        fills = _ths_parse_fills(r["texts"])
+        THS_SYNC["fills"] = fills
+        new_summaries = _ths_fills_merge(fills)
+        if new_summaries:
+            now_ms3 = int(time.time() * 1000)
+            _ths_log(f"成交回报 +{len(new_summaries)}：{'；'.join(new_summaries[:5])}")
+            _emit_event({
+                "id": f"fills-{now_ms3}", "ts": now_ms3,
+                "kind": "diag", "etype": "FILLS", "level": "info",
+                "symbol": _ths_pref(fills[0].get("contract", "")) if fills else "",
+                "name": "", "dir": "up", "price": None,
+                "text": "🧾 成交回报 " + str(len(new_summaries)) + " 笔：" + "；".join(new_summaries[:4]),
+                "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+            })
+    except Exception:
+        pass  # 成交解析失败不影响主扫描
+
     _ths_log(f"读取成功：{r['texts']} 元素 / {len(r['quotes'])} 条报价 / {len(r['positions'])} 笔持仓")
     # ★ 账户权益历史化：每次扫描记录（≥5 分钟间隔），90 天窗口——真金白银的资金曲线
     # ★ 附带回撤熔断：当日回撤 ≥2% 或 7 日高点回撤 ≥5% → fatal（资金曲线的活体防线）
@@ -612,6 +631,83 @@ async def _ths_scan_once() -> dict:
 def _ths_pref(code: str) -> str:
     m = re.match(r"^([A-Za-z]{1,2})", code or "")
     return (m.group(1).upper() + "0") if m else (code or "")
+
+
+# ---------------------------------------------------------------- 成交回报解析（UIA 直读成交 tab）
+_FILL_COLS = ["time", "name", "contract", "bs", "oc", "price", "pnl", "fee", "lots", "seq", "usage"]
+_ITEM_JUNK = re.compile(r"^Item: System\.Data\.DataRowView")
+
+
+def _ths_parse_fills(texts: list[str]) -> list[dict]:
+    """UIA 文本流 → 成交回报行（仅当交易面板成交 tab 激活时在树中）。
+    结构（2026-11-10 实测）：DataRowView 行分隔；每值成对重复（DataItem+Text）；
+    空值列输出单条 'Item: ... Column Display Index: N' 占位。
+    列序：时间|品种|合约|买卖|开平|成交价|平仓盈亏(逐笔)|手续费|成交量|主场号|投保。"""
+    anchor = next((i for i, t in enumerate(texts) if t.strip() == "平仓盈亏(逐笔)"), None)
+    if anchor is None:
+        return []
+    fills = []
+    i = anchor
+    n = len(texts)
+    while i < n:
+        if texts[i] == "System.Data.DataRowView":
+            row: dict = {}
+            col = 0
+            j = i + 1
+            while j < n and col < len(_FILL_COLS):
+                tv = texts[j].strip()
+                if tv == "System.Data.DataRowView" or tv.startswith("Flight.Product"):
+                    break
+                if _ITEM_JUNK.match(tv):
+                    row[_FILL_COLS[col]] = None   # 空值占位（单条，不重复）
+                    col += 1
+                    j += 1
+                    continue
+                row[_FILL_COLS[col]] = tv
+                col += 1
+                if j + 1 < n and texts[j + 1].strip() == tv:
+                    j += 2                       # 消费重复副本
+                else:
+                    j += 1
+            if row.get("contract") and row.get("time"):
+                row["id"] = f"{row.get('seq') or row['time']+row['contract']}"
+                fills.append(row)
+            i = j
+        else:
+            i += 1
+    return fills
+
+
+_THS_FILLS_FILE = BASE_DIR / "ths_fills.json"
+
+
+def _ths_fills_load() -> list[dict]:
+    try:
+        if _THS_FILLS_FILE.exists():
+            return json.loads(_THS_FILLS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _ths_fills_merge(new_fills: list[dict]) -> list[str]:
+    """按主场号/唯一键去重合并入库；返回新增摘要（用于事件流播报）。"""
+    if not new_fills:
+        return []
+    known = {f.get("id") for f in _ths_fills_load()}
+    adds = [f for f in new_fills if f["id"] not in known]
+    if not adds:
+        return []
+    today = datetime.now().strftime("%Y-%m-%d")
+    for f in adds:
+        f["scan_date"] = today
+    merged = _ths_fills_load() + adds
+    # 保留最近 90 天 / 5000 笔
+    _atomic_write(_THS_FILLS_FILE, json.dumps(merged[-5000:], ensure_ascii=False))
+    return [f"{f['contract']} {'买' if f['bs'] == '买' else '卖'}{f['oc']} {f['price']}"
+            f"×{f.get('lots') or 1}"
+            + (f"（{float(f['pnl']):+.0f}点）" if f.get("pnl") not in (None, "") else "")
+            for f in adds]
 
 
 # 大商所/上期能源 交易所行情代码用小写（c/v/m/sc），郑商所/上期所/中金所用大写——与期货通显示一致
@@ -1605,7 +1701,9 @@ async def ths_sync_get():
     return {"ok": True, "enabled": THS_SYNC["enabled"], "mirror": THS_SYNC["mirror"],
             "last": THS_SYNC["last"], "quotes": THS_SYNC["quotes"],
             "positions": THS_SYNC["positions"], "log": THS_SYNC["log"],
-            "symbol_map": THS_SYNC.get("symbol_map") or {}}
+            "symbol_map": THS_SYNC.get("symbol_map") or {},
+            "fills": (THS_SYNC.get("fills") or [])[-30:],
+            "fills_total": len(_ths_fills_load())}
 
 
 class ThsSyncIn(BaseModel):

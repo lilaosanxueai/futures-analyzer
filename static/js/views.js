@@ -812,12 +812,14 @@ ${(() => {
       const lastTxt = last.ts ? new Date(last.ts).toLocaleTimeString("zh-CN", { hour12: false }) : "从未";
       const dy = shield.daily || {};
       const scanOk = last.ok;
+      const fillsN = sync.fills_total || 0;
       el.innerHTML =
         (scanOk ? "🟢" : "⚪") + " 盯屏 <b>" + (sync.enabled ? "开" : "关") + "</b>" +
         " · 镜像 <b>" + (sync.mirror ? "开" : "关") + "</b>" +
         ' <span class="muted small">上次读取 ' + esc(lastTxt) + "</span>" +
         ' · 今日自动记录 <b>' + (dy.trades_today || 0) + "</b> 笔" +
-        ' <span class="muted small">（持仓出现→自动记开仓，消失→按现价自动平仓）</span>';
+        (fillsN ? ' · 🧾成交回报 <b>' + fillsN + "</b> 笔" : "") +
+        ' <span class="muted small">（持仓出现→自动记开仓；面板停在「成交」页时逐笔回报自动捕获）</span>';
       el.classList.toggle("src-ok", !!sync.mirror);
     } catch (e) { el.innerHTML = '<span class="muted small">期货通状态读取失败</span>'; }
   }
