@@ -4707,21 +4707,20 @@ async def _sig_settle_daily() -> dict:
                 by_date[(sym, d)] = b
     n = 0
     for e in pending:
-        # 找事件日之后第一个交易日（跳过周末/休市）
-        nxt = None
+        # 结算日 = 事件日之后的第一根日线（统一处理：周末/节假日事件→下一交易日；
+        # 盘中事件→次日。事件日本身的 bar 不算，避免用当日全天数据验证盘中判断）
         sym_bars = bars_map.get(e["symbol"]) or []
-        dates = [str(b.get("date") or b.get("datetime") or "")[:10] for b in sym_bars]
-        try:
-            i = dates.index(e["date"])
-            if i + 1 < len(dates):
-                nxt = dates[i + 1]
-        except ValueError:
-            continue
+        nxt = None
+        nxt_bar = None
+        for b in sym_bars:
+            d = str(b.get("date") or b.get("datetime") or "")[:10]
+            if d > e["date"]:
+                nxt, nxt_bar = d, b
+                break
         if not nxt:
-            # 次日日线未出（周末/事件日就是最新）→ 留待下次
+            # 结算日日线未出（事件日就是最新交易日）→ 留待下次
             continue
-        b = by_date.get((e["symbol"], nxt)) or {}
-        o, c = b.get("open"), b.get("close")
+        o, c = nxt_bar.get("open"), nxt_bar.get("close")
         if o is None or c is None:
             continue
         e["next_date"] = nxt
