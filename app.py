@@ -9151,6 +9151,18 @@ def _position_context() -> str:
     if today_log:
         closed = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
         lines.append(f"今日自动日志：{len(today_log)}笔，已平累计{closed:+.0f}点")
+        # ★ 今日节奏画像（成交回报精确计时）：用户问"今天怎么样"时教练必须引用
+        timed = [l for l in today_log if l.get("first_seen") and l.get("closed_ts")]
+        opens_ts = sorted(l["first_seen"] for l in today_log)
+        gaps = []
+        for c in sorted((l for l in today_log if l.get("closed_ts")), key=lambda l: l["closed_ts"]):
+            nxt = next((ts for ts in opens_ts if ts > c["closed_ts"]), None)
+            if nxt and 0 <= nxt - c["closed_ts"] <= 600 * 60000:
+                gaps.append(round((nxt - c["closed_ts"]) / 60000, 1))
+        if gaps:
+            fast = sum(1 for g in gaps if g <= 10)
+            lines.append(f"今日节奏：平仓→再开间隔 {gaps} 分钟（≤10分钟 {fast}/{len(gaps)} 次）"
+                         f"——高频再开是统计上的负期望行为，点评时必须点破")
     return "\n【仓位状态（AI 上下文）】\n" + "\n".join(lines)
 
 
