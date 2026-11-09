@@ -821,7 +821,22 @@ ${(() => {
         ' <span class="muted small">上次读取 ' + esc(lastTxt) + "</span>" +
         ' · 今日自动记录 <b>' + (dy.trades_today || 0) + "</b> 笔" +
         (fillsN ? ' · 🧾成交回报 <b>' + fillsN + "</b> 笔" : "") +
-        ' <span class="muted small">（持仓出现→自动记开仓；面板停在「成交」页时逐笔回报自动捕获）</span>';
+        ' <a class="link-btn" id="btnFillsDeep" title="翻页采集全部成交（10-20秒，会动鼠标——盘中勿用）">🧾补采</a>' +
+        ' <span class="muted small">（持仓出现→自动记开仓；成交页可见时逐笔捕获）</span>';
+      const fd = $("#btnFillsDeep");
+      if (fd) fd.addEventListener("click", async () => {
+        if (!confirm("补采全部成交记录？\n需要期货通窗口可见（最小化会自动恢复），过程中会接管鼠标键盘约 10-20 秒——盘中请勿使用。")) return;
+        fd.textContent = "⏳采集中…";
+        try {
+          const r = await api("/api/ths-sync/fills-deep", { method: "POST" });
+          alert("捕获 " + (r.captured || 0) + " 笔（新增 " + (r.new || 0) + "）→ 配对入账 " + (r.paired || 0) + " 笔"
+            + (r.err ? "\n" + r.err : ""));
+          loadThsSrc();
+          loadTrades();
+          loadStats();
+        } catch (e) { alert("补采失败：" + e.message); }
+        fd.textContent = "🧾补采";
+      });
       el.classList.toggle("src-ok", !!sync.mirror);
     } catch (e) { el.innerHTML = '<span class="muted small">期货通状态读取失败</span>'; }
   }

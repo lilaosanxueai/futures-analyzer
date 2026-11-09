@@ -374,6 +374,135 @@ def _ths_uia_texts(hwnd: int) -> list[str]:
         comtypes.CoUninitialize()
 
 
+def _ths_fills_deep_collect() -> dict:
+    """成交深采（用户手动触发，约 10-20 秒，会短暂接管鼠标/键盘/前台）：
+    恢复窗口 → 坐标点击「成交」页签 → 点击首行获焦 → PageUp/Home 翻页逐屏采集
+    → 点回「持仓」→ 若原为最小化则重新最小化。返回全部成交行。"""
+    import comtypes
+    import comtypes.client
+    import ctypes
+    from ctypes import wintypes
+
+    hwnd = _ths_hwnd()
+    if not hwnd:
+        return {"ok": False, "err": "没找到期货通窗口"}
+    user32 = ctypes.windll.user32
+    was_min = bool(user32.IsIconic(hwnd))
+    prev_fg = user32.GetForegroundWindow()
+    comtypes.CoInitialize()
+    fills_all: dict[str, dict] = {}
+    try:
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+        uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+        root = uia.ElementFromHandle(hwnd)
+        walker = uia.RawViewWalker
+        import sys
+        sys.setrecursionlimit(20000)
+
+        def collect():
+            texts, anchor, first_row, tab_fill, tab_pos = [], None, None, None, None
+            def walk(node, depth):
+                nonlocal anchor, first_row, tab_fill, tab_pos
+                try:
+                    name = (node.CurrentName or "").strip()
+                    if name:
+                        texts.append(name)
+                        if name == "平仓盈亏(逐笔)" and anchor is None:
+                            anchor = node
+                        elif name == "System.Data.DataRowView" and first_row is None and anchor:
+                            first_row = node
+                        elif name == "成交" and tab_fill is None:
+                            tab_fill = node
+                        elif name == "持仓" and tab_pos is None:
+                            tab_pos = node
+                except Exception:
+                    pass
+                try:
+                    ch = walker.GetFirstChildElement(node)
+                    while ch is not None:
+                        walk(ch, depth + 1)
+                        ch = walker.GetNextSiblingElement(ch)
+                except Exception:
+                    pass
+            walk(root, 0)
+            return texts, anchor, first_row, tab_fill, tab_pos
+
+        def click_center(el):
+            r = el.CurrentBoundingRectangle
+            if r.right - r.left <= 0:
+                return False
+            user32.SetCursorPos((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+            time.sleep(0.12)
+            user32.mouse_event(0x0002, 0, 0, 0, 0)
+            user32.mouse_event(0x0004, 0, 0, 0, 0)
+            return True
+
+        def snap():
+            ts, anchor, first_row, _, _2 = collect()
+            if anchor is None:
+                return None
+            for f in _ths_parse_fills(ts):
+                fills_all.setdefault(f["id"], f)
+            return first_row
+
+        # ① 恢复 + 前台（ALT 键绕过前台锁）
+        if was_min:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.7)
+        user32.keybd_event(0x12, 0, 0, 0)          # VK_MENU down
+        user32.keybd_event(0x12, 0, 0x0002, 0)     # up
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.5)
+
+        # ② 不在成交页 → 点「成交」页签
+        _, anchor, _, tab_fill, _ = collect()
+        if anchor is None:
+            if tab_fill is None:
+                return {"ok": False, "err": "树中找不到「成交」页签", "fills": list(fills_all.values())}
+            click_center(tab_fill)
+            time.sleep(1.2)
+
+        # ③ 点击首行获焦 → 翻页采集
+        fr = snap()
+        if fr is not None:
+            click_center(fr)
+            time.sleep(0.35)
+            KEYUP = 0x0002
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYUP, 0)
+                time.sleep(0.3)
+            for i in range(10):
+                before = len(fills_all)
+                press(0x21)   # PageUp（更早的成交）
+                snap()
+                if len(fills_all) == before and i >= 2:
+                    break
+            press(0x24)       # Home 到顶
+            snap()
+            press(0x23)       # End 到底（最新）
+            snap()
+
+        # ④ 点回「持仓」页签（盾要读持仓）
+        _, anchor2, _, _, tab_pos = collect()
+        if anchor2 is not None and tab_pos is not None:
+            click_center(tab_pos)
+            time.sleep(0.6)
+        return {"ok": True, "fills": list(fills_all.values())}
+    except Exception as e:
+        return {"ok": False, "err": f"{type(e).__name__}: {e}", "fills": list(fills_all.values())}
+    finally:
+        try:
+            if was_min:
+                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE 还原用户原状态
+            if prev_fg and prev_fg != hwnd:
+                user32.SetForegroundWindow(prev_fg)
+        except Exception:
+            pass
+        comtypes.CoUninitialize()
+
+
 def _ths_num(s: str) -> Optional[float]:
     try:
         return float(str(s).replace(",", ""))
@@ -1483,6 +1612,24 @@ async def fills_pair():
     paired = _ths_fills_to_trades()
     return {"ok": True, "paired": len(paired), "items": paired[:20],
             "fills_total": len(_ths_fills_load())}
+
+
+@app.post("/api/ths-sync/fills-deep")
+async def ths_fills_deep():
+    """🧾 补采成交（约 10-20 秒）：恢复期货通→切成交页→翻页全量采集→切回持仓。
+    会短暂接管鼠标键盘——盘中别用，收盘后点。"""
+    if _THS_SCANNING["busy"]:
+        raise HTTPException(status_code=409, detail="扫描进行中，稍后再试")
+    r = await asyncio.to_thread(_ths_fills_deep_collect)
+    if not r.get("ok"):
+        return {"ok": False, "err": r.get("err"), "captured": len(r.get("fills") or [])}
+    fills = r.get("fills") or []
+    THS_SYNC["fills"] = fills
+    new_summaries = _ths_fills_merge(fills)
+    paired = _ths_fills_to_trades()
+    return {"ok": True, "captured": len(fills), "new": len(new_summaries),
+            "paired": len(paired), "new_items": new_summaries[:10],
+            "paired_items": paired[:10]}
 
 
 @app.get("/api/remote-access")
