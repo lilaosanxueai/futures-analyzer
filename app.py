@@ -375,9 +375,11 @@ def _ths_uia_texts(hwnd: int) -> list[str]:
 
 
 def _ths_fills_deep_collect() -> dict:
-    """成交深采（用户手动触发，约 10-20 秒，会短暂接管鼠标/键盘/前台）：
+    """成交深采（用户手动触发或收盘自动，约 10-20 秒，会短暂接管鼠标/键盘/前台）：
     恢复窗口 → 坐标点击「成交」页签 → 点击首行获焦 → PageUp/Home 翻页逐屏采集
-    → 点回「持仓」→ 若原为最小化则重新最小化。返回全部成交行。"""
+    → 点回「持仓」→ 若原为最小化则重新最小化。返回全部成交行。
+    ★ 全程置位 _THS_DEEP_COLLECTING：盯屏循环在此期间停摆，防止面板被切走的
+    瞬间持仓从树里消失、盾把活持仓误判成平仓。"""
     import comtypes
     import comtypes.client
     import ctypes
@@ -391,6 +393,7 @@ def _ths_fills_deep_collect() -> dict:
     prev_fg = user32.GetForegroundWindow()
     comtypes.CoInitialize()
     fills_all: dict[str, dict] = {}
+    _THS_DEEP_COLLECTING["on"] = True   # ★ 盯屏循环让路（防活持仓被误判平仓）
     try:
         comtypes.client.GetModule("UIAutomationCore.dll")
         from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
@@ -500,6 +503,7 @@ def _ths_fills_deep_collect() -> dict:
                 user32.SetForegroundWindow(prev_fg)
         except Exception:
             pass
+        _THS_DEEP_COLLECTING["on"] = False  # 解除让路
         comtypes.CoUninitialize()
 
 
@@ -617,6 +621,8 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
 
 
 _THS_SCANNING = {"busy": False}  # UIA 若卡死（期货通无响应）防扫描任务堆积
+_THS_DEEP_COLLECTING = {"on": False}  # 深采（切页翻页）期间盯屏循环必须停——
+# 否则面板被切走的瞬间持仓从树里消失，盾会把活持仓误判成平仓
 
 
 async def _ths_scan_once() -> dict:
@@ -1115,6 +1121,9 @@ async def ths_sync_loop():
     while True:
         interval = 60
         try:
+            if _THS_DEEP_COLLECTING["on"]:
+                await asyncio.sleep(3)   # 深采切页中让路——此刻持仓不在树里，扫描必误判
+                continue
             now = datetime.now()
             if THS_SYNC["enabled"] and is_trading_time(now):
                 r = await _ths_scan_once()
