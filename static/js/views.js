@@ -457,57 +457,7 @@ ${(() => {
     }
   });
 
-  // ================================================================ 交易诊断视图
 
-  async function loadDiagnosis() {
-    const el = $("#diagBody");
-    try {
-      const d = await api("/api/diagnosis");
-      if (!(d.issues || []).length) {
-        el.innerHTML = '<div class="empty">✅ 当前无未决问题——继续保持：有止损、不逆势、不超频</div>';
-        return;
-      }
-      el.innerHTML = d.issues.map((i) => {
-        let action = "";
-        if (i.id === "D02" && i.trade_id) {
-          action = '<button class="btn danger sm" data-fix="mktclose" data-tid="' + i.trade_id + '">💰 立即平仓</button>';
-        } else if (i.id === "D01" && i.trade_id) {
-          action = '<button class="btn sm" data-fix="setstop" data-tid="' + i.trade_id + '">🔧 补设止损</button>';
-        }
-        return '<div class="diag-item sev-' + i.sev + '">' +
-        '<div class="d-title"><span class="badge ' + (i.sev === "fatal" ? "fatal" : i.sev === "warn" ? "warn" : "info") + '">' +
-        (i.sev === "fatal" ? "致命" : i.sev === "warn" ? "警告" : "提示") + "</span><b>" + esc(i.title) + "</b></div>" +
-        '<div class="d-evi">' + esc(i.evidence) + "</div>" +
-        '<div class="d-adv">→ ' + esc(i.advice) + "</div>" +
-        (action ? '<div style="margin-top:6px">' + action + "</div>" : "") +
-        "</div>";
-      }).join("");
-      $$("#diagBody [data-fix]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const tid = b.getAttribute("data-tid");
-          const fix = b.getAttribute("data-fix");
-          if (fix === "mktclose") {
-            const trades = await api("/api/trades");
-            const t = (trades.items || []).find((x) => x.id === tid);
-            if (!t || !t.live) { alert("实时价未就绪"); return; }
-            if (!confirm("按 " + t.live.price + " 市价平仓？（浮动 " + (t.live.pnl_pts > 0 ? "+" : "") + t.live.pnl_pts + " 点）")) return;
-            await api("/api/trades/" + tid, { method: "PATCH", body: JSON.stringify({ exit: t.live.price }) });
-            loadDiagnosis(); loadTrades(); loadStats();
-          } else if (fix === "setstop") {
-            const p = prompt("补设止损点数：", "20");
-            if (p === null || isNaN(parseFloat(p))) return;
-            await api("/api/trades/" + tid, { method: "PATCH", body: JSON.stringify({ note: "止损计划 " + p + " 点（待手动执行）" }) });
-            alert("已记录止损计划——请在实际交易软件中设置硬止损");
-            loadDiagnosis();
-          }
-        });
-      });
-    } catch (e) {
-      el.innerHTML = '<div class="empty">诊断失败：' + esc(e.message) + "</div>";
-    }
-  }
-  const _btnDiagRefresh = $("#btnDiagRefresh");
-  if (_btnDiagRefresh) _btnDiagRefresh.addEventListener("click", () => { $("#diagBody").innerHTML = '<div class="empty">重新诊断中…</div>'; setTimeout(loadDiagnosis, 500); });
 
   async function loadStats() {
     const el = $("#statsBody");
@@ -613,55 +563,7 @@ ${(() => {
   }
 
   // 真实/模拟交易拆分：各自独立加载
-  // 导入持仓清算：结算单遗留的历史未平仓，分组出清（按现价/填价了结 或 删除）
-  async function loadSettle() {
-    const card = $("#settleCard"), body = $("#settleBody");
-    if (!card) return;
-    try {
-      const d = await api("/api/import-opens");
-      if (!d.total) { card.classList.add("hidden"); return; }
-      card.classList.remove("hidden");
-      body.innerHTML =
-        '<div class="mini-note" style="margin-bottom:8px">结算单导入期结束时仍未平仓的 <b>' + d.total +
-        '</b> 笔历史仓位。若实际早已了结→按现价/填价了结（结果入账统计）；从未实际持有→删除。留着会污染持仓视图。</div>' +
-        d.groups.map((g) => {
-          const flt = g.float_pts_per_lot == null ? "--" :
-            '<span class="' + (g.float_pts_per_lot > 0 ? "num-up" : "num-down") + '">' +
-            (g.float_pts_per_lot > 0 ? "+" : "") + g.float_pts_per_lot + " 点/手</span>";
-          return '<div class="flaw-item"><div class="f-head"><b>' + esc(g.symbol) + " " + (g.direction === "long" ? "多" : "空") + "</b> " +
-            g.count + " 笔 / " + g.lots + " 手 · 均价 " + g.avg_entry + "（自 " + esc(g.oldest) + "）· 现价 " + (g.last || "--") +
-            " · 浮动 " + flt + "</div>" +
-            '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
-            '<button class="btn sm" data-settle="market" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">💰 按现价了结</button>' +
-            '<button class="btn sm" data-settle="price" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">✏️ 填价了结</button>' +
-            '<button class="btn ghost sm" style="color:var(--danger)" data-settle="delete" data-sym="' + esc(g.symbol) + '" data-dir="' + g.direction + '">🗑 从未持有，删除</button>' +
-            "</div></div>";
-        }).join("");
-      $$("#settleBody [data-settle]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const mode = b.getAttribute("data-settle");
-          const sym = b.getAttribute("data-sym"), dir = b.getAttribute("data-dir");
-          let price = null;
-          if (mode === "price") {
-            const v = prompt(sym + "（" + (dir === "long" ? "多" : "空") + "）这组仓位的实际了结价：", "");
-            if (v === null) return;
-            if (isNaN(parseFloat(v))) { alert("价格无效"); return; }
-            price = parseFloat(v);
-          }
-          const msg = mode === "delete" ? "确认删除这组导入仓位记录？（从未实际持有）"
-            : mode === "market" ? "确认按当前现价了结这组仓位？（盈亏按现价入账统计）"
-            : "确认按 " + price + " 了结这组仓位？（盈亏入账统计）";
-          if (!confirm(msg)) return;
-          b.disabled = true;
-          try {
-            const r = await api("/api/import-opens/settle", { method: "POST", body: JSON.stringify({ symbol: sym, direction: dir, mode, price }) });
-            alert(mode === "delete" ? "已删除 " + r.removed + " 笔记录" : "已了结 " + r.settled + " 笔 @ " + r.price);
-            loadSettle(); loadTrades(); loadStats(); loadThsSrc(); fillSymbolReviewOptions();
-          } catch (e) { alert("失败：" + e.message); b.disabled = false; }
-        });
-      });
-    } catch (e) { card.classList.add("hidden"); }
-  }
+
 
   async function loadTrades() {
     const body = $("#tradesBody");
@@ -839,9 +741,7 @@ ${(() => {
     }
   }
 
-  function submitTrade(payload) {
-    return api("/api/trades", { method: "POST", body: JSON.stringify(payload) });
-  }
+
 
   // 📺 期货通数据源状态条（真实交易页：对接状态 + 今日自动记录数）
   async function loadThsSrc() {
@@ -892,194 +792,9 @@ ${(() => {
       _feeRef = d.fee_ref || {};
     } catch (e) { /* ignore */ }
   }
-  function updateRiskPreview() {
-    const el = $("#riskPreview");
-    if (!el || !_mults) return;
-    const sym = $("#tfSymbol").value || "";
-    const pfx = sym.replace(/0$/, "").toUpperCase();
-    const m = _mults[pfx];
-    const stop = parseFloat($("#tfStop").value) || 0;
-    const lots = parseFloat($("#tfLots").value) || 0;
-    const target = parseFloat($("#tfTarget").value) || 0;
-    if (!sym || !m || stop <= 0 || lots <= 0) { el.textContent = ""; return; }
-    const risk = stop * m * lots;
-    const fee = (_feeRef[pfx] || m * 0.4) * lots;
-    let txt = "💸 本笔满打亏损：¥" + risk.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) +
-      "（止损 " + stop + " 点 × " + m + " 元/点 × " + lots + " 手）" +
-      " + 手续费约 ¥" + fee.toFixed(0) + " = ¥" + (risk + fee).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
-    if (target > 0) {
-      const rr = (target / stop).toFixed(1);
-      const rrCls = rr >= 2 ? "num-up" : rr < 1 ? "num-down" : "";
-      txt += "｜盈亏比 <b class='" + rrCls + "'>" + target + ":" + stop + "（" + rr + "R）</b>" +
-        (rr < 1.5 ? " ⚠ 目标过近，低于 1.5R 的单不值得开" : rr >= 2 ? " ✅ ≥2R 达标" : "");
-    }
-    if (_acctSize > 0) {
-      const pct = risk / _acctSize * 100;
-      txt += "｜占账户 " + pct.toFixed(2) + "%" + (pct > 1 ? " ⚠ 超单笔风险预算" : "");
-    } else {
-      txt += "（设置里填账户权益后显示占比）";
-    }
-    el.innerHTML = txt;
-    el.style.color = "";
-  }
-  // ⚡ 一键模拟：现价入场 + ATR 建议止损 + 2:1 目标 + 建议手数（基于账户风险预算）
-  const _btnSimSetup = $("#btnSimSetup");
-  if (_btnSimSetup) _btnSimSetup.addEventListener("click", async () => {
-    const sym = $("#tfSymbol").value;
-    if (!sym) { alert("先选品种"); return; }
-    const btn = $("#btnSimSetup");
-    btn.disabled = true; btn.textContent = "⏳";
-    try {
-      const [wd, md] = await Promise.all([
-        api("/api/watchlist?symbols=" + encodeURIComponent(sym)),
-        api("/api/multipliers"),
-      ]);
-      const q = (wd.quotes || [])[0];
-      if (!q || q.last == null) { alert("行情未就绪"); return; }
-      $("#tfEntry").value = q.last;
-      // ATR 建议止损：从博弈快照取日内波幅的 30%（近似 ATR），兜底用现价的 1%
-      const ps = FA.state.psych[sym];
-      const dayRange = ps && ps.intraday ? (ps.intraday.day_high - ps.intraday.day_low) : q.last * 0.01;
-      const atrProxy = Math.max(dayRange * 0.3, q.last * 0.004);
-      const stop = Math.round(atrProxy * 10) / 10;
-      $("#tfStop").value = stop;
-      $("#tfTarget").value = Math.round(stop * 2 * 10) / 10;
-      // 建议手数：风险预算 ÷ 单手风险
-      const acct = md.account_size || 0;
-      const mult = (md.multipliers || {})[sym.replace(/0$/, "")] || 0;
-      if (acct > 0 && mult > 0 && stop > 0) {
-        const budget = acct * 0.01;
-        const perLot = stop * mult;
-        $("#tfLots").value = Math.max(1, Math.floor(budget / perLot));
-      }
-      // 理由模板（待用户补充）
-      if (!$("#tfNote").value.trim()) {
-        $("#tfNote").value = "现价入场，止损" + stop + "点（日内波幅30%），目标" + (stop * 2).toFixed(1) + "点（2:1）——理由：";
-      }
-      ensureMults().then(updateRiskPreview);
-      btn.textContent = "✅ 已填入";
-      setTimeout(() => { btn.textContent = "⚡ 一键模拟"; btn.disabled = false; }, 2000);
-    } catch (e) {
-      alert("失败：" + e.message);
-      btn.textContent = "⚡ 一键模拟"; btn.disabled = false;
-    }
-  });
 
-  async function autoFillPrice() {
-    const sym = $("#tfSymbol").value;
-    if (!sym) return;
-    try {
-      const d = await api("/api/watchlist?symbols=" + encodeURIComponent(sym));
-      const q = (d.quotes || [])[0];
-      if (q && q.last != null) {
-        $("#tfEntry").value = q.last;
-        $("#tfEntry").title = "已自动填入最新价 " + q.last + "（" + (q.time || "") + "）";
-      }
-    } catch (e) { /* ignore */ }
-  }
-  const _tfSymbol = $("#tfSymbol");
-  if (_tfSymbol) _tfSymbol.addEventListener("change", autoFillPrice);
-  ["tfStop", "tfLots", "tfTarget"].forEach((id) => {
-    const el = $("#" + id);
-    if (el) {
-      el.addEventListener("change", () => { ensureMults().then(updateRiskPreview); });
-      el.addEventListener("input", () => { ensureMults().then(updateRiskPreview); });
-    }
-  });
 
-  // 手动模拟表单已移除（模拟全走自动引擎）；绑定保留兼容，元素不存在即跳过
-  const _tradeForm = $("#tradeForm");
-  if (_tradeForm) _tradeForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const warnBox = $("#tradeWarnings");
-    warnBox.classList.add("hidden");
-    const payload = {
-      symbol: $("#tfSymbol").value,
-      direction: $("#tfDir").value,
-      entry: parseFloat($("#tfEntry").value),
-      stop_points: parseFloat($("#tfStop").value) || 0,
-      target_points: parseFloat($("#tfTarget").value) || 0,
-      lots: parseFloat($("#tfLots").value) || 1,
-      note: $("#tfNote").value,
-      source: "auto",  // 模拟页表单 = 模拟记录
-    };
-    if (!payload.symbol) { alert("请选择品种"); return; }
-    // 开仓理由必须充分（前端先拦，后端同样校验）
-    const note = (payload.note || "").trim();
-    const lazy = ["看涨", "看跌", "感觉", "抄底", "追涨", "杀跌", "赌", "试试", "蒙", "直觉", "朋友说", "听说", "群里"];
-    if (!note) { alert("开仓理由必须填写：写清这笔靠什么赚钱（供需/资金/位置）"); return; }
-    if (note.length < 10) { alert("开仓理由太短（" + note.length + " 字）——至少 10 字，写清逻辑"); return; }
-    const hitLazy = lazy.find((k) => k in note || note.includes(k));
-    if (hitLazy && note.length < 20) { alert("理由含空话「" + hitLazy + "」且无具体逻辑——供需/资金/位置至少说清一样"); return; }
-    try {
-      let d = await submitTrade(payload);
-      // 开仓闸门：致命模式拦截 → 红色风险确认（强行通过会留违规标记并计入缺陷画像）
-      if (d.blocked && (d.blockers || []).length) {
-        const sugTxt = d.suggested_lots != null
-          ? '<div class="mini-note">📏 风险预算建议手数：≤ ' + d.suggested_lots + " 手（账户单笔风险 ÷ 止损额）</div>" : "";
-        warnBox.classList.remove("hidden");
-        warnBox.innerHTML =
-          '<div class="tw-item fatal"><b>🚫 开仓闸门拦截</b>（主导情绪判定：' + esc(d.mood || "--") + "）</div>" +
-          d.blockers.map((b) =>
-            '<div class="tw-item fatal"><b>' + esc(b.name) + "</b>" + esc(b.evidence) +
-            "<br><span class=\"muted\">→ " + esc(b.antidote) + "</span>" +
-            (b.backtest ? '<br><span style="color:var(--up)">📊 ' + esc(b.backtest) + "</span>" : "") + "</div>").join("") +
-          sugTxt +
-          '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
-          '<button class="btn" id="btnGateCancel">🧘 放弃，再想想</button>' +
-          '<button class="btn ghost" id="btnGateAsk">🧠 问教练：为什么拦我</button>' +
-          '<button class="btn danger" id="btnGateForce">⚠ 我知道风险，仍要开仓（记录违规）</button></div>';
-        $("#btnGateCancel").addEventListener("click", () => warnBox.classList.add("hidden"));
-        $("#btnGateAsk").addEventListener("click", () => {
-          const q = "我刚想开仓被闸门拦下了。情形：" +
-            d.blockers.map((b) => b.name + "（" + b.evidence + "）").join("；") +
-            "。请拆穿我此刻的幻想（主导情绪判定：" + (d.mood || "") + "），并告诉我什么条件下这个方向才值得做。";
-          const chatSel = $("#chatSymbol");
-          if (chatSel) chatSel.value = payload.symbol || "";
-          $("#chatInput").value = q;
-          const tab = document.querySelector('.tab[data-view="work"]');
-          if (tab) tab.click();
-          warnBox.classList.add("hidden");
-          setTimeout(() => $("#btnChatSend").click(), 350);
-        });
-        $("#btnGateForce").addEventListener("click", async () => {
-          try {
-            d = await submitTrade(Object.assign({}, payload, { force: 1 }));
-            renderTradeResult(d, warnBox);
-            $("#tfEntry").value = ""; $("#tfNote").value = "";
-            loadTrades(); loadStats(); loadThsSrc();
-          } catch (err) { alert("保存失败：" + err.message); }
-        });
-        return;
-      }
-      renderTradeResult(d, warnBox);
-      $("#tfEntry").value = ""; $("#tfNote").value = "";
-      loadTrades(); loadStats(); loadThsSrc();
-    } catch (err) {
-      alert("保存失败：" + err.message);
-    }
-  });
 
-  function renderTradeResult(d, warnBox) {
-    const sug = d.suggested_lots != null
-      ? '<div class="mini-note">📏 风险预算建议手数：≤ ' + d.suggested_lots + " 手</div>" : "";
-    if (d.forced) {
-      warnBox.classList.remove("hidden");
-      warnBox.innerHTML = '<div class="tw-item fatal"><b>🚫 已强行开仓（违规标记：</b>' +
-        (d.blockers || []).map((b) => esc(b.name)).join("、") + '<b>）</b>——主导情绪：' + esc(d.mood || "--") +
-        "，这笔的后续将由缺陷画像与违规成绩单跟踪。</div>" + sug;
-      return;
-    }
-    if ((d.warnings || []).length) {
-      warnBox.classList.remove("hidden");
-      warnBox.innerHTML = d.warnings.map((w) =>
-        '<div class="tw-item ' + w.sev + '"><b>' + (w.sev === "fatal" ? "🚫" : w.sev === "warn" ? "⚠" : "ℹ") + " " + esc(w.title) + "</b>" +
-        esc(w.evidence) + "<br><span class=\"muted\">→ " + esc(w.advice) + "</span></div>").join("") + sug;
-    } else {
-      warnBox.classList.remove("hidden");
-      warnBox.innerHTML = '<div class="tw-item info"><b>✅ 开仓检查通过</b>有止损、不逆势、不超频——保持住。</div>' + sug;
-    }
-  }
 
   // ================================================================ 心得视图
 
@@ -1621,40 +1336,7 @@ ${(() => {
     } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
   }
 
-  // 期货通盯屏同步：UIA 直读（自选报价 + 持仓插槽）
-  async function loadThs() {
-    const el = $("#thsBody");
-    if (!el) return;
-    try {
-      const d = await api("/api/ths-sync");
-      renderThs(d);
-      // 持仓存在时：建议卡每 30 秒自动刷新（不只依赖页面切换）
-      const hasPos = (d.positions || []).length > 0;
-      if (hasPos && !FA.state._posAdvTimer) {
-        FA.state._posAdvTimer = setInterval(() => {
-          if (FA.state.currentView === "work") {
-            api("/api/position-advice").then((adv) => {
-              const pb = $("#posAdviceBody");
-              if (!pb) return;
-              _renderPosAdvice(pb, adv);
-            }).catch(() => {});
-          }
-        }, 30000);
-      } else if (!hasPos && FA.state._posAdvTimer) {
-        clearInterval(FA.state._posAdvTimer);
-        FA.state._posAdvTimer = null;
-      }
-      // 同步开启时：工作台停留期间每 60s 自动刷新卡片（服务端循环在读，UI 跟上）
-      if (d.enabled && !FA.state._thsTimer) {
-        FA.state._thsTimer = setInterval(() => {
-          if (FA.state.currentView === "work") loadThs();
-        }, 60000);
-      } else if (!d.enabled && FA.state._thsTimer) {
-        clearInterval(FA.state._thsTimer);
-        FA.state._thsTimer = null;
-      }
-    } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>"; }
-  }
+
   function renderThs(d) {
     const el = $("#thsBody");
     const last = d.last || {};
@@ -1696,31 +1378,6 @@ ${(() => {
       if (FA.pollQuotes) FA.pollQuotes(true);
     });
   }
-  const btnThsScan = $("#btnThsScan");
-  if (btnThsScan) btnThsScan.addEventListener("click", async () => {
-    btnThsScan.disabled = true; btnThsScan.textContent = "⏳ 读取中…";
-    try { await api("/api/ths-sync/scan", { method: "POST" }); loadThs(); }
-    catch (e) { alert("读取失败：" + e.message); }
-    btnThsScan.disabled = false; btnThsScan.textContent = "▶ 立即读取";
-  });
-  const btnThsSample = $("#btnThsSample");
-  if (btnThsSample) btnThsSample.addEventListener("click", async () => {
-    try {
-      const r = await api("/api/ths-sync/sample", { method: "POST" });
-      alert("已采样 " + r.lines + " 行页面结构（uia_sample.txt）——据此校准持仓提取");
-      loadThs();
-    } catch (e) { alert("采样失败：" + e.message); }
-  });
-  const btnThsToggle = $("#btnThsToggle");
-  if (btnThsToggle) btnThsToggle.addEventListener("click", async () => {
-    btnThsToggle.disabled = true;
-    try {
-      const cur = (await api("/api/ths-sync")).enabled;
-      await api("/api/ths-sync", { method: "POST", body: JSON.stringify({ enabled: !cur }) });
-    } catch (e) { alert(e.message); }
-    btnThsToggle.disabled = false;
-    loadThs();
-  });
   const btnThsMirror = $("#btnThsMirror");
   if (btnThsMirror) btnThsMirror.addEventListener("click", async () => {
     const cur = (await api("/api/ths-sync")).mirror;
@@ -1732,7 +1389,7 @@ ${(() => {
     try { await api("/api/ths-sync", { method: "POST", body: JSON.stringify({ mirror: !cur }) }); }
     catch (e) { alert(e.message); }
     btnThsMirror.disabled = false;
-    loadThs();
+    loadDesk(); loadThsSrc();
   });
 
   // 交易人格分析页
@@ -1909,144 +1566,6 @@ ${(() => {
     });
   }
 
-  // 导入功能（真实交易页顶部的导入卡）：支持多文件，csv/txt 走文本路径，xlsx/xls 走 base64 Excel 端点
-  async function importOneFile(f, dryRun) {
-    const name = f.name.toLowerCase();
-    if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-      const buf = await f.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const r = await fetch("/api/trades/import/xlsx?dry_run=" + dryRun, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: btoa(binary) }),
-      });
-      const d = await r.json();
-      if (!r.ok || d.ok === false) throw new Error(f.name + ": " + (d.detail || ("HTTP " + r.status)));
-      return d;
-    }
-    const buf = await f.arrayBuffer();
-    let text;
-    try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
-    catch (e) { text = new TextDecoder("gbk").decode(buf); }
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    return api("/api/trades/import", { method: "POST", body: JSON.stringify({ text, dry_run: dryRun }) });
-  }
-  async function importFiles(dryRun) {
-    const files = Array.from($("#importFile").files || []);
-    if (!files.length) throw new Error("未选择文件");
-    const results = [];
-    for (const f of files) {
-      try {
-        const d = await importOneFile(f, dryRun);
-        results.push({ file: f.name, ok: true, d });
-      } catch (e) {
-        results.push({ file: f.name, ok: false, error: e.message });
-      }
-    }
-    return { results,
-      totals: results.reduce((a, r) => r.ok ? {
-        fills: a.fills + (r.d.fills_count || 0),
-        closed: a.closed + (r.d.closed_count || 0),
-        open: a.open + (r.d.open_count || 0),
-        added: a.added + (r.d.added || 0),
-        dup: a.dup + (r.d.skipped_dup || 0),
-        errors: a.errors + (r.d.errors || []).length,
-      } : a, { fills: 0, closed: 0, open: 0, added: 0, dup: 0, errors: 0 }),
-    };
-  }
-  function renderMultiImportPreview(data) {
-    const p = $("#importPreview");
-    p.classList.remove("hidden");
-    let html = "";
-    data.results.forEach((r) => {
-      if (!r.ok) {
-        html += '<div class="mini-note" style="color:var(--danger)">❌ ' + esc(r.file) + "：" + esc(r.error) + "</div>";
-      } else {
-        const d = r.d;
-        html += '<div class="mini-note">📄 ' + esc(r.file) + "：成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔" +
-          ((d.errors || []).length ? " <span style='color:var(--danger)'>（" + d.errors.length + " 行未识别）</span>" : "") + "</div>";
-      }
-    });
-    const t = data.totals;
-    html += '<div style="margin:8px 0;font-weight:600;color:var(--text-strong)">合计：闭环 ' + t.closed + " 笔 / 未平仓 " + t.open + " 笔（新增 " + (t.added != null ? t.added : "—") + "）</div>";
-    const rows = [];
-    data.results.forEach((r) => {
-      if (r.ok) (r.d.closed_preview || []).forEach((x) => rows.push(x));
-    });
-    if (rows.length) {
-      html += "<table class='table'><thead><tr><th>日期</th><th>品种</th><th>向</th><th class='r'>手</th><th class='r'>开→平</th><th class='r'>点数</th></tr></thead><tbody>" +
-        rows.slice(0, 15).map((x) =>
-          "<tr><td>" + esc(x.date) + "</td><td>" + esc(x.symbol) + "</td><td>" + (x.direction === "long" ? "多" : "空") +
-          '</td><td class="r">' + x.lots + '</td><td class="r">' + x.entry + "→" + x.exit +
-          '</td><td class="r ' + (x.result_pts > 0 ? "num-up" : "num-down") + '">' + (x.result_pts > 0 ? "+" : "") + x.result_pts + "</td></tr>").join("") + "</tbody></table>" +
-        (rows.length > 15 ? '<div class="mini-note">（仅显示前 15 笔，共 ' + rows.length + " 笔）</div>" : "");
-    }
-    p.innerHTML = html;
-    $("#btnImportCommit").disabled = !(t.closed + t.open);
-  }
-  function renderImportPreview(d) {
-    const p = $("#importPreview");
-    p.classList.remove("hidden");
-    const rows = (d.closed_preview || []).map((t) =>
-      "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.symbol) + "</td><td>" + (t.direction === "long" ? "多" : "空") +
-      '</td><td class="r">' + t.lots + '</td><td class="r">' + t.entry + "→" + t.exit + '</td><td class="r ' + (t.result_pts > 0 ? "num-up" : "num-down") + '">' + (t.result_pts > 0 ? "+" : "") + t.result_pts + "</td></tr>").join("");
-    const openRows = (d.open_preview || []).map((t) =>
-      '<div class="mini-note">未平仓：[' + esc(t.date) + "] " + esc(t.symbol) + " " + (t.direction === "long" ? "多" : "空") + " " + t.lots + "手 @ " + t.entry + "</div>").join("");
-    p.innerHTML = "<div class='mini-note'>识别成交 " + d.fills_count + " 条 → 闭环 " + d.closed_count + " 笔 / 未平仓 " + d.open_count + " 笔</div>" +
-      (rows ? "<table class='table'><tbody>" + rows + "</tbody></table>" : "") + openRows +
-      ((d.errors || []).length ? "<div class='mini-note' style='color:var(--danger)'>" + esc(d.errors.join("；")) + "</div>" : "");
-    $("#btnImportCommit").disabled = !((d.closed_count || 0) + (d.open_count || 0));
-  }
-  const impFile = $("#importFile");
-  if (impFile) {
-    impFile.addEventListener("change", async () => {
-      const btn = $("#btnImportCheck");
-      const n = impFile.files.length;
-      btn.disabled = true; btn.textContent = "⏳ 解析中(" + n + " 文件)…";
-      try { renderMultiImportPreview(await importFiles(1)); }
-      catch (e) { alert("解析失败：" + e.message); }
-      btn.disabled = false; btn.textContent = "解析预览";
-    });
-  }
-  const impCheck = $("#btnImportCheck");
-  if (impCheck) {
-    impCheck.addEventListener("click", async () => {
-      const text = $("#importText").value.trim();
-      if (!text && !impFile.files.length) { alert("请粘贴流水或选择文件"); return; }
-      impCheck.disabled = true; impCheck.textContent = "⏳ 解析中…";
-      try { renderMultiImportPreview(await importFiles(1)); }
-      catch (e) { alert("解析失败：" + e.message); }
-      impCheck.disabled = false; impCheck.textContent = "解析预览";
-    });
-  }
-  const impCommit = $("#btnImportCommit");
-  if (impCommit) {
-    impCommit.addEventListener("click", async () => {
-      impCommit.disabled = true; impCommit.textContent = "⏳ 导入中…";
-      try {
-        const useFiles = impFile.files.length > 0;
-        const d = useFiles
-          ? await importFiles(0)
-          : await api("/api/trades/import", { method: "POST", body: JSON.stringify({ text: $("#importText").value.trim(), dry_run: 0 }) });
-        if (useFiles) {
-          renderMultiImportPreview(d);
-          const t = d.totals;
-          const fails = d.results.filter((r) => !r.ok).length;
-          alert("多文件导入完成：新增 " + (t.added || 0) + " 笔（重复跳过 " + (t.dup || 0) + " 笔）" +
-            (fails ? "\n⚠ " + fails + " 个文件解析失败（见预览区红色提示）" : ""));
-        } else {
-          alert("导入完成：新增 " + (d.added || 0) + " 笔（重复跳过 " + (d.skipped_dup || 0) + " 笔）");
-        }
-        $("#importText").value = ""; impFile.value = "";
-        loadTrades(); loadStats(); loadThsSrc(); loadFlaws();
-      } catch (e) {
-        alert("导入失败：" + e.message);
-      }
-      impCommit.disabled = false; impCommit.textContent = "确认导入";
-    });
-  }
 
   // 交易人格分析页：情绪画像 + 违规成绩单
   async function loadMoodAndViolation() {
@@ -2093,27 +1612,7 @@ ${(() => {
     } catch (e) { /* ignore */ }
   }
 
-  // 真实交易页：预警管理
-  async function loadAlertMgr() {
-    const el = $("#alertMgrBody");
-    if (!el) return;
-    try {
-      const d = await api("/api/alerts");
-      const items = d.items || [];
-      el.innerHTML = items.length
-        ? items.map((a) =>
-          '<div class="kv"><span class="k">🔔 ' + esc(a.symbol) + " " + (a.dir === "above" ? "升破" : "跌破") + " " + a.price +
-          '</span><span class="v">' + esc(a.note || "") +
-          ' <button class="link-btn danger" data-del-alert="' + a.id + '">删</button></span></div>').join("")
-        : '<div class="empty">暂无预警——持仓体检的生死线可一键设置</div>';
-      $$("#alertMgrBody [data-del-alert]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          try { await api("/api/alerts/" + b.getAttribute("data-del-alert"), { method: "DELETE" }); } catch (e) { /* ignore */ }
-          loadAlertMgr();
-        });
-      });
-    } catch (e) { /* ignore */ }
-  }
+
 
   // 真实交易页：风控参数快捷设置
   $("#btnRiskCfg").addEventListener("click", async () => {
@@ -2135,34 +1634,7 @@ ${(() => {
     loadStats();
   });
 
-  // 真实交易页：心得嵌入（加载与新增）
-  async function loadNotesEmbed() {
-    const el = $("#notesEmbedBody");
-    if (!el) return;
-    try {
-      const d = await api("/api/notes");
-      const items = (d.items || []).slice(0, 5);
-      el.innerHTML =
-        '<div style="padding:8px 14px;display:flex;gap:8px">' +
-        '<input id="neTitle" placeholder="标题" style="flex:0 0 120px;font-size:12px">' +
-        '<input id="neContent" placeholder="写下这次的心得…" style="flex:1;font-size:12px">' +
-        '<button class="btn ghost sm" id="neAdd">记</button></div>' +
-        (items.length ? items.map((n) =>
-          '<div class="note-item" style="margin:0 14px 8px"><div class="n-title">' + esc(n.title || "(无题)") +
-          '</div><div class="n-content">' + esc((n.content || "").slice(0, 80)) + "</div></div>").join("")
-        : '<div class="empty">暂无心得</div>');
-      const add = $("#neAdd");
-      if (add) {
-        add.addEventListener("click", async () => {
-          const title = $("#neTitle").value.trim(), content = $("#neContent").value.trim();
-          if (!content) { alert("心得内容不能为空"); return; }
-          await api("/api/notes", { method: "POST", body: JSON.stringify({ title, content }) });
-          $("#neTitle").value = ""; $("#neContent").value = "";
-          loadNotesEmbed();
-        });
-      }
-    } catch (e) { /* ignore */ }
-  }
+
 
   // 人格页：补充教训
   const pfLessonBtn2 = $("#btnPfLesson2");
@@ -2295,7 +1767,6 @@ ${(() => {
 
   // 暴露给 tab 切换用
   FA.loadTrades = loadTrades;
-  FA.loadDiagnosis = loadDiagnosis;
   FA.loadPlans = loadPlans;
   FA.loadSignals = loadSignals;
 
