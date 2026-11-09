@@ -720,6 +720,7 @@ async def _ths_scan_once() -> dict:
             })
             # 新成交 → 尝试 FIFO 配对成完整交易记录（自动录入真实交易页）
             paired = _ths_fills_to_trades()
+            _shield_reconcile_from_fills()
             if paired:
                 _ths_log(f"成交配对入账 {len(paired)} 笔：{'；'.join(paired[:5])}")
                 _emit_event({
@@ -966,6 +967,42 @@ def _ths_fills_to_trades() -> list[str]:
     if created:
         _save_trades(trades)
     return created
+
+
+def _shield_reconcile_from_fills() -> None:
+    """成交回报 → 盾日内日志反哺：用户全程停在成交页时持仓扫描失明，
+    但成交回报记录了一切——用它重建盾的日内统计（笔数/已平累计→日亏停手线不失真）。
+    幂等：按 合约+平仓时间 去重，重复调用无副作用。"""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        fill_trades = [t for t in _load_trades()
+                       if t.get("source") == "ths-fill" and t.get("date") == today]
+        if not fill_trades:
+            return
+        log = _SHIELD_STATE["trade_log"]
+        added = 0
+        for t in fill_trades:
+            sym = t.get("contract") or t["symbol"]
+            # 去重键=记录 id（fill-<主场号> 唯一）；同一秒多笔平仓不会被误合
+            if any(l.get("tid") == t["id"] for l in log):
+                continue
+            entry = {"tid": t["id"], "symbol": sym, "direction": t.get("direction"),
+                     "lots": t.get("lots"), "entry": t.get("entry"),
+                     "first_seen": t.get("ts") or int(time.time() * 1000),
+                     "last_pnl": t.get("result_pts"), "date": today}
+            closed = t.get("closed_ts")
+            if closed:
+                entry["closed_ts"] = closed
+                entry["final_pnl"] = t.get("result_pts")
+            log.append(entry)
+            added += 1
+        if added:
+            log.sort(key=lambda l: l.get("first_seen") or 0)
+            _SHIELD_STATE["trade_log"] = log[-100:]
+            _save_shield_state()
+            _ths_log(f"盾日志反哺：成交回报重建今日 {added} 笔（持仓页失明期间的数据不丢）")
+    except Exception:
+        pass
 
 
 # 大商所/上期能源 交易所行情代码用小写（c/v/m/sc），郑商所/上期所/中金所用大写——与期货通显示一致
@@ -1524,6 +1561,8 @@ async def lifespan(_app):
         pass
     # ★ 启动恢复盾状态（今日交易日志/持仓快照——重启不再失忆）
     _load_shield_state()
+    # ★ 盾日志反哺：用今日成交回报记录重建日内统计（持仓页失明期数据不丢）
+    _shield_reconcile_from_fills()
     warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
     autosim_task = asyncio.create_task(auto_sim_loop())
@@ -1610,6 +1649,7 @@ class RemoteAccessIn(BaseModel):
 async def fills_pair():
     """手动触发成交回报→真实交易配对（补账/校验用；扫描钩子会自动跑）"""
     paired = _ths_fills_to_trades()
+    _shield_reconcile_from_fills()
     return {"ok": True, "paired": len(paired), "items": paired[:20],
             "fills_total": len(_ths_fills_load())}
 
