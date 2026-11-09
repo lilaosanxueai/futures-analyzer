@@ -187,7 +187,7 @@ class Assistant:
                  bg=BG_CARD, fg=FG_MAIN, font=(FONT, 12, "bold")).pack(side=tk.LEFT)
         tk.Label(r1, text=f"@{p['entry']}", bg=BG_CARD, fg=FG_SUB,
                  font=(FONT, 9)).pack(side=tk.LEFT, padx=(4, 0), pady=(2, 0))
-        tk.Label(r1, text=f"{pnl:+.0f}", bg=BG_CARD, fg=pnlColor,
+        tk.Label(r1, text=f"{pnl:+.0f}点", bg=BG_CARD, fg=pnlColor,
                  font=(FONT, 16, "bold")).pack(side=tk.RIGHT)
 
         # 行2: 健康 + 操作
@@ -220,7 +220,7 @@ class Assistant:
         src = "🪞" if o.get("source") == "ths-sync" else "👤"
         tk.Label(r1, text=f"{src} {o['symbol']} {'多' if o['direction']=='long' else '空'} {o.get('lots',1)}手 @{o.get('entry')}",
                  bg=BG_CARD, fg=FG_MAIN, font=(FONT, 11)).pack(side=tk.LEFT)
-        tk.Label(r1, text=(f"{pnl:+.1f}" if pnl is not None else "--"),
+        tk.Label(r1, text=(f"{pnl:+.1f}点" if pnl is not None else "--"),
                  bg=BG_CARD, fg=color, font=(FONT, 13, "bold")).pack(side=tk.RIGHT)
 
     def _render_empty(self):
