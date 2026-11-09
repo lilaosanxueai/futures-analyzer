@@ -34,10 +34,11 @@ if %tries% lss 15 goto :wait
 :assistant
 rem ---- 桌面助手（pythonw 本身无窗口）----
 powershell -NoProfile -Command "if (Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowTitle -eq '散户之盾'}) { exit 0 } else { exit 1 }"
-if %errorlevel%==0 goto :open
+if %errorlevel%==0 goto :done
 start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0desktop_assistant.pyw"
 
-:open
-rem ---- 直接打开网页 ----
-start "" "http://127.0.0.1:8300"
+:done
+rem ---- 默认不开外部浏览器：在 ZCode 内置浏览器固定 http://127.0.0.1:8300 即可 ----
+rem ---- 需要外部浏览器时：start.bat __hidden__ open ----
+if /i "%~2"=="open" start "" "http://127.0.0.1:8300"
 exit /b 0
