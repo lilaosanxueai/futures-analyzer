@@ -225,6 +225,43 @@ details.fold > summary:hover { background: var(--panel-2); color: var(--text-str
 details.fold > *:not(summary) { animation: foldIn .18s ease; }
 @keyframes foldIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
+/* ---- 手机端适配（远程看盘 <768px）---- */
+@media (max-width: 768px) {
+  body { font-size: 12px; }
+  header { flex-wrap: wrap; row-gap: 6px; }
+  .top-right { flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+  .top-right .btn { padding: 4px 8px; font-size: 11px; }
+  main { padding: 6px 8px 14px; }
+  header .brand { font-size: 14px; }
+  .brand .sub { display: none; }
+  .tab { font-size: 11px; padding: 4px 7px; }
+  .card-head { padding: 7px 10px; }
+  .card-head h2 { font-size: 13px; }
+  .pulse-bar { font-size: 11px; gap: 4px 10px; padding: 6px 10px; }
+  .work-grid { grid-template-columns: 1fr; gap: 8px; }
+  .table { font-size: 11px; }
+  .table th, .table td { padding: 4px 5px; }
+  /* 看板：藏 持仓变化/散户陷阱 列（留 品种/最新/涨跌/资金方向） */
+  .watch-table th:nth-child(4), .watch-table td:nth-child(4),
+  .watch-table th:nth-child(6), .watch-table td:nth-child(6) { display: none; }
+  /* 交易日志：藏 持时/来源·费 列（留 时间/品种/方向/开→平/结果/操作） */
+  .trades-table th:nth-child(6), .trades-table td:nth-child(6),
+  .trades-table th:nth-child(7), .trades-table td:nth-child(7) { display: none; }
+  /* 信号雷达：藏证据列 */
+  #signalCardBody th:nth-child(3), #signalCardBody td:nth-child(3) { display: none; }
+  .chat-input-row { flex-wrap: wrap; }
+  .chat-input-row textarea { flex: 1 1 100%; }
+  .chat-quick { gap: 4px; }
+  .qk { font-size: 11px; padding: 4px 8px; }
+  .modal { width: 94vw; }
+  .modal-body { max-height: 70vh; }
+  /* 宽表格兜底：卡片内横滚，页面不破 */
+  .card { max-width: 100%; overflow-x: auto; }
+  .trades-grid, .notes-grid { grid-template-columns: minmax(0, 1fr); }
+  .trades-left, .trades-right { min-width: 0; }
+  .table { min-width: 320px; }
+}
+
 /* ---- 真实交易日志：按日分组行 ---- */
 .trades-table tr.day-sep td {
   background: var(--panel-2); font-size: 12px; color: var(--text-strong);
