@@ -7767,6 +7767,9 @@ async def trades_stats(source: str = ""):
         wins = [p for p in pts if p > 0]
         losses = [p for p in pts if p < 0]
         plan_rr = [t["target_points"] / t["stop_points"] for t in items if t.get("stop_points") and t.get("target_points")]
+        # 金额口径（ths-fill 有 result_yuan/fee；老记录无则跳过）
+        yuans = [float(t["result_yuan"]) for t in items if t.get("result_yuan") is not None]
+        fees = [float(t["fee"]) for t in items if t.get("fee") is not None]
         return {
             "count": len(items),
             "win_rate": round(len(wins) / len(items) * 100, 1),
@@ -7774,6 +7777,10 @@ async def trades_stats(source: str = ""):
             "avg_win": round(sum(wins) / len(wins), 1) if wins else 0,
             "avg_loss": round(sum(losses) / len(losses), 1) if losses else 0,
             "avg_plan_rr": round(sum(plan_rr) / len(plan_rr), 2) if plan_rr else None,
+            "total_yuan": round(sum(yuans), 1) if yuans else None,
+            "total_fee": round(sum(fees), 2) if fees else None,
+            "net_yuan": round(sum(yuans) - sum(fees), 1) if (yuans and fees) else (round(sum(yuans), 1) if yuans else None),
+            "yuan_n": len(yuans),
         }
 
     by_symbol = {}

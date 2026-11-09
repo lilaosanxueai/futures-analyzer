@@ -471,6 +471,11 @@ ${(() => {
         '<div class="stat-cell"><div class="sc-v ' + pctCls(o.total_pts) + '">' + (o.total_pts == null ? "--" : (o.total_pts > 0 ? "+" : "") + o.total_pts) + '</div><div class="sc-k">累计点数</div></div>' +
         '<div class="stat-cell"><div class="sc-v">' + (d.open_count || 0) + '</div><div class="sc-k">持仓中</div></div>' +
         "</div>" +
+        (o.total_yuan != null
+          ? '<div class="mini-note" style="margin:6px 0 2px">💰 金额口径（' + (o.yuan_n || 0) + " 笔回报直读）：毛利 <b class=\"" + pctCls(o.total_yuan) + "\">" +
+            (o.total_yuan > 0 ? "+" : "") + o.total_yuan + " 元</b> · 手续费 " + (o.total_fee || 0) + " 元 · <b>净 " +
+            (o.net_yuan == null ? "--" : (o.net_yuan > 0 ? "+" : "") + o.net_yuan) + " 元</b></div>"
+          : "") +
         '<div class="kv-list">' +
         '<div class="kv"><span class="k">平均盈利 / 平均亏损</span><span class="v">' + fmtNum(o.avg_win, 1) + " / " + fmtNum(o.avg_loss, 1) + " 点</span></div>" +
         '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) +
