@@ -225,6 +225,12 @@ details.fold > summary:hover { background: var(--panel-2); color: var(--text-str
 details.fold > *:not(summary) { animation: foldIn .18s ease; }
 @keyframes foldIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
+/* ---- 真实交易日志：按日分组行 ---- */
+.trades-table tr.day-sep td {
+  background: var(--panel-2); font-size: 12px; color: var(--text-strong);
+  padding: 5px 10px; border-bottom: 1px solid var(--line-soft);
+}
+
 /* ---- 期货通数据源状态条（真实交易页） ---- */
 .ths-src-strip {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

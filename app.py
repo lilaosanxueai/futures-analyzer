@@ -953,7 +953,7 @@ def _ths_fills_to_trades() -> list[str]:
                 "result_pts": pnl_pts, "result_yuan": pnl_yuan, "status": "closed",
                 "ts": _fill_ts_ms(o) if o else _fill_ts_ms(f),
                 "closed_ts": _fill_ts_ms(f),
-                "source": "ths-fill",
+                "source": "ths-fill", "fee": round(fee, 2),
                 "note": f"成交回报直读 盈亏{pnl_yuan if pnl_yuan is None else format(pnl_yuan, '+.0f')}元"
                         f"（{pnl_pts if pnl_pts is None else format(pnl_pts, '+.1f')}点×{_mult}元）"
                         f" 手续费{fee:.2f}元" + ("" if o else "｜开仓腿缺失(捕获前已开)"),

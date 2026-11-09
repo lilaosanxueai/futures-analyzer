@@ -666,51 +666,90 @@ ${(() => {
   async function loadTrades() {
     const body = $("#tradesBody");
     try {
+      ensureMults();  // 乘数表（持仓元的实时估值用；异步取，取到后下轮刷新生效）
       const d = await api("/api/trades?source=real");
       if (!(d.items || []).length) { body.innerHTML = '<tr><td colspan="8" class="empty">暂无记录——期货通持仓出现/消失会自动记录到这里</td></tr>'; return; }
-      // 持仓置顶（可操作的最优先），其余保持接口序（新入库在前）；分页渲染防几百行一次性铺满
+      // 持仓置顶（可操作的最优先），其余按平仓时间倒序；分页渲染防几百行一次性铺满
       FA.state.tradesShown = FA.state.tradesShown || 80;
       const opens = d.items.filter((x) => x.status === "open").sort((a, b) => (b.ts || 0) - (a.ts || 0));
-      const ordered = opens.concat(d.items.filter((x) => x.status !== "open"));
+      const closed = d.items.filter((x) => x.status !== "open").sort((a, b) => (b.closed_ts || 0) - (a.closed_ts || 0));
+      const ordered = opens.concat(closed);
       const shown = ordered.slice(0, FA.state.tradesShown);
-      body.innerHTML = shown.map((t) => {
-        const isLong = t.direction === "long";
-        let pnlHtml, actions;
-        if (t.status === "open" && t.live) {
-          const p = t.live.pnl_pts;
-          pnlHtml = '<span class="' + pctCls(p) + '">' + (p > 0 ? "+" : "") + p + '点</span><br><span class="muted small">@' + fmtNum(t.live.price) + "</span>";
-        } else if (t.result_pts != null) {
-          pnlHtml = '<span class="' + pctCls(t.result_pts) + '">' + (t.result_pts > 0 ? "+" : "") + t.result_pts + "点</span>";
-        } else {
-          pnlHtml = '<span class="muted">--</span>';
+      const multOf = (sym) => (_mults && _mults[sym.replace(/0$/, "")]) || null;
+
+      const hm = (ms) => new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+      const durTxt = (ms) => {
+        const m = Math.round(ms / 60000);
+        if (m < 60) return m + "分";
+        return (m / 60).toFixed(1) + "时";
+      };
+      const cls = (v) => (v > 0 ? "num-up" : v < 0 ? "num-down" : "muted");
+      const sgn = (v, d_ = 1) => (v > 0 ? "+" : "") + (d_ === 0 ? v : v.toFixed(d_));
+
+      // 按日分组：组头带当日小结
+      const rows = [];
+      let curDay = "__";
+      shown.forEach((t) => {
+        if (t.date && t.date !== curDay) {
+          curDay = t.date;
+          const dayItems = shown.filter((x) => x.date === t.date && x.status !== "open");
+          const p = dayItems.reduce((s, x) => s + (x.result_pts || 0), 0);
+          const y = dayItems.reduce((s, x) => s + (x.result_yuan || 0), 0);
+          const f = dayItems.reduce((s, x) => s + (x.fee || 0), 0);
+          const sumHtml = dayItems.length
+            ? " · " + dayItems.length + " 笔 · <span class='" + cls(p) + "'>" + sgn(p) + " 点</span> · <span class='" + cls(y) + "'>" + sgn(y, 0) + " 元</span> · 费 " + f.toFixed(1) + " 元"
+            : "";
+          rows.push('<tr class="day-sep"><td colspan="8"><b>' + esc(t.date) + "</b>" + sumHtml + "</td></tr>");
         }
-        if (t.status === "open") {
-          actions =
-            '<button class="link-btn" data-act="care" data-id="' + t.id + '" title="AI 持仓体检">🩺</button>' +
+        const isLong = t.direction === "long";
+        const isOpen = t.status === "open";
+        // 时间：开→平（成交回报精确到分）；无时刻退化为日期
+        let timeHtml = esc(t.date || "");
+        if (t.ts) timeHtml = hm(t.ts) + (isOpen ? '<span class="muted small"> 起</span>' : "→" + (t.closed_ts ? hm(t.closed_ts) : "?"));
+        // 结果：点 + 元（持仓元的实时估值 = 点×乘数×手数）
+        let resHtml;
+        if (isOpen && t.live && t.live.pnl_pts != null) {
+          const p = t.live.pnl_pts;
+          const m = multOf(t.symbol);
+          const y = m ? p * m * (t.lots || 1) : null;
+          resHtml = '<span class="' + cls(p) + '"><b>' + sgn(p) + '点</b></span>' +
+            (y != null ? '<br><span class="' + cls(y) + ' small">' + sgn(y, 0) + "元</span>" : "") +
+            '<br><span class="muted small">@' + fmtNum(t.live.price) + "</span>";
+        } else {
+          resHtml = t.result_pts != null
+            ? '<span class="' + cls(t.result_pts) + '"><b>' + sgn(t.result_pts) + "点</b></span>" +
+              (t.result_yuan != null ? '<br><span class="' + cls(t.result_yuan) + ' small">' + sgn(t.result_yuan, 0) + "元</span>" : "")
+            : '<span class="muted">--</span>';
+        }
+        // 持时
+        let holdTxt = "--";
+        if (isOpen && t.ts) holdTxt = durTxt(Date.now() - t.ts) + '<span class="muted small"> 持有</span>';
+        else if (t.ts && t.closed_ts) holdTxt = durTxt(t.closed_ts - t.ts);
+        const actions = isOpen
+          ? '<button class="link-btn" data-act="care" data-id="' + t.id + '" title="AI 持仓体检">🩺</button>' +
             '<button class="link-btn" data-act="mktclose" data-id="' + t.id + '" title="按当前市价一键平仓">💰</button>' +
             '<button class="link-btn" data-act="close" data-id="' + t.id + '">了结</button>' +
-            '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
-        } else {
-          actions = '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
-        }
-        const note = t.note ? '<br><span class="muted small" title="' + esc(t.note) + '">' + esc(t.note.slice(0, 14)) + (t.note.length > 14 ? "…" : "") + "</span>" : "";
+            '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>'
+          : '<button class="link-btn danger" data-act="del" data-id="' + t.id + '">删</button>';
         const viol = (t.violation || []).length
           ? '<span title="强行开仓：' + esc(t.violation.join("；")) + '" style="color:var(--danger)">🚫</span> ' : "";
         const srcChip = t.source === "ths-fill"
-          ? '<span class="badge neutral" title="期货通成交回报直读（精确到秒/官方盈亏）">🧾回报</span>'
+          ? '<span class="badge neutral" title="期货通成交回报直读（精确到秒/官方盈亏）">🧾</span>'
           : t.source === "ths-sync"
-          ? '<span class="badge neutral" title="期货通持仓实时镜像">📺期货通</span>'
-          : '<span class="badge neutral" title="手动/导入">✍️手动</span>';
-        return "<tr>" +
-          "<td>" + esc(t.date) + "</td>" +
-          "<td><b>" + esc(t.symbol) + "</b>" + note + "</td>" +
-          "<td>" + viol + '<span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + "</span> " + (t.lots || 1) + "手</td>" +
-          '<td class="r">' + fmtNum(t.entry) + "</td>" +
-          '<td class="r">' + (t.stop_points || '<span style="color:var(--danger)">无</span>') + "</td>" +
-          '<td class="r">' + (t.target_points || "--") + "</td>" +
-          '<td class="r">' + pnlHtml + "</td>" +
-          "<td>" + (t.status === "open" ? actions + "<br>" : "") + srcChip + "</td></tr>";
-      }).join("") +
+          ? '<span class="badge neutral" title="期货通持仓实时镜像">📺</span>'
+          : '<span class="badge neutral" title="手动/导入">✍️</span>';
+        const note = t.note ? ' title="' + esc(t.note) + '"' : "";
+        rows.push("<tr" + note + ">" +
+          '<td class="small" style="white-space:nowrap">' + timeHtml + "</td>" +
+          "<td><b>" + esc(t.symbol) + "</b>" + (t.contract ? '<br><span class="muted small">' + esc(t.contract) + "</span>" : "") + "</td>" +
+          "<td>" + viol + '<span class="badge ' + (isLong ? "bull" : "bear") + '">' + (isLong ? "多" : "空") + '</span><span class="muted small">×' + (t.lots || 1) + "</span></td>" +
+          '<td class="r" style="white-space:nowrap;font-variant-numeric:tabular-nums">' + (t.entry != null ? fmtNum(t.entry) : '<span class="muted">?</span>') + "→" + (isOpen ? '<span class="muted">持有</span>' : fmtNum(t.exit)) + "</td>" +
+          '<td class="r">' + resHtml + "</td>" +
+          '<td class="r small" style="white-space:nowrap">' + holdTxt + "</td>" +
+          "<td>" + srcChip + (t.fee != null ? '<br><span class="muted small">费' + t.fee.toFixed(1) + "</span>" : "") + "</td>" +
+          "<td>" + actions + "</td></tr>");
+      });
+      body.innerHTML = rows.join("") +
         (ordered.length > shown.length
           ? '<tr><td colspan="8" style="text-align:center"><button class="link-btn" id="btnTradesMore">📊 加载更多（已显 ' + shown.length + " / " + ordered.length + " 笔）</button></td></tr>"
           : "");
