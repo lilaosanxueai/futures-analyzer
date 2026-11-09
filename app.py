@@ -463,9 +463,14 @@ def _ths_parse(texts: list[str]) -> tuple[list[dict], list[dict]]:
             return _ths_num(texts[i + 1 + j]) if (i + 1 + j) < len(texts) else None
         lots = _at(2)                # 总仓（+2 = 跳过方向dup + 总仓first）
         avg_entry = _at(10)          # 开仓均价
-        float_pnl = _at(14)          # 逐笔浮盈
+        float_yuan = _at(14)         # 逐笔浮盈——THS 给的是【金额(元)】不是点数！
+        # ★ 元 → 点：金额 ÷ (乘数 × 手数)；下游（盾/建议/脉搏）全部以点为单位
+        _mult = CONTRACT_MULTIPLIER.get(_variety_prefix(t.upper()), 10)
+        _denom = (_mult * lots) if (lots and lots > 0 and float_yuan is not None) else None
+        float_pnl_pts = round(float_yuan / _denom, 1) if (_denom and float_yuan is not None) else None
         positions.append({"symbol": t.upper(), "direction": dir_, "lots": lots,
-                          "avg_entry": avg_entry, "float_pnl": float_pnl,
+                          "avg_entry": avg_entry, "float_pnl": float_pnl_pts,
+                          "float_yuan": float_yuan, "mult": _mult,
                           "raw": window[:10]})
         seen_pos.add(key)
     return quotes, positions
@@ -717,7 +722,7 @@ def _ths_fills_merge(new_fills: list[dict]) -> list[str]:
     _atomic_write(_THS_FILLS_FILE, json.dumps(merged[-5000:], ensure_ascii=False))
     return [f"{f['contract']} {'买' if f['bs'] == '买' else '卖'}{f['oc']} {f['price']}"
             f"×{f.get('lots') or 1}"
-            + (f"（{float(f['pnl']):+.0f}点）" if f.get("pnl") not in (None, "") else "")
+            + (f"（{float(f['pnl']):+.0f}元）" if f.get("pnl") not in (None, "") else "")
             for f in adds]
 
 
@@ -770,14 +775,22 @@ def _ths_fills_to_trades() -> list[str]:
                     entry = float(o["price"])
                 except (ValueError, TypeError):
                     entry = None
-            pnl = None
+            pnl_yuan = None
             try:
-                pnl = float(f["pnl"]) if f.get("pnl") not in (None, "") else None
+                pnl_yuan = float(f["pnl"]) if f.get("pnl") not in (None, "") else None
             except ValueError:
-                pnl = None
-            if pnl is None and entry:
+                pnl_yuan = None
+            # ★ THS 逐笔盈亏是【元】→ 点数 = 元 ÷ (乘数×手数)；缺官方值时按价差算点
+            pref = _ths_pref(contract)
+            _mult = CONTRACT_MULTIPLIER.get(_variety_prefix(pref), 10)
+            if pnl_yuan is not None:
+                pnl_pts = round(pnl_yuan / (_mult * lots), 1) if (_mult and lots) else None
+            elif entry:
                 sign = 1 if direction == "long" else -1
-                pnl = round(sign * (exit_ - entry) * lots, 1)
+                pnl_pts = round(sign * (exit_ - entry) * lots, 1)
+                pnl_yuan = round(pnl_pts * _mult * lots, 1)
+            else:
+                pnl_pts, pnl_yuan = None, None
             fee = 0.0
             for leg in (o, f):
                 try:
@@ -790,22 +803,26 @@ def _ths_fills_to_trades() -> list[str]:
             for t in trades:
                 if (t.get("status") == "open" and t.get("symbol") == pref
                         and t.get("direction") == direction and t.get("date") == day):
-                    t.update(status="closed", exit=exit_, result_pts=pnl,
+                    t.update(status="closed", exit=exit_, result_pts=pnl_pts,
                              closed_ts=_fill_ts_ms(f),
                              note=((t.get("note") or "") + "｜成交回报校准"))
             trades.append({
                 "id": rec_id, "date": day, "symbol": pref, "contract": contract,
                 "direction": direction, "lots": lots,
                 "entry": entry, "exit": exit_,
-                "result_pts": pnl, "status": "closed",
+                "result_pts": pnl_pts, "result_yuan": pnl_yuan, "status": "closed",
                 "ts": _fill_ts_ms(o) if o else _fill_ts_ms(f),
                 "closed_ts": _fill_ts_ms(f),
                 "source": "ths-fill",
-                "note": f"成交回报直读 手续费{fee:.2f}" + ("" if o else "｜开仓腿缺失(捕获前已开)"),
+                "note": f"成交回报直读 盈亏{pnl_yuan if pnl_yuan is None else format(pnl_yuan, '+.0f')}元"
+                        f"（{pnl_pts if pnl_pts is None else format(pnl_pts, '+.1f')}点×{_mult}元）"
+                        f" 手续费{fee:.2f}元" + ("" if o else "｜开仓腿缺失(捕获前已开)"),
             })
             existing_ids.add(rec_id)
             created.append(f"{pref} {'多' if direction == 'long' else '空'} "
-                           f"{entry or '?'}→{exit_} {pnl if pnl is None else format(pnl, '+.0f')}点")
+                           f"{entry or '?'}→{exit_} "
+                           f"{pnl_pts if pnl_pts is None else format(pnl_pts, '+.1f')}点"
+                           f"（{pnl_yuan if pnl_yuan is None else format(pnl_yuan, '+.0f')}元）")
     if created:
         _save_trades(trades)
     return created
