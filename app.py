@@ -1406,6 +1406,25 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                                 f"（vs 赢后 +2/62%）——冷静期 30 分钟是铁律",
                         "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
                     }, feishu=True, feishu_text=f"🛡️ 报复性开仓拦截警报\n{sym_key} 亏损平仓后 {gap_min:.0f} 分钟内再开仓——这是统计上最亏钱的模式")
+            # ★ 高频再开仓（时间洞察实锤：平→再开中位 5.2 分，8 笔中 7 笔 <10 分）：
+            # 任何平仓后 10 分钟内新仓 → warn（不分赢亏——这是节奏病不是方向病）
+            _today = now.strftime("%Y-%m-%d")
+            _last_close = max((l.get("closed_ts") or 0) for l in _SHIELD_STATE["trade_log"]
+                              if l.get("date") == _today and l.get("closed_ts")) \
+                if any(l.get("closed_ts") for l in _SHIELD_STATE["trade_log"] if l.get("date") == _today) else 0
+            if _last_close and 0 < now_ms - _last_close < 10 * 60 * 1000:
+                _rk2 = f"fastreopen:{sym_key}"
+                if now_ms - _SHIELD_STATE["alert_repeat"].get(_rk2, 0) >= 5 * 60 * 1000:
+                    _SHIELD_STATE["alert_repeat"][_rk2] = now_ms
+                    _gap2 = (now_ms - _last_close) / 60000
+                    _emit_event({
+                        "id": f"fastreopen-{now_ms}-{sym_key}", "ts": now_ms,
+                        "kind": "diag", "etype": "SHIELD", "level": "warn",
+                        "symbol": _ths_pref(sym_key), "name": "", "dir": "down", "price": None,
+                        "text": f"⏱ 平仓后 {_gap2:.0f} 分钟就再开仓（你的中位习惯 5.2 分/8 笔中 7 笔<10 分）"
+                                f"——给市场一点时间，也给自己一点时间",
+                        "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                    })
         else:
             # 更新现有
             for log in _SHIELD_STATE["trade_log"]:
