@@ -1242,7 +1242,9 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
     for pos in positions:
         pnl = pos.get("float_pnl") or 0
         sym_name = pos.get("symbol", "")
-        stop_dist = 20  # 默认止损距离≈20点
+        # 止损距离自适应：开仓价 × 1%（品种波动差异天然吸收），兜底 8 点
+        entry_p = pos.get("avg_entry") or 0
+        stop_dist = max(8.0, round((entry_p or 2000) * 0.01, 1)) if entry_p else 20
         if pnl < 0:
             pct = abs(pnl) / stop_dist
             if pct >= 0.9:
@@ -1509,7 +1511,9 @@ async def backup_loop():
                 bdir.mkdir(exist_ok=True)
                 n = 0
                 for fname in ("trades.json", "auto_trades.json", "gate_log.json",
-                              "alerts.json", "notes.json", "trader_profile.json", "config.json"):
+                              "alerts.json", "notes.json", "trader_profile.json", "config.json",
+                              "trades_archive.json", "ths_fills.json", "shield_state.json",
+                              "signal_track.json", "equity_history.json"):
                     src = BASE_DIR / fname
                     if src.exists():
                         shutil.copy2(src, bdir / f"{today}-{fname}")
@@ -1798,7 +1802,12 @@ def _market_session(now: Optional[datetime] = None) -> dict:
         return _pack("closed", "周末休市", _next(days, 9, 0), "周一日盘 09:00")
     if wd == 4 and h >= 23:                      # 周五深夜（夜盘已收）→ 周一
         return _pack("closed", "周末休市", _next(3, 9, 0), "周一日盘 09:00")
-    if h >= 23 or h < 3:                         # 夜盘后凌晨
+    if h >= 23 or h < 3:                         # 夜盘尾段（23点后）与跨零点段（0-3点）
+        if h < 1 and 1 <= wd <= 5:
+            # 跨零点夜盘：周二~周六凌晨 = 前一交易日晚盘延续（原油/贵金属至 01:00/02:30）
+            return _pack("night", "夜盘跨零点", _next(0, 1, 0), "夜盘收盘 01:00")
+        if h < 3 and 1 <= wd <= 5:
+            return _pack("closed", "凌晨休市", _next(0, 9, 0), "日盘 09:00")
         return _pack("closed", "隔夜休市", _next(1, 9, 0) if h >= 23 else _next(0, 9, 0), "日盘 09:00")
     if h >= 21:                                  # 夜盘
         return _pack("night", "夜盘交易中", _next(1, 9, 0), "日盘 09:00")
@@ -5459,6 +5468,11 @@ async def premarket_check():
     # ⑧ 自选品种
     watch = sorted(set(_MONITOR["watch"]) or set())
     checks.append(("自选", len(watch) > 0, f"{len(watch)} 个" if watch else "空"))
+
+    # ⑨ 账户权益（0=未设：风险预算/建议手数按兜底算，建议在设置里填写）
+    acct_size = float(cfg.get("discipline", {}).get("account_size") or 0)
+    checks.append(("账户权益", acct_size > 0,
+                   f"{acct_size:,.0f} 元" if acct_size > 0 else "未设置（建议手数类建议退化，⚙ 设置里填）"))
 
     all_ok = all(ok for _, ok, _ in checks)
     return {"ok": True, "ready": all_ok,
