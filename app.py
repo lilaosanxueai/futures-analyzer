@@ -4643,13 +4643,21 @@ async def ai_chat(body: ChatIn):
     if not base_url:
         raise HTTPException(status_code=400, detail="自定义服务商未配置接口地址")
     candidates = _llm_candidates(cfg)
-    # ★ 视觉路由：带图请求强制走视觉模型（deepseek 系无视觉，智谱 glm-4v-flash 免费）
+    # ★ 视觉路由：带图请求走视觉模型链 智谱glm-4v-flash(免费) → custom(gpt系多模态)；
+    # deepseek 无视觉只做最后兜底（会失败并给出明确提示）
     has_images = any(m.role == "user" and m.images for m in body.messages)
-    if has_images and cfg["api_keys"].get("zhipu"):
-        candidates.insert(0, {
-            "provider": "zhipu", "base_url": PROVIDERS["zhipu"]["base_url"],
-            "api_key": cfg["api_keys"]["zhipu"], "model": "glm-4v-flash",
-        })
+    if has_images:
+        if cfg["api_keys"].get("zhipu") and not _provider_demoted("zhipu"):
+            candidates.insert(0, {
+                "provider": "zhipu", "base_url": PROVIDERS["zhipu"]["base_url"],
+                "api_key": cfg["api_keys"]["zhipu"], "model": "glm-4v-flash",
+            })
+        if cfg["api_keys"].get("custom") and provider_base_url(cfg, "custom"):
+            candidates.insert(1 if candidates and candidates[0]["provider"] == "zhipu" else 0, {
+                "provider": "custom", "base_url": provider_base_url(cfg, "custom"),
+                "api_key": cfg["api_keys"]["custom"],
+                "model": str(cfg.get("custom_model") or "").strip() or PROVIDERS["custom"]["default_model"],
+            })
     context = "" if body.light else await _build_market_context(body.symbol)
     if not body.light:
         last_q = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
