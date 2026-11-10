@@ -645,6 +645,42 @@
         FA.toggleVoice(!localStorage.getItem("fa_voice_on"));
         vb.textContent = localStorage.getItem("fa_voice_on") ? "🔊播报开" : "🔇播报关";
       });
+      // ★ 权益曲线迷你折线（有数据才画）
+      try {
+        const ec = await FA.api("/api/equity-curve");
+        const el = $("#shieldLive");
+        if (el && ec.ok && ec.points && ec.points.length >= 3) {
+          const pts = ec.points;
+          const lo = Math.min(...pts.map(p => p.eq));
+          const hi = Math.max(...pts.map(p => p.eq));
+          const range = (hi - lo) || 1;
+          const w = Math.min(el.clientWidth - 28, 360);
+          const h = 40;
+          let svg = '<svg width="' + w + '" height="' + h + '" style="margin:4px 0;display:block">';
+          const step = w / Math.max(1, pts.length - 1);
+          const y = v => h - 4 - ((v - lo) / range) * (h - 10);
+          let d = "";
+          pts.forEach((p, i) => { d += (i ? " L" : "M") + (i * step).toFixed(1) + " " + y(p.eq).toFixed(1); });
+          const lastEq = pts[pts.length - 1].eq;
+          const firstEq = pts[0].eq;
+          const color = lastEq >= firstEq ? "var(--down)" : "var(--up)";
+          svg += '<path d="' + d + '" stroke="' + color + '" stroke-width="1.6" fill="none"/>';
+          const dd = ec.drawdown_pct || 0;
+          svg += '<circle cx="' + ((pts.length - 1) * step).toFixed(1) + '" cy="' + y(lastEq).toFixed(1) + '" r="2.5" fill="' + color + '"/>';
+          svg += "</svg>";
+          const chgPct = ec.range_pct || 0;
+          const ddTxt = dd < -1 ? ' · 回撤 <b style="color:var(--up)">' + dd + "%</b>" : "";
+          const div = document.createElement("div");
+          div.innerHTML = '<div style="padding:2px 0 6px;font-size:11px" title="峰值 ' + ec.peak.toLocaleString() + '">' +
+            '<span class="muted">📈 权益</span> <b>' + ec.last.toLocaleString() + "</b>" +
+            ' <span class="' + (chgPct >= 0 ? "num-down" : "num-up") + '">' + (chgPct >= 0 ? "+" : "") + chgPct + "%</span>" +
+            ' <span class="muted">(' + ec.points.length + "点)</span>" + ddTxt + "</div>" + svg;
+          const old = document.getElementById("eqSpark");
+          if (old) old.remove();
+          div.id = "eqSpark";
+          el.appendChild(div);
+        }
+      } catch (e) { /* 权益曲线失败不影响盾 */ }
     } catch (e) { /* ignore */ }
   }
   FA.pollPulse = pollPulse;

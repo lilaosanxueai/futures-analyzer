@@ -489,6 +489,35 @@ ${(() => {
             (tm.n_reopens_within_10min ? ' · <b style="color:var(--up)">10分钟内再开 ' + tm.n_reopens_within_10min + " 次</b>" : "") +
             "</span></div>";
         })() +
+        (() => {
+          // ⏰ 日内盈亏热力钟
+          if (!d.clock || !d.clock.length) return "";
+          const best = d.best || {};
+          const worst = d.worst || {};
+          const cells = d.clock.map(c => {
+            const cls = c.total > 0 ? "num-up" : c.total < 0 ? "num-down" : "muted";
+            const wr = c.win_rate || 0;
+            const wrBar = '<span style="display:inline-block;width:26px;height:6px;border-radius:2px;background:var(--line-soft);vertical-align:middle;margin-left:3px"><i style="display:block;height:100%;border-radius:2px;width:' + wr + '%;background:' + (c.total > 0 ? "var(--up)" : "var(--down)") + '"></i></span>';
+            return '<span style="margin-right:10px;white-space:nowrap"><b>' + String(c.hour).padStart(2, "0") + "</b>时 " +
+              '<span class="' + cls + '">' + (c.total > 0 ? "+" : "") + c.total + "点</span>" +
+              '<span class="muted small">/' + c.n + "笔</span>" + wrBar + "</span>";
+          }).join("");
+          return '<div class="kv"><span class="k">⏰ 日内盈亏钟（' + d.total_timed + ' 笔精确计时）</span><span class="v" style="line-height:1.8">' + cells +
+            (best.hour != null ? '<br><b style="color:var(--down)">最赚 ' + String(best.hour).padStart(2, "0") + "时（" + (best.total > 0 ? "+" : "") + best.total + "点）</b>" : "") +
+            (worst.hour != null && worst.hour !== best.hour ? ' · <b style="color:var(--up)">最亏 ' + String(worst.hour).padStart(2, "0") + "时（" + worst.total + "点）</b>" : "") +
+            "</span></div>";
+        })() +
+        (() => {
+          // 📊 连胜/连亏 streak
+          if (!d.streaks || d.streaks.length < 2) return "";
+          const al = d.after_loss || {};
+          const alTxt = al.n
+            ? "亏后下一笔均 " + (al.next_avg_pts > 0 ? "+" : "") + al.next_avg_pts + "点 · 胜率 " + al.next_win_rate + "% · 间隔均 " + al.avg_gap_min + "分"
+            : "";
+          return '<div class="kv"><span class="k">📊 连胜/连亏</span><span class="v">最长连胜 <b style="color:var(--down)">' + d.max_win_streak + '</b> / 连亏 <b style="color:var(--up)">' + d.max_loss_streak + "</b>" +
+            (alTxt ? '<br><span class="muted small">' + alTxt + "</span>" : "") +
+            "</span></div>";
+        })() +
         '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) +
         " · 强行开仓 " + (b.forced || 0) + ' <span style="color:var(--up)">· 闸门拦下 ' + (b.blocked || 0) + "</span></span></div>" +
         "</div>";

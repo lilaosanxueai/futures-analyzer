@@ -1636,6 +1636,8 @@ async def lifespan(_app):
     _load_shield_state()
     # ★ 盾日志反哺：用今日成交回报记录重建日内统计（持仓页失明期数据不丢）
     _shield_reconcile_from_fills()
+    # ★ 模拟引擎置信度门控：启动即从信号战绩同步
+    _refresh_sim_band_acc()
     warmup_task = asyncio.create_task(_warmup())
     monitor_task = asyncio.create_task(monitor_loop())
     autosim_task = asyncio.create_task(auto_sim_loop())
@@ -1859,6 +1861,113 @@ def _market_session(now: Optional[datetime] = None) -> dict:
     if h == 13 or h == 14:                       # 日盘下午
         return _pack("day", "日盘交易中", _next(0, 15, 0), "收盘 15:00")
     return _pack("closed", "已收盘", _next(0 if h < 21 else 1, 21, 0), "夜盘 21:00")
+
+
+@app.get("/api/equity-curve")
+async def equity_curve():
+    """权益曲线：逐采样折线 + 峰值/回撤 + 交易日聚合。工作台盾卡渲染。"""
+    eq_file = BASE_DIR / "equity_history.json"
+    if not eq_file.exists():
+        return {"ok": True, "points": [], "peak": None, "drawdown_pct": None, "note": "尚无数据（THS 扫描时自动积累）"}
+    hist = json.loads(eq_file.read_text(encoding="utf-8"))
+    if len(hist) < 2:
+        return {"ok": True, "points": [], "peak": None, "drawdown_pct": None, "note": f"仅 {len(hist)} 个采样点（≥2 出图）"}
+    points = [{"ts": h["ts"], "eq": h["equity"]} for h in hist]
+    peak = max(h["equity"] for h in hist)
+    last = hist[-1]["equity"]
+    dd_pct = round((last - peak) / peak * 100, 2) if peak > 0 else 0
+    # 逐交易日起始/结束
+    day_map: dict[str, dict] = {}
+    for h in hist:
+        td = _trading_day(datetime.fromtimestamp(h["ts"] / 1000))
+        day_map.setdefault(td, []).append(h["equity"])
+    days = [{"day": d, "open": v[0], "close": v[-1],
+             "chg_pct": round((v[-1] - v[0]) / v[0] * 100, 2) if v[0] else 0}
+            for d, v in sorted(day_map.items())]
+    return {"ok": True, "points": points, "peak": peak, "last": last,
+            "drawdown_pct": dd_pct, "days": days,
+            "range_pct": round((last - hist[0]["equity"]) / hist[0]["equity"] * 100, 2) if hist[0]["equity"] else 0}
+
+
+@app.get("/api/behavior-clock")
+async def behavior_clock():
+    """日内盈亏热力钟：按开仓小时聚合盈亏/胜率/频率——精确时间戳才有此精度。
+    按交易日分组，含当前交易日的实时数据（来自盾日志）。"""
+    trades = _load_trades()
+    # 回报单有精确时间戳；镜像/手动的 ts 也是毫秒
+    timed = [t for t in trades if t.get("ts") and t.get("status") == "closed"
+             and t.get("result_pts") is not None]
+    hours: dict[int, list] = {}
+    for t in timed:
+        h = datetime.fromtimestamp(t["ts"] / 1000).hour
+        hours.setdefault(h, []).append(float(t["result_pts"]))
+    clock = []
+    for h in sorted(hours):
+        pts = hours[h]
+        wins = sum(1 for p in pts if p > 0)
+        clock.append({
+            "hour": h, "n": len(pts),
+            "total": round(sum(pts), 1),
+            "avg": round(sum(pts) / len(pts), 1),
+            "win_rate": round(wins / len(pts) * 100, 1),
+        })
+    # 最赚钱/最亏钱时段
+    best = max(clock, key=lambda c: c["total"]) if clock else None
+    worst = min(clock, key=lambda c: c["total"]) if clock else None
+    return {"ok": True, "clock": clock, "best": best, "worst": worst,
+            "total_timed": len(timed)}
+
+
+@app.get("/api/behavior-streaks")
+async def behavior_streaks():
+    """连胜/连亏分析：streak 分布 + 连亏后行为（下一笔盈亏/多久再开）。"""
+    trades = _load_trades()
+    closed = sorted([t for t in trades if t["status"] == "closed"
+                     and t.get("result_pts") is not None and t.get("closed_ts")],
+                    key=lambda t: t["closed_ts"])
+    if len(closed) < 3:
+        return {"ok": True, "streaks": [], "after_loss": {}, "note": "≥3 笔出 streak"}
+    # streak 检测
+    streaks = []
+    cur_type = None
+    cur_len = 0
+    cur_pts = 0.0
+    for t in closed:
+        p = float(t["result_pts"])
+        typ = "W" if p > 0 else "L"
+        if typ == cur_type:
+            cur_len += 1
+            cur_pts += p
+        else:
+            if cur_type:
+                streaks.append({"type": cur_type, "len": cur_len, "pts": round(cur_pts, 1)})
+            cur_type, cur_len, cur_pts = typ, 1, p
+    if cur_type:
+        streaks.append({"type": cur_type, "len": cur_len, "pts": round(cur_pts, 1)})
+    # 连亏后行为
+    after_loss_next_pnl = []
+    after_loss_gap_min = []
+    for i, t in enumerate(closed):
+        if float(t["result_pts"]) < 0:
+            # 找下一笔
+            nxt = next((x for x in closed if x["closed_ts"] > t["closed_ts"]), None)
+            if nxt and nxt.get("ts") and nxt.get("result_pts") is not None:
+                after_loss_next_pnl.append(float(nxt["result_pts"]))
+                gap = (nxt["ts"] - t["closed_ts"]) / 60000
+                if 0 <= gap <= 1440:
+                    after_loss_gap_min.append(round(gap, 1))
+    max_win_streak = max((s["len"] for s in streaks if s["type"] == "W"), default=0)
+    max_loss_streak = max((s["len"] for s in streaks if s["type"] == "L"), default=0)
+    return {
+        "ok": True, "streaks": streaks[-20:],
+        "max_win_streak": max_win_streak, "max_loss_streak": max_loss_streak,
+        "after_loss": {
+            "n": len(after_loss_next_pnl),
+            "next_avg_pts": round(sum(after_loss_next_pnl) / len(after_loss_next_pnl), 1) if after_loss_next_pnl else None,
+            "next_win_rate": round(sum(1 for p in after_loss_next_pnl if p > 0) / len(after_loss_next_pnl) * 100, 1) if after_loss_next_pnl else None,
+            "avg_gap_min": round(sum(after_loss_gap_min) / len(after_loss_gap_min), 1) if after_loss_gap_min else None,
+        },
+    }
 
 
 @app.get("/api/market-pulse")
@@ -3310,11 +3419,17 @@ async def auto_sim_loop():
                     _sig_diag_tick()
                     _sig_diag["scans"] += 1
                     # ★ AI 信号过滤：六维信号引擎判"观望"或置信<40 的品种不模拟——
-                    # 模拟只在 AI 认定有机会的方向上练兵，不浪费时间在无信号品种上
+                    # ★ 置信度门控：该置信带的历史命中率<40%（≥5次样本）→ 停开该带
                     try:
                         _rp_cache = _risk_profile()
                         _sig = _signal_from_snapshot(sym, snap, _rp_cache.get("symbols", {}))
                         if _sig["direction"] == "watch" or _sig["confidence"] < 40:
+                            continue
+                        # 按战绩门控
+                        _band = int(_sig["confidence"] // 10) * 10
+                        _band_acc = _SIM_BAND_ACC.get(_band)
+                        if _band_acc and _band_acc.get("n", 0) >= 5 and _band_acc.get("hit_rate", 100) < 40:
+                            _sig_diag["filter"] += 1
                             continue
                     except Exception:
                         pass  # 信号引擎失败不影响规则信号运行
@@ -5243,12 +5358,33 @@ async def _sig_settle_daily() -> dict:
     return {"settled": n}
 
 
+# 模拟引擎置信度门控缓存：{band: {n, hit_rate}}——从信号战绩同步
+_SIM_BAND_ACC: dict[int, dict] = {}
+
+
+def _refresh_sim_band_acc() -> None:
+    """从 signal_track 已结算事件按置信带聚合命中率 → 供模拟引擎门控。"""
+    try:
+        _sig_track_load()
+        settled = [e for e in _SIG_TRACK["events"] if e.get("settled") and e.get("hit") is not None]
+        bands: dict[int, list] = {}
+        for e in settled:
+            b = int(e.get("confidence", 0) // 10) * 10
+            bands.setdefault(b, []).append(e["hit"])
+        _SIM_BAND_ACC.clear()
+        for b, hits in bands.items():
+            _SIM_BAND_ACC[b] = {"n": len(hits), "hit_rate": round(sum(hits) / len(hits) * 100, 1)}
+    except Exception:
+        pass
+
+
 @app.get("/api/signal-accuracy")
 async def signal_accuracy(settle: int = 1):
     """信号引擎战绩：命中率/平均幅度/分品种/分置信档——系统对自己的信号 accountable。"""
     stats: dict = {"total": 0, "hit": 0, "ret_signed": [], "by_conf": {}, "by_symbol": {}}
     if settle:
         await _sig_settle_daily()
+    _refresh_sim_band_acc()   # 模拟引擎门控同步最新战绩
     _sig_track_load()
     for e in _SIG_TRACK["events"]:
         if e.get("settled") is None or e.get("hit") is None:
@@ -7879,7 +8015,56 @@ async def trades_stats(source: str = ""):
         "fastest_reopen_min": min(gaps_after) if gaps_after else None,
         "n_reopens_within_10min": sum(1 for g in gaps_after if g <= 10),
     }
+    # ★ 日内盈亏钟（按开仓小时聚合）
+    hour_agg: dict[int, list] = {}
+    for t in timed:
+        h = datetime.fromtimestamp(t["ts"] / 1000).hour
+        hour_agg.setdefault(h, []).append(float(t["result_pts"]))
+    clock = []
+    for h in sorted(hour_agg):
+        pts = hour_agg[h]
+        wins = sum(1 for p in pts if p > 0)
+        clock.append({"hour": h, "n": len(pts), "total": round(sum(pts), 1),
+                      "avg": round(sum(pts) / len(pts), 1),
+                      "win_rate": round(wins / len(pts) * 100, 1)})
+    best_hour = max(clock, key=lambda c: c["total"]) if clock else None
+    worst_hour = min(clock, key=lambda c: c["total"]) if clock else None
+    # ★ 连胜/连亏 streak
+    streaks = []
+    cur_type, cur_len, cur_pts = None, 0, 0.0
+    for c in closed_sorted:
+        p = float(c["result_pts"])
+        typ = "W" if p > 0 else "L"
+        if typ == cur_type:
+            cur_len += 1; cur_pts += p
+        else:
+            if cur_type:
+                streaks.append({"type": cur_type, "len": cur_len, "pts": round(cur_pts, 1)})
+            cur_type, cur_len, cur_pts = typ, 1, p
+    if cur_type:
+        streaks.append({"type": cur_type, "len": cur_len, "pts": round(cur_pts, 1)})
+    after_loss_pnl = []
+    after_loss_gap = []
+    for c in closed_sorted:
+        if float(c["result_pts"]) < 0:
+            nxt = next((x for x in all_ts if x["ts"] > c["closed_ts"]), None)
+            if nxt and nxt.get("result_pts") is not None:
+                after_loss_pnl.append(float(nxt["result_pts"]))
+                gap = (nxt["ts"] - c["closed_ts"]) / 60000
+                if 0 <= gap <= 1440:
+                    after_loss_gap.append(round(gap, 1))
     return {
+        "clock": clock, "best": best_hour, "worst": worst_hour,
+        "total_timed": len(timed),
+        "streaks": streaks[-20:],
+        "max_win_streak": max((s["len"] for s in streaks if s["type"] == "W"), default=0),
+        "max_loss_streak": max((s["len"] for s in streaks if s["type"] == "L"), default=0),
+        "after_loss": {
+            "n": len(after_loss_pnl),
+            "next_avg_pts": round(sum(after_loss_pnl) / len(after_loss_pnl), 1) if after_loss_pnl else None,
+            "next_win_rate": round(sum(1 for p in after_loss_pnl if p > 0) / len(after_loss_pnl) * 100, 1) if after_loss_pnl else None,
+            "avg_gap_min": round(sum(after_loss_gap) / len(after_loss_gap), 1) if after_loss_gap else None,
+        },
         "ok": True,
         "overview": _summary(closed),
         "open_count": sum(1 for t in trades if t["status"] == "open"),
