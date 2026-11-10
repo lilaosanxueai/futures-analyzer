@@ -631,6 +631,11 @@
       chips.push('持仓 <b' + (d.positions ? ' class="pb-pos"' : "") + ">" + (d.positions || 0) + "</b>");
       chips.push('今日 <b class="' + pc(dy.total_pnl || 0) + '">' + sg(dy.total_pnl || 0) + "点</b>" +
         '<span class="muted small">(' + (dy.trades_today || 0) + "笔)</span>");
+      if (d.heat_pct != null && d.heat_pct > 0) {
+        const hCls = d.heat_pct >= 10 ? "pb-danger" : d.heat_pct >= 5 ? "pb-warn" : "";
+        chips.push('热度 <b class="' + hCls + '" title="全部止损会亏 ' + (d.heat_yuan || 0).toLocaleString() + ' 元">' +
+                   d.heat_pct + "%</b>");
+      }
       const alertChip = d.fatal
         ? '<span class="pb-fatal">🔴 告警 ' + d.fatal + "</span>"
         : d.warn ? '<span class="pb-warn">🟡 预警 ' + d.warn + "</span>"

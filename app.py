@@ -1587,6 +1587,116 @@ async def _warmup():
     asyncio.create_task(_desk_warm())
 
 
+async def session_brief_loop():
+    """开盘自动简报：日盘 09:00 / 夜盘 21:00 各推一次到事件流+飞书。
+    纯数据模板（零 LLM 开销，秒出）——教练开盘前 10 秒的赛前谈话。"""
+    fired: set[str] = set()
+    while True:
+        try:
+            now = datetime.now()
+            td = _trading_day(now)
+            for slot, hour in (("day", 9), ("night", 21)):
+                key = f"{td}-{slot}"
+                if (now.hour == hour and now.minute <= 2 and key not in fired
+                        and now.weekday() <= 4):
+                    fired.add(key)
+                    brief = await _build_session_brief(slot)
+                    if brief:
+                        now_ms = int(time.time() * 1000)
+                        _emit_event({
+                            "id": f"brief-{now_ms}", "ts": now_ms,
+                            "kind": "diag", "etype": "SESSION_BRIEF", "level": "info",
+                            "symbol": "", "name": "", "dir": "up", "price": None,
+                            "text": brief, "chg5": 0, "chg15": 0, "threshold": 0,
+                            "intl": False, "ai": "",
+                        }, feishu=True, feishu_text="🎯 开盘简报\n" + brief)
+                        _ths_log(f"开盘简报已推（{slot}）")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
+async def _build_session_brief(slot: str) -> str:
+    """组装开盘简报——教练的赛前 10 秒谈话，纯数据不调 LLM。"""
+    lines = []
+    now = datetime.now()
+    # ① 昨日/上一场战绩
+    rp = _risk_profile()
+    today_td = _trading_day(now)
+    # 上一交易日 = 今日往前找最近的（简化：昨天）
+    from datetime import timedelta as _td
+    prev_td = (now - _td(days=1)).strftime("%Y-%m-%d")
+    trades = _load_trades()
+    prev_closed = [t for t in trades if t.get("date") == prev_td
+                   and t.get("status") == "closed" and t.get("result_pts") is not None]
+    if prev_closed:
+        pts = sum(float(t["result_pts"]) for t in prev_closed)
+        yuan = sum(float(t.get("result_yuan") or 0) for t in prev_closed)
+        wins = sum(1 for t in prev_closed if float(t["result_pts"]) > 0)
+        lines.append(f"上场：{len(prev_closed)} 笔 {pts:+.0f} 点（{yuan:+.0f} 元），胜率 {round(wins/len(prev_closed)*100)}%")
+    else:
+        lines.append("上场：无平仓记录")
+    # ② 今日最强信号（top 2）
+    try:
+        desk = _DESK_CACHE.get("data") or {}
+        sigs = sorted(desk.values(), key=lambda x: -x.get("confidence", 0))[:2]
+        for s in sigs:
+            if s.get("direction") in ("long", "short") and s.get("confidence", 0) >= 50:
+                side = "多" if s["direction"] == "long" else "空"
+                acc = f"（历史 {s['sym_acc']}）" if s.get("sym_acc") else ""
+                lines.append(f"最强信号：{s.get('ths_name', s['symbol'])} {side} {s['confidence']}%{acc}")
+                break  # 只出最强的
+    except Exception:
+        pass
+    # ③ 风控红线
+    stops = [s for s, v in rp.get("symbols", {}).items() if v.get("verdict") == "停"]
+    bad_hrs = [f"{h['hour']:02d}:00" for h in rp.get("bad_hours", [])]
+    if stops or bad_hrs:
+        parts = []
+        if stops:
+            parts.append("🚫 " + "、".join(stops))
+        if bad_hrs:
+            parts.append("⏰ " + "、".join(bad_hrs))
+        lines.append("红线：" + " · ".join(parts))
+    # ④ 组合热度
+    try:
+        heat = await portfolio_heat()
+        if heat.get("positions", 0) > 0 and heat.get("heat_pct"):
+            lines.append(f"持仓 {heat['positions']} 个 · 热度 {heat['heat_pct']}%"
+                         f"（满亏 {heat['total_risk_yuan']:,.0f} 元）")
+    except Exception:
+        pass
+    # ⑤ 行为提醒（教练的一句话——从你的实际数据来）
+    try:
+        stats = trades
+        timed = [t for t in stats if t.get("ts") and t.get("status") == "closed"
+                 and t.get("result_pts") is not None]
+        if timed:
+            opens_ts = sorted(t["ts"] for t in timed if t.get("ts"))
+            gaps = []
+            closed_sorted = sorted([t for t in timed if t.get("closed_ts")], key=lambda t: t["closed_ts"])
+            for c in closed_sorted:
+                nxt = next((ts for ts in opens_ts if ts > c["closed_ts"]), None)
+                if nxt and 0 <= nxt - c["closed_ts"] <= 600 * 60000:
+                    gaps.append(round((nxt - c["closed_ts"]) / 60000, 1))
+            if gaps:
+                fast = sum(1 for g in gaps if g <= 10)
+                if fast >= len(gaps) * 0.5:
+                    lines.append(f"记住：你 {fast}/{len(gaps)} 次平仓后 ≤10 分钟就再开——忍 10 分钟再进场")
+                else:
+                    # 盈利兑现率
+                    wins_c = [t for t in closed_sorted if float(t["result_pts"]) > 0]
+                    if wins_c:
+                        avg_win = sum(float(t["result_pts"]) for t in wins_c) / len(wins_c)
+                        lines.append(f"记住：平均盈利 {avg_win:+.1f} 点——让利润跑一跑，别急着平")
+    except Exception:
+        pass
+    if not lines:
+        return ""
+    greeting = "🌙 夜盘开盘" if slot == "night" else "☀️ 日盘开盘"
+    return greeting + "\n" + "\n".join(lines)
+
+
 async def fills_auto_loop():
     """交易日收盘后自动深采成交（15:05-15:59 / 23:05-23:59 窗口内试一次成功即止；
     期货通未开则静默跳过等下一分钟；不动 UI 的部分用户无感——补采从此无需手点）。"""
@@ -1651,10 +1761,11 @@ async def lifespan(_app):
     report_task = asyncio.create_task(report_push_loop())
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     fillsauto_task = asyncio.create_task(fills_auto_loop())
+    brief_task = asyncio.create_task(session_brief_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
               care_task, ths_task, backup_task, poshealth_task, report_task, selfcheck_task,
-              fillsauto_task):
+              fillsauto_task, brief_task):
         t.cancel()
 
 
@@ -1970,6 +2081,76 @@ async def behavior_streaks():
     }
 
 
+@app.get("/api/portfolio-heat")
+async def portfolio_heat():
+    """组合热度：所有持仓的满打亏损（点×乘数×手数）+ 相关组重叠折扣。
+    一个数字告诉你"如果全部止损，你会亏多少"——超频/相关性盲区的终极指标。"""
+    positions = THS_SYNC.get("positions") or []
+    trades_open = [t for t in _load_trades() if t.get("status") == "open" and _is_real_live(t)]
+    # 合并 THS 直读 + 记录中的 open 单
+    all_pos = []
+    for p in positions:
+        all_pos.append({"symbol": p.get("symbol", ""), "direction": p.get("direction", "long"),
+                        "lots": p.get("lots") or 1, "entry": p.get("avg_entry") or 0,
+                        "float_pnl": p.get("float_pnl") or 0, "mult": p.get("mult")})
+    for t in trades_open:
+        pref = t["symbol"]
+        if not any(_ths_pref(p["symbol"]) == pref for p in all_pos):
+            mult = CONTRACT_MULTIPLIER.get(_variety_prefix(pref), 10)
+            all_pos.append({"symbol": pref, "direction": t["direction"],
+                            "lots": t.get("lots", 1), "entry": t.get("entry", 0),
+                            "float_pnl": None, "mult": mult})
+    if not all_pos:
+        return {"ok": True, "positions": 0, "total_risk_yuan": 0, "heat_pct": 0,
+                "groups": [], "note": "空仓——组合热度为零"}
+    acct = THS_SYNC.get("account") or {}
+    equity = float(acct.get("equity") or 0) or float(load_config()["discipline"].get("account_size") or 0)
+    total_risk = 0.0
+    groups: dict[str, list] = {}
+    for p in all_pos:
+        pref = _ths_pref(p.get("symbol", ""))
+        mult = p.get("mult") or CONTRACT_MULTIPLIER.get(_variety_prefix(pref), 10)
+        entry = p.get("entry") or 0
+        # 默认止损=开仓价 1%（与盾一致）
+        stop_pts = max(8, round(entry * 0.01, 1)) if entry else 20
+        risk = stop_pts * mult * (p.get("lots") or 1)
+        # 加上已有浮亏（更悲观但真实）
+        fp = p.get("float_pnl")
+        if fp is not None and fp < 0:
+            risk += abs(fp) * mult * (p.get("lots") or 1)
+        total_risk += risk
+        # 相关组
+        for gname, members in CORR_GROUPS.items():
+            if _variety_prefix(pref) in members:
+                groups.setdefault(gname, []).append({"sym": pref, "risk": round(risk, 0),
+                                                      "dir": p["direction"]})
+    # 相关组重叠=隐形杠杆（同组同向≥2 个 → 实际风险 > 名义分散）
+    overlap_warnings = []
+    for gname, members in groups.items():
+        same_dir = {}
+        for m in members:
+            same_dir.setdefault(m["dir"], []).append(m["sym"])
+        for dirn, syms in same_dir.items():
+            if len(syms) >= 2:
+                grp_risk = sum(m["risk"] for m in members if m["dir"] == dirn)
+                overlap_warnings.append({
+                    "group": gname, "direction": dirn, "symbols": syms,
+                    "risk_yuan": round(grp_risk, 0),
+                    "note": f"{gname} {'同多' if dirn=='long' else '同空'} {len(syms)} 个（{','.join(syms)}）"
+                            f"— 实际是一笔 {grp_risk:,.0f} 元的大注"})
+    heat_pct = round(total_risk / equity * 100, 1) if equity > 0 else None
+    return {
+        "ok": True, "positions": len(all_pos),
+        "total_risk_yuan": round(total_risk, 0),
+        "equity": equity, "heat_pct": heat_pct,
+        "groups": overlap_warnings,
+        "detail": [{"sym": _ths_pref(p["symbol"]), "risk": round(
+                        max(8, round((p.get("entry") or 0) * 0.01, 1)) *
+                        (p.get("mult") or 10) * (p.get("lots") or 1), 0)}
+                    for p in all_pos],
+    }
+
+
 @app.get("/api/market-pulse")
 async def market_pulse():
     """市场脉搏：时段+倒计时 + 账户 + 日内盈亏 + 告警汇总（工作台顶部条，15s 一刷）"""
@@ -1979,6 +2160,19 @@ async def market_pulse():
     closed_pnl = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
     floating = sum(p.get("float_pnl") or 0 for p in positions)
     alerts = _SHIELD_STATE.get("active_alerts") or []
+    # ★ 组合热度（快速版：点×乘数×手数合计；详细版走 /api/portfolio-heat）
+    heat_risk = 0.0
+    for p in positions:
+        _mult = CONTRACT_MULTIPLIER.get(_variety_prefix(_ths_pref(p.get("symbol", ""))), 10)
+        _entry = p.get("avg_entry") or 0
+        _stop = max(8, round(_entry * 0.01, 1)) if _entry else 20
+        heat_risk += _stop * _mult * (p.get("lots") or 1)
+        _fp = p.get("float_pnl")
+        if _fp is not None and _fp < 0:
+            heat_risk += abs(_fp) * _mult * (p.get("lots") or 1)
+    _eq = float((THS_SYNC.get("account") or {}).get("equity") or 0)
+    heat_pct = round(heat_risk / _eq * 100, 1) if _eq > 0 else None
+
     return {
         "ok": True,
         "session": _market_session(),
@@ -1991,6 +2185,8 @@ async def market_pulse():
         },
         "positions": len(positions),
         "watch_n": len(_MONITOR["watch"]),
+        "heat_pct": heat_pct,
+        "heat_yuan": round(heat_risk, 0),
         "fatal": sum(1 for a in alerts if a.get("level") == "fatal"),
         "warn": sum(1 for a in alerts if a.get("level") == "warn"),
         "ths_ok": bool((THS_SYNC.get("last") or {}).get("ok")),
