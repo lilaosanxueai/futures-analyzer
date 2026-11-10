@@ -2111,6 +2111,18 @@ async def _compute_trading_desk():
                 }
                 break
 
+        # ★ 品种级信号战绩（引擎在这个品种上命中了几次）
+        _sym_acc = ""
+        try:
+            _sig_track_load()
+            _s_settled = [e for e in _SIG_TRACK["events"]
+                          if e.get("settled") and e.get("hit") is not None and e["symbol"] == sym]
+            if len(_s_settled) >= 3:
+                _s_hits = sum(1 for e in _s_settled if e["hit"])
+                _sym_acc = f"{_s_hits}/{len(_s_settled)}"
+        except Exception:
+            pass
+
         desk[sym] = {
             "symbol": sym, "ths_code": ths_code, "ths_name": ths_name,
             "direction": sig["direction"], "confidence": sig["confidence"],
@@ -2120,6 +2132,7 @@ async def _compute_trading_desk():
             "risk_note": sig.get("risk_note", ""),
             "evidence": sig.get("evidence", [])[:3],
             "plan": plan, "position": position,
+            "sym_acc": _sym_acc,
         }
         # ★ 行级风险着色：红=高危(陷阱≥70/判停) 黄=谨慎(陷阱≥50/减半) 绿=安全
         trap = sig.get("trap_risk", 0) or 0
@@ -5418,7 +5431,8 @@ async def signal_accuracy(settle: int = 1):
 
 
 def _position_advice(pos: dict, sig: dict) -> dict:
-    """持仓健康评估 + 操作建议（持有/增仓/减仓/平仓 + 具体点位）"""
+    """持仓健康评估 + 操作建议（持有/增仓/减仓/平仓 + 具体点位）
+    ★ 个性化上下文：品种战绩 + 时段盈亏 + 近期行为——不再是通用建议，是'对你的建议'"""
     sym = pos.get("symbol", "")
     direction = pos.get("direction", "long")
     entry = pos.get("avg_entry") or 0
@@ -5485,6 +5499,49 @@ def _position_advice(pos: dict, sig: dict) -> dict:
     if trap >= 60:
         evidence.append(f"陷阱{trap}/100")
 
+    # ★ 个性化上下文（把"你的历史"注入每条建议——这是从通用建议到教练建议的鸿沟）
+    personal = []
+    try:
+        rp = _risk_profile()
+        pref = _ths_pref(sym)
+        sv = rp.get("symbols", {}).get(pref, {})
+        if sv.get("n"):
+            side = "多" if direction == "long" else "空"
+            side_pts = sv.get(f"{'long' if direction=='long' else 'short'}_pts", 0)
+            verdict_txt = {"停": "🚫 判停品种", "减": "⚠️ 手数减半", "留": ""}.get(sv.get("verdict", ""), "")
+            personal.append(f"你做{pref} {side} 历史共 {sv['n']} 笔累计 {side_pts:+.0f} 点"
+                            + (f"，{verdict_txt}" if verdict_txt else ""))
+    except Exception:
+        pass
+    try:
+        now_h = datetime.now().hour
+        trades = _load_trades()
+        timed = [t for t in trades if t.get("ts") and t.get("status") == "closed"
+                 and t.get("result_pts") is not None]
+        hour_trades = [t for t in timed if datetime.fromtimestamp(t["ts"] / 1000).hour == now_h]
+        if hour_trades:
+            h_pts = sum(float(t["result_pts"]) for t in hour_trades)
+            h_wins = sum(1 for t in hour_trades if float(t["result_pts"]) > 0)
+            h_wr = round(h_wins / len(hour_trades) * 100)
+            personal.append(f"{now_h:02d} 时历史 {len(hour_trades)} 笔均 "
+                            f"{h_pts / len(hour_trades):+.1f} 点（胜率 {h_wr}%）")
+    except Exception:
+        pass
+    try:
+        today = _trading_day()
+        today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today]
+        if len(today_log) >= 3:
+            personal.append(f"今日已开 {len(today_log)} 笔")
+        # 最近一笔平仓到现在多久
+        recent_closes = sorted([l for l in today_log if l.get("closed_ts")],
+                               key=lambda l: l["closed_ts"])
+        if recent_closes:
+            gap_min = (int(time.time() * 1000) - recent_closes[-1]["closed_ts"]) / 60000
+            if gap_min < 10:
+                personal.append(f"⚠️ 上笔平仓仅 {gap_min:.0f} 分钟前")
+    except Exception:
+        pass
+
     return {
         "symbol": sym,
         "direction": direction,
@@ -5501,6 +5558,7 @@ def _position_advice(pos: dict, sig: dict) -> dict:
         "signal_conf": conf,
         "trap_risk": trap,
         "evidence": "；".join(evidence[:3]),
+        "personal": " · ".join(personal[:3]) if personal else "",
     }
 
 

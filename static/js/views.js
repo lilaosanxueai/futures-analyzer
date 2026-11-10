@@ -1316,6 +1316,7 @@ ${(() => {
           ' · <span style="color:' + aColor + ';font-weight:700;font-size:13px">' + p.action + '</span>' +
           (p.risk_note ? ' · <span style="color:var(--danger)">' + esc(p.risk_note) + '</span>' : '') +
         '</div>' +
+        (p.personal ? '<div style="margin-top:3px;font-size:11px;color:var(--accent,#2563eb);padding:2px 6px;border-radius:4px;background:color-mix(in srgb,var(--accent,#2563eb) 5%,transparent)">👤 ' + esc(p.personal) + "</div>" : "") +
         '<div style="margin-top:4px;font-size:12px;color:var(--muted)">' + esc(p.action_detail) + '</div>' +
         '<div style="margin-top:3px;font-size:11px;color:var(--muted)">止损 <b style="color:var(--danger)">' + p.stop_price + '</b>' +
           ' · 目标 <b style="color:var(--up)">' + p.target_price + '</b>' +
@@ -1882,13 +1883,15 @@ ${(() => {
         if (dir === "short") return '<span class="badge bear">空 ' + conf + "</span>";
         return '<span class="badge neutral">观望 ' + conf + "</span>";
       };
+      const accBadge = (it) => it.sym_acc
+        ? ' <span class="muted small" title="信号引擎在该品种的历史命中率">🎯' + it.sym_acc + "</span>" : "";
       const rows = items.map((it) => {
         const cls = it.direction === "long" ? "bull" : it.direction === "short" ? "bear" : "neutral";
         const ev = (it.evidence && it.evidence[0]) || it.regime || "";
         const pos = it.position ? ' <span style="color:var(--accent)">●持</span>' : "";
         return '<tr data-sym="' + esc(it.symbol) + '" style="cursor:pointer">' +
           '<td><b>' + esc(it.ths_name || it.symbol) + "</b>" + pos + "</td>" +
-          '<td class="r">' + dirChip(it.direction, it.confidence) + "</td>" +
+          '<td class="r">' + dirChip(it.direction, it.confidence) + accBadge(it) + "</td>" +
           '<td class="r muted small" style="max-width:46%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(ev) + '">' + esc(ev) + "</td></tr>";
       }).join("");
       el.innerHTML = '<table class="table" style="font-size:12px"><thead><tr><th>品种</th><th class="r">信号</th><th class="r">核心证据</th></tr></thead><tbody>' + rows + "</tbody></table>";
