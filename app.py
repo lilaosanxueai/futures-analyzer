@@ -5492,6 +5492,8 @@ def _track_signal(sym: str, sig: dict) -> None:
                 "symbol": sym, "direction": sig["direction"],
                 "confidence": sig.get("confidence", 0),
                 "date": today, "ts": now_ms, "settled": None,
+                "evidence": (sig.get("evidence") or [])[:4],  # ★ 维度归因：哪几票推了这个方向
+                "trap_risk": sig.get("trap_risk", 0),
             })
         # 只留 60 天
         cutoff = now_ms - 60 * 86400 * 1000
@@ -5611,6 +5613,24 @@ async def signal_accuracy(settle: int = 1):
         stats["by_symbol"][e["symbol"]]["hit"] += 1 if e["hit"] else 0
     n = stats["total"]
     rets = stats.pop("ret_signed")
+    # ★ 维度归因：主证据（evidence[0]）分组的命中率——哪个维度最有预测力
+    by_evidence: dict[str, dict] = {}
+    for e in _SIG_TRACK["events"]:
+        if e.get("settled") is None or e.get("hit") is None:
+            continue
+        ev0 = (e.get("evidence") or ["(无)"])[0]
+        # 粗归维度：按关键词映射
+        dim = "其他"
+        for kw, d in [("增仓", "资金流"), ("减仓", "资金流"), ("趋势", "剧本"),
+                      ("席位", "席位"), ("供需", "供需"), ("库存", "供需"),
+                      ("外盘", "外盘"), ("WTI", "外盘"), ("高位", "剧本"), ("低位", "剧本")]:
+            if kw in ev0:
+                dim = d
+                break
+        by_evidence.setdefault(dim, {"n": 0, "hit": 0})
+        by_evidence[dim]["n"] += 1
+        by_evidence[dim]["hit"] += 1 if e["hit"] else 0
+
     out = {
         "ok": True, "total": n,
         "hit_rate": round(stats["hit"] / n * 100, 1) if n else None,
@@ -5621,9 +5641,82 @@ async def signal_accuracy(settle: int = 1):
                     for k, v in sorted(stats["by_conf"].items())},
         "by_symbol": {k: {"n": v["n"], "hit_rate": round(v["hit"] / v["n"] * 100, 1)}
                       for k, v in sorted(stats["by_symbol"].items(), key=lambda kv: -kv[1]["n"])},
+        "by_dimension": {k: {"n": v["n"], "hit_rate": round(v["hit"] / v["n"] * 100, 1)}
+                         for k, v in sorted(by_evidence.items(), key=lambda kv: -kv[1]["n"])
+                         if v["n"] >= 2},
         "note": "口径：方向信号(置信≥50) → 次日开盘进/收盘出的方向化收益",
     }
     return out
+
+
+@app.get("/api/behavior-regression")
+async def behavior_regression():
+    """周度行为回归：本周 vs 上周关键指标——你在变好吗？"""
+    from datetime import timedelta
+    now = datetime.now()
+    # 本周一 00:00
+    this_monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    last_monday = this_monday - timedelta(days=7)
+    trades = _load_trades()
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None and t.get("closed_ts")]
+
+    def week_metrics(start_ms, end_ms):
+        w = [t for t in closed if start_ms <= t["closed_ts"] < end_ms]
+        if not w:
+            return {"n": 0}
+        pts = [float(t["result_pts"]) for t in w]
+        wins = [p for p in pts if p > 0]
+        yuan = sum(float(t.get("result_yuan") or 0) for t in w)
+        # fast reopen
+        ts_sorted = sorted([t for t in w if t.get("ts")], key=lambda t: t["ts"])
+        gaps = []
+        for c in sorted(w, key=lambda t: t["closed_ts"]):
+            nxt = next((x for x in ts_sorted if x["ts"] > c["closed_ts"]), None)
+            if nxt and 0 <= nxt["ts"] - c["closed_ts"] <= 600 * 60000:
+                gaps.append(round((nxt["ts"] - c["closed_ts"]) / 60000, 1))
+        avg_hold = None
+        timed = [t for t in w if t.get("ts") and t.get("closed_ts")]
+        if timed:
+            avg_hold = round(sum((t["closed_ts"] - t["ts"]) / 60000 for t in timed) / len(timed), 1)
+        return {
+            "n": len(w), "total_pts": round(sum(pts), 1),
+            "win_rate": round(len(wins) / len(w) * 100, 1),
+            "avg_pts": round(sum(pts) / len(pts), 1),
+            "total_yuan": round(yuan, 0),
+            "plr": round(sum(wins) / abs(sum(p for p in pts if p < 0)), 2) if any(p < 0 for p in pts) else None,
+            "fast_reopens": sum(1 for g in gaps if g <= 10),
+            "avg_hold_min": avg_hold,
+        }
+
+    this_ms = int(this_monday.timestamp() * 1000)
+    last_ms = int(last_monday.timestamp() * 1000)
+    now_ms = int(now.timestamp() * 1000)
+    this_week = week_metrics(this_ms, now_ms)
+    last_week = week_metrics(last_ms, this_ms)
+
+    # 变化方向（好/坏/平）
+    def trend(cur, prev, good_up=True):
+        if cur is None or prev is None or prev == 0:
+            return ""
+        diff = cur - prev
+        if abs(diff) < 0.05:
+            return "→ 平"
+        if (diff > 0) == good_up:
+            return "↑ 好"
+        return "↓ 退"
+
+    deltas = {}
+    if this_week.get("n") and last_week.get("n"):
+        for key, good_up in [("total_pts", True), ("win_rate", True), ("plr", True),
+                              ("avg_hold_min", True), ("fast_reopens", False)]:
+            deltas[key] = trend(this_week.get(key), last_week.get(key), good_up)
+    verdict = "数据积累中（需两周各 ≥1 笔）"
+    if this_week.get("n", 0) >= 3 and last_week.get("n", 0) >= 3:
+        good = sum(1 for v in deltas.values() if "好" in v)
+        bad = sum(1 for v in deltas.values() if "退" in v)
+        verdict = f"{'📈 改善' if good > bad else '📉 退步' if bad > good else '➡️ 持平'}（{good}好/{bad}退/{len(deltas)-good-bad}平）"
+    return {"ok": True, "this_week": this_week, "last_week": last_week,
+            "deltas": deltas, "verdict": verdict}
 
 
 def _position_advice(pos: dict, sig: dict) -> dict:

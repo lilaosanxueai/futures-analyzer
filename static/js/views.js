@@ -462,7 +462,11 @@ ${(() => {
   async function loadStats() {
     const el = $("#statsBody");
     try {
-      const d = await api("/api/trades/stats?source=real");
+      const [d, reg] = await Promise.all([
+        api("/api/trades/stats?source=real"),
+        api("/api/behavior-regression").catch(() => null),
+      ]);
+      if (reg && reg.ok) d.regression = reg;
       const o = d.overview || {}, b = d.behavior || {};
       el.innerHTML =
         '<div class="stat-grid">' +
@@ -520,7 +524,34 @@ ${(() => {
         })() +
         '<div class="kv"><span class="k">散户病计数</span><span class="v">无止损 ' + (b.no_stop || 0) + " · 扛单 " + (b.held_thru_stop || 0) + " · 报复交易 " + (b.revenge || 0) +
         " · 强行开仓 " + (b.forced || 0) + ' <span style="color:var(--up)">· 闸门拦下 ' + (b.blocked || 0) + "</span></span></div>" +
-        "</div>";
+        "</div>" +
+        (d.regression && d.regression.this_week && d.regression.this_week.n > 0
+          ? (() => {
+              const r = d.regression;
+              const tw = r.this_week, lw = r.last_week;
+              const dl = r.deltas || {};
+              const arrow = (v) => v.includes("好") ? '<span style="color:var(--down)">↑</span>'
+                : v.includes("退") ? '<span style="color:var(--up)">↓</span>'
+                : '<span class="muted">→</span>';
+              const rows = [];
+              if (tw.n) rows.push('<div class="kv"><span class="k">📅 本周 vs 上周</span><span class="v">' +
+                tw.n + "笔 " + (tw.total_pts > 0 ? "+" : "") + tw.total_pts + "点" +
+                (lw.n ? ' <span class="muted">vs</span> ' + lw.n + "笔 " + (lw.total_pts > 0 ? "+" : "") + lw.total_pts + "点" : "（上周无）") +
+                (dl.total_pts ? " " + arrow(dl.total_pts) : "") + "</span></div>");
+              if (tw.win_rate != null && lw.win_rate != null) {
+                rows.push('<div class="kv"><span class="k">胜率</span><span class="v">' +
+                  tw.win_rate + "% <span class=\"muted\">vs</span> " + lw.win_rate + "%" +
+                  (dl.win_rate ? " " + arrow(dl.win_rate) : "") + "</span></div>");
+              }
+              if (tw.fast_reopens != null && lw.fast_reopens != null) {
+                rows.push('<div class="kv"><span class="k">快开仓(≤10分)</span><span class="v">' +
+                  tw.fast_reopens + " <span class=\"muted\">vs</span> " + lw.fast_reopens +
+                  (dl.fast_reopens ? " " + arrow(dl.fast_reopens) : "") + "</span></div>");
+              }
+              if (r.verdict) rows.push('<div class="kv"><span class="k">📊 判定</span><span class="v"><b>' + esc(r.verdict) + "</b></span></div>");
+              return rows.join("");
+            })()
+          : "");
     } catch (e) {
       el.innerHTML = '<div class="empty">统计失败：' + esc(e.message) + "</div>";
     }
