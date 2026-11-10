@@ -757,10 +757,10 @@ async def _ths_scan_once() -> dict:
                 hist = [h for h in hist if h.get("ts", 0) > cutoff][-26000:]
                 _atomic_write(_eq_file, json.dumps(hist, ensure_ascii=False))
 
-                # ── 回撤熔断（当日样本 ≥3 才判，避免首笔噪声）──
-                today_key = datetime.now().strftime("%Y-%m-%d")
+                # ── 回撤熔断（当交易日样本 ≥3 才判，避免首笔噪声）──
+                today_key = _trading_day()
                 day_pts = [h for h in hist
-                           if datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d") == today_key]
+                           if _trading_day(datetime.fromtimestamp(h["ts"] / 1000)) == today_key]
                 if len(day_pts) >= 3:
                     day_start, last_eq = day_pts[0]["equity"], day_pts[-1]["equity"]
                     dd_day = (last_eq - day_start) / day_start * 100
@@ -794,6 +794,14 @@ async def _ths_scan_once() -> dict:
 def _ths_pref(code: str) -> str:
     m = re.match(r"^([A-Za-z]{1,2})", code or "")
     return (m.group(1).upper() + "0") if m else (code or "")
+
+
+def _trading_day(now: Optional[datetime] = None) -> str:
+    """期货交易日键：20:00 起归下一自然日（夜盘 21:00 起属次日交易日）。
+    盾日内统计/成交配对/日报分组统一用它——否则夜盘战绩永远进不了任何一期日报。"""
+    from datetime import timedelta
+    now = now or datetime.now()
+    return ((now + timedelta(days=1)) if now.hour >= 20 else now).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------- 成交回报解析（UIA 直读成交 tab）
@@ -861,7 +869,7 @@ def _ths_fills_merge(new_fills: list[dict]) -> list[str]:
     adds = [f for f in new_fills if f["id"] not in known]
     if not adds:
         return []
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _trading_day()
     for f in adds:
         f["scan_date"] = today
     merged = _ths_fills_load() + adds
@@ -874,13 +882,14 @@ def _ths_fills_merge(new_fills: list[dict]) -> list[str]:
 
 
 def _fill_ts_ms(f: dict) -> int:
-    """成交行 HH:MM:SS + scan_date → epoch ms（夜盘跨零点：02:30 前归前一晚）"""
-    d = f.get("scan_date") or datetime.now().strftime("%Y-%m-%d")
+    """成交行 HH:MM:SS + scan_date(交易日) → epoch ms（真实自然时刻）。
+    scan_date 已是交易日口径：夜盘(≥20点)的真实自然日=交易日-1；凌晨(<3点)已落在交易日当天。"""
+    d = f.get("scan_date") or _trading_day()
     try:
         hh = int(f["time"][:2])
-        if hh < 3:  # 凌晨成交 → 交易日晚于日期一天（夜盘延续）
-            dt = datetime.strptime(d, "%Y-%m-%d") + timedelta(days=-1)
-            d = dt.strftime("%Y-%m-%d")
+        if hh >= 20:  # 晚间成交 → 自然日在交易日前一天
+            from datetime import timedelta as _td
+            d = (datetime.strptime(d, "%Y-%m-%d") - _td(days=1)).strftime("%Y-%m-%d")
         return int(datetime.strptime(f"{d} {f['time']}", "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
     except Exception:
         return int(time.time() * 1000)
@@ -944,15 +953,13 @@ def _ths_fills_to_trades() -> list[str]:
                     fee += float((leg or {}).get("fee") or 0)
                 except ValueError:
                     pass
-            day = f.get("scan_date") or datetime.now().strftime("%Y-%m-%d")
+            day = f.get("scan_date") or _trading_day()
             pref = _ths_pref(contract)
-            # 镜像对账：同品种同方向、当日 open 的镜像单 → 用精确数据了结（防双记）
-            for t in trades:
-                if (t.get("status") == "open" and t.get("symbol") == pref
-                        and t.get("direction") == direction and t.get("date") == day):
-                    t.update(status="closed", exit=exit_, result_pts=pnl_pts,
-                             closed_ts=_fill_ts_ms(f),
-                             note=((t.get("note") or "") + "｜成交回报校准"))
+            # 镜像对账：同品种同方向、open 的镜像单 → 直接删除（成交回报单是唯一真相，
+            # 保留两条=双记；镜像单的信息量是回报单的子集）
+            trades = [t for t in trades
+                      if not (t.get("status") == "open" and t.get("source") == "ths-sync"
+                              and t.get("symbol") == pref and t.get("direction") == direction)]
             trades.append({
                 "id": rec_id, "date": day, "symbol": pref, "contract": contract,
                 "direction": direction, "lots": lots,
@@ -980,7 +987,7 @@ def _shield_reconcile_from_fills() -> None:
     但成交回报记录了一切——用它重建盾的日内统计（笔数/已平累计→日亏停手线不失真）。
     幂等：按 合约+平仓时间 去重，重复调用无副作用。"""
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _trading_day()
         fill_trades = [t for t in _load_trades()
                        if t.get("source") == "ths-fill" and t.get("date") == today]
         if not fill_trades:
@@ -1062,7 +1069,7 @@ async def _ths_mirror_sync(positions: list[dict]) -> list[str]:
             continue
         trades.append({
             "id": f"ths{now_ms}-{sym}-{key[1]}", "ts": now_ms,
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": _trading_day(),
             "symbol": sym, "direction": key[1], "entry": round(float(entry), 1),
             "stop_points": None, "target_points": None, "lots": p.get("lots") or 1,
             "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
@@ -1231,7 +1238,7 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                 f"⚠️ {pos['symbol']} 应减半（当前 {lots} 手）"))
 
     hour = now.hour
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = _trading_day(now)
     for bh in rp.get("bad_hours", []):
         if bh["hour"] == hour:
             # 失血槽内新开仓 → fatal；仅持仓 → warn
@@ -1389,7 +1396,7 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                 "symbol": sym_key, "direction": pos.get("direction"),
                 "lots": pos.get("lots"), "entry": pos.get("avg_entry"),
                 "first_seen": now_ms, "last_pnl": pos.get("float_pnl"),
-                "date": now.strftime("%Y-%m-%d"),
+                "date": _trading_day(now),
             })
             # ★ 亏损后冲动再开仓（G11 活体版）：亏平后 30 分钟内新仓 → 当场 fatal（直接发，⑦在推送段之后）
             last_loss = _SHIELD_STATE.get("last_loss_close_ts") or 0
@@ -1408,7 +1415,7 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                     }, feishu=True, feishu_text=f"🛡️ 报复性开仓拦截警报\n{sym_key} 亏损平仓后 {gap_min:.0f} 分钟内再开仓——这是统计上最亏钱的模式")
             # ★ 高频再开仓（时间洞察实锤：平→再开中位 5.2 分，8 笔中 7 笔 <10 分）：
             # 任何平仓后 10 分钟内新仓 → warn（不分赢亏——这是节奏病不是方向病）
-            _today = now.strftime("%Y-%m-%d")
+            _today = _trading_day(now)
             _last_close = max((l.get("closed_ts") or 0) for l in _SHIELD_STATE["trade_log"]
                               if l.get("date") == _today and l.get("closed_ts")) \
                 if any(l.get("closed_ts") for l in _SHIELD_STATE["trade_log"] if l.get("date") == _today) else 0
@@ -1783,7 +1790,7 @@ async def remote_access_post(body: RemoteAccessIn):
 async def shield_state():
     """全方位盾状态：当前风险概览 + 日内统计"""
     positions = THS_SYNC.get("positions") or []
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _trading_day()
     today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today_str]
     closed_pnl = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
     floating = sum(p.get("float_pnl") or 0 for p in positions)
@@ -1858,7 +1865,7 @@ def _market_session(now: Optional[datetime] = None) -> dict:
 async def market_pulse():
     """市场脉搏：时段+倒计时 + 账户 + 日内盈亏 + 告警汇总（工作台顶部条，15s 一刷）"""
     positions = THS_SYNC.get("positions") or []
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _trading_day()
     today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today_str]
     closed_pnl = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
     floating = sum(p.get("float_pnl") or 0 for p in positions)
@@ -3334,7 +3341,7 @@ async def auto_sim_loop():
                     now_ms = int(now.timestamp() * 1000)
                     _sig_diag["opened"] += 1
                     trades.append({
-                        "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": now.strftime("%Y-%m-%d"),
+                        "id": f"auto{now_ms}-{sym}", "ts": now_ms, "date": _trading_day(now),
                         "symbol": sym, "direction": sig["direction"], "entry": last,
                         "stop_points": sig["stop"], "target_points": sig["target"], "lots": 1,
                         "status": "open", "exit": None, "result_pts": None, "closed_ts": None,
@@ -3361,7 +3368,7 @@ async def auto_sim_loop():
 def _auto_sim_stats() -> dict:
     """模拟战绩：今日 + 累计"""
     trades = _load_auto_trades()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _trading_day()
     closed = [t for t in trades if t.get("status") == "closed" and t.get("result_pts") is not None]
     today_closed = [t for t in closed if t.get("date") == today]
     def _s(items):
@@ -6584,7 +6591,7 @@ def _diagnose_global(trades: list) -> list[dict]:
     out = []
     cfg = load_config()["discipline"]
     now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
+    today = _trading_day(now)
 
     today_trades = [t for t in trades if t.get("date") == today
                     and t.get("status") in ("open", "closed")
@@ -6982,7 +6989,7 @@ def _entry_gate(trade: dict, snap: Optional[dict], price: Optional[float], all_t
 
     # ---- 纪律类（用户配置的风控参数，在源头执行）----
     cfg = load_config()["discipline"]
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _trading_day()
     now_ms_gate = int(datetime.now().timestamp() * 1000)
 
     cooling_min = float(cfg.get("cooling_min", 30) or 0)
@@ -9154,7 +9161,7 @@ def _position_context() -> str:
                              f"区间{'+' if last >= first else ''}{last - first:,.0f}）")
     except Exception:
         pass
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _trading_day()
     today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today]
     if today_log:
         closed = sum(l.get("final_pnl") or 0 for l in today_log if "closed_ts" in l)
@@ -9451,12 +9458,12 @@ async def _generate_report() -> str:
         if _eq_file2.exists():
             hist = json.loads(_eq_file2.read_text(encoding="utf-8"))
             if len(hist) >= 2:
-                today_str2 = datetime.now().strftime("%Y-%m-%d")
-                day_pts = [h for h in hist if datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d") == today_str2]
+                today_str2 = _trading_day()
+                day_pts = [h for h in hist if _trading_day(datetime.fromtimestamp(h["ts"] / 1000)) == today_str2]
                 seg2.append(f"- 资金曲线：{hist[0]['equity']:,.0f} → {hist[-1]['equity']:,.0f}"
                             f"（{len(hist)}点，区间{hist[-1]['equity'] - hist[0]['equity']:+,.0f}）"
                             + (f"，今日{day_pts[-1]['equity'] - day_pts[0]['equity']:+,.0f}" if len(day_pts) >= 2 else ""))
-        today_str3 = datetime.now().strftime("%Y-%m-%d")
+        today_str3 = _trading_day()
         tlog = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today_str3]
         if tlog:
             closed_pnl2 = sum(l.get("final_pnl") or 0 for l in tlog if "closed_ts" in l)
