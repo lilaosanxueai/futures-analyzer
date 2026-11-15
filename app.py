@@ -1838,6 +1838,115 @@ async def _build_session_brief(slot: str) -> str:
     return greeting + "\n" + "\n".join(lines)
 
 
+def _session_quality_report() -> Optional[str]:
+    """交易日报告卡：把所有维度拧成 0-100 分 + 一句最该改的事。
+    纯数据计算（零 LLM）——收盘后自动生成，推事件+飞书。"""
+    today = _trading_day()
+    log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today]
+    if not log:
+        return None
+    closed = [l for l in log if l.get("closed_ts")]
+    if not closed:
+        return None
+    trades = _load_trades()
+    today_trades = [t for t in trades if t.get("date") == today and t.get("status") == "closed"]
+
+    # ① 盈亏（30 分）
+    pts = sum(l.get("final_pnl") or 0 for l in closed)
+    yuan_trades = [t for t in today_trades if t.get("result_yuan") is not None]
+    yuan = sum(t["result_yuan"] for t in yuan_trades) if yuan_trades else pts * 10  # 粗估
+    pnl_score = max(0, min(30, 15 + pts))  # -15→0, 0→15, +15→30
+
+    # ② 胜率（20 分）
+    wins = sum(1 for l in closed if (l.get("final_pnl") or 0) > 0)
+    wr = wins / len(closed) if closed else 0
+    wr_score = round(wr * 20)  # 0%→0, 50%→10, 100%→20
+
+    # ③ 信号对齐（20 分）——今日开仓方向 vs 当时信号方向
+    align_n = 0
+    align_hit = 0
+    rp = _risk_profile()
+    for l in log:
+        sym = _ths_pref(l.get("symbol", ""))
+        try:
+            sig_dir = _SIG_TRACK.get("last_dir", {}).get(sym, "")
+            if sig_dir and sig_dir != "watch":
+                align_n += 1
+                if sig_dir == l.get("direction"):
+                    align_hit += 1
+        except Exception:
+            pass
+    align_rate = align_hit / align_n if align_n else 0.5
+    align_score = round(align_rate * 20)
+
+    # ④ 纪律（15 分）——快开仓/报复扣分
+    disc_score = 15
+    disc_notes = []
+    opens_ts = sorted([l.get("first_seen") or 0 for l in log])
+    fast_reopens = 0
+    revenge = 0
+    for c in sorted(closed, key=lambda l: l["closed_ts"]):
+        nxt = next((ts for ts in opens_ts if ts > c["closed_ts"]), None)
+        if nxt and 0 < nxt - c["closed_ts"] <= 10 * 60 * 1000:
+            fast_reopens += 1
+        if (c.get("final_pnl") or 0) < 0 and nxt and 0 < nxt - c["closed_ts"] <= 30 * 60 * 1000:
+            revenge += 1
+    if fast_reopens:
+        disc_score -= min(8, fast_reopens * 2)
+        disc_notes.append(f"快开仓{fast_reopens}次")
+    if revenge:
+        disc_score -= min(5, revenge * 3)
+        disc_notes.append(f"报复性{revenge}次")
+    disc_score = max(0, disc_score)
+
+    # ⑤ 组合热度（15 分）——持仓时热度是否超限
+    heat_score = 15  # 空仓=满分
+    positions_now = THS_SYNC.get("positions") or []
+    if positions_now:
+        pos_syms = {_ths_pref(p.get("symbol", "")) for p in positions_now}
+        for gname, members in CORR_GROUPS.items():
+            overlap = pos_syms & members
+            if len(overlap) >= 3:
+                heat_score = 5
+                disc_notes.append(f"{gname}同向{len(overlap)}个")
+                break
+            elif len(overlap) == 2:
+                heat_score = 10
+                break
+
+    total = pnl_score + wr_score + align_score + disc_score + heat_score
+    grade = "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D" if total >= 40 else "F"
+
+    # 最该改的一件事
+    advice = ""
+    if revenge > 0:
+        advice = "亏后 30 分钟内不再开仓——这是你最亏钱的模式"
+    elif fast_reopens > len(closed) * 0.5:
+        advice = f"平仓后等 10 分钟再开（今日 {fast_reopens}/{len(closed)} 次快开仓）"
+    elif wr < 0.4 and len(closed) >= 3:
+        advice = "胜率偏低——等信号置信 ≥60% 再进场"
+    elif align_rate < 0.5 and align_n >= 3:
+        advice = f"今日 {align_n} 笔中仅 {align_hit} 笔与信号同向——先看雷达再下单"
+    elif pts < 0:
+        advice = "今日亏损——明天减半手数，或干脆休息一天"
+    else:
+        advice = "保持节奏——不追不扛不等"
+
+    lines = [
+        f"📋 交易日报告卡",
+        f"{'━' * 20}",
+        f"盈亏：{pts:+.0f} 点（≈{yuan:+,.0f} 元）  胜率：{round(wr * 100)}%（{wins}/{len(closed)}）",
+        f"信号对齐：{align_hit}/{align_n}（{round(align_rate * 100)}%）  纪律：{'; '.join(disc_notes) or '✅ 无违规'}",
+        f"",
+        f"  盈利能力 {pnl_score}/30  胜率 {wr_score}/20  信号对齐 {align_score}/20",
+        f"  纪律 {disc_score}/15  组合热度 {heat_score}/15",
+        f"{'━' * 20}",
+        f"综合：{total}/100（{grade}）",
+        f"🎯 明天最该改的：{advice}",
+    ]
+    return "\n".join(lines)
+
+
 async def fills_auto_loop():
     """交易日收盘后自动深采成交（15:05-15:59 / 23:05-23:59 窗口内试一次成功即止；
     期货通未开则静默跳过等下一分钟；不动 UI 的部分用户无感——补采从此无需手点）。"""
@@ -1864,6 +1973,18 @@ async def fills_auto_loop():
                             _ths_fills_to_trades()
                             _shield_reconcile_from_fills()
                             _ths_log(f"收盘自动补采完成：{len(fills)} 笔成交")
+                            # ★ 交易日报告卡（收盘后自动生成+推送）
+                            card = _session_quality_report()
+                            if card:
+                                now_ms2 = int(time.time() * 1000)
+                                _emit_event({
+                                    "id": f"reportcard-{now_ms2}", "ts": now_ms2,
+                                    "kind": "diag", "etype": "REPORT_CARD", "level": "info",
+                                    "symbol": "", "name": "", "dir": "up", "price": None,
+                                    "text": card, "chg5": 0, "chg15": 0, "threshold": 0,
+                                    "intl": False, "ai": "",
+                                }, feishu=True, feishu_text=card)
+                                _ths_log("交易日报告卡已推送")
                         done.add(key)
                     elif not _ths_hwnd() and (now.hour == 15 and now.minute >= 55 or now.hour == 23 and now.minute >= 55):
                         done.add(key)  # 窗口尾仍未开窗 → 放弃本时段
