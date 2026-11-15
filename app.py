@@ -2151,6 +2151,82 @@ async def portfolio_heat():
     }
 
 
+@app.get("/api/shield-counterfactual")
+async def shield_counterfactual():
+    """反事实回测：拿 636 笔历史交易，计算如果盾在场会拦掉多少笔/省多少点。
+    这是系统价值的数学证明——不是"感觉有用"，是数字。"""
+    trades = _load_full_trades()
+    closed = sorted([t for t in trades if t.get("status") == "closed"
+                     and t.get("result_pts") is not None],
+                    key=lambda t: t.get("closed_ts") or t.get("ts") or 0)
+    if len(closed) < 10:
+        return {"ok": True, "note": "历史记录不足（≥10 笔出报告）", "total": len(closed)}
+    rp = _risk_profile()
+    rp_syms = rp.get("symbols", {})
+    bad_hours = {h["hour"] for h in rp.get("bad_hours", [])}
+    blocked = {"G12_判停": [], "G12_方向禁": [], "G13_失血时段": [], "报复性开仓": [], "快开仓": []}
+    for t in closed:
+        sym = t.get("symbol", "")
+        pts = float(t["result_pts"])
+        ts = t.get("ts") or t.get("closed_ts") or 0
+        hour = datetime.fromtimestamp(ts / 1000).hour if ts else None
+        sv = rp_syms.get(sym, {})
+        if sv.get("verdict") == "停":
+            blocked["G12_判停"].append({"sym": sym, "pts": pts, "ts": ts,
+                                        "dir": t.get("direction")})
+        if sv.get("dir_ban") == t.get("direction"):
+            blocked["G12_方向禁"].append({"sym": sym, "pts": pts, "ts": ts,
+                                           "dir": t.get("direction")})
+        if hour in bad_hours:
+            blocked["G13_失血时段"].append({"sym": sym, "pts": pts, "hour": hour, "ts": ts})
+        # 报复性：前一笔亏损平仓后 30 分钟内
+        prev_close = [c for c in closed if c.get("closed_ts") and c["closed_ts"] < ts
+                      and (c.get("closed_ts") or 0) < ts]
+        if prev_close:
+            last = max(prev_close, key=lambda c: c["closed_ts"])
+            if (float(last.get("result_pts") or 0) < 0
+                    and ts - last["closed_ts"] < 30 * 60 * 1000):
+                blocked["报复性开仓"].append({"sym": sym, "pts": pts, "ts": ts,
+                                               "gap_min": round((ts - last["closed_ts"]) / 60000, 1)})
+        # 快开仓：前一笔平仓后 10 分钟内（不区分盈亏）
+        if prev_close:
+            gap_min = (ts - last["closed_ts"]) / 60000
+            if 0 < gap_min <= 10:
+                blocked["快开仓"].append({"sym": sym, "pts": pts, "ts": ts, "gap_min": round(gap_min, 1)})
+    # 汇总（去重：一笔可能同时触发多条规则，只算最严重的那条）
+    all_blocked_ts = set()
+    stats = {}
+    total_blocked_pts = 0.0
+    total_blocked_n = 0
+    for rule in ["G12_判停", "G12_方向禁", "G13_失血时段", "报复性开仓", "快开仓"]:
+        items = blocked[rule]
+        pts_sum = sum(i["pts"] for i in items)
+        new_items = [i for i in items if i["ts"] not in all_blocked_ts]
+        for i in new_items:
+            all_blocked_ts.add(i["ts"])
+        stats[rule] = {
+            "n": len(items), "pts": round(pts_sum, 1),
+            "unique_n": len(new_items),
+            "unique_pts": round(sum(i["pts"] for i in new_items), 1),
+        }
+        total_blocked_n += len(new_items)
+        total_blocked_pts += sum(i["pts"] for i in new_items)
+    actual_total = sum(float(t["result_pts"]) for t in closed)
+    would_have_been = actual_total - total_blocked_pts
+    return {
+        "ok": True, "total_trades": len(closed),
+        "actual_pnl": round(actual_total, 1),
+        "blocked_n": total_blocked_n,
+        "blocked_pct": round(total_blocked_n / len(closed) * 100, 1),
+        "blocked_pnl": round(total_blocked_pts, 1),
+        "would_have_been": round(would_have_been, 1),
+        "improvement": round(-total_blocked_pts, 1),
+        "by_rule": stats,
+        "note": f"如果盾在场：{total_blocked_n} 笔被拦（{round(total_blocked_n/len(closed)*100)}%），"
+                f"省下 {total_blocked_pts:+.0f} 点 → 战绩从 {actual_total:+.0f} 变成 {would_have_been:+.0f} 点",
+    }
+
+
 @app.get("/api/market-pulse")
 async def market_pulse():
     """市场脉搏：时段+倒计时 + 账户 + 日内盈亏 + 告警汇总（工作台顶部条，15s 一刷）"""
