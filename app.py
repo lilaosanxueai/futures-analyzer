@@ -1413,6 +1413,38 @@ async def _comprehensive_shield(positions: list[dict], scan_result: dict):
                                 f"（vs 赢后 +2/62%）——冷静期 30 分钟是铁律",
                         "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
                     }, feishu=True, feishu_text=f"🛡️ 报复性开仓拦截警报\n{sym_key} 亏损平仓后 {gap_min:.0f} 分钟内再开仓——这是统计上最亏钱的模式")
+            # ★ 新仓信号即时播报：这笔和信号引擎方向一致还是逆行？
+            try:
+                _sym_pref = _ths_pref(sym_key)
+                _sig_dir = _SIG_TRACK.get("last_dir", {}).get(_sym_pref, "")
+                if _sig_dir in ("long", "short"):
+                    pos_dir = pos.get("direction", "long")
+                    aligned_sig = (pos_dir == _sig_dir)
+                    side = "多" if pos_dir == "long" else "空"
+                    sig_side = "多" if _sig_dir == "long" else "空"
+                    if aligned_sig:
+                        _emit_event({
+                            "id": f"newpos-{now_ms}-{sym_key}", "ts": now_ms,
+                            "kind": "diag", "etype": "NEW_POS", "level": "info",
+                            "symbol": _sym_pref, "name": "", "dir": "up" if pos_dir == "long" else "down",
+                            "price": pos.get("avg_entry"),
+                            "text": f"🟢 新仓 {sym_key} {side} {pos.get('lots') or 1}手 @{pos.get('avg_entry')}"
+                                    f" — 信号同向 {sig_side} ✓",
+                            "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                        })
+                    else:
+                        _emit_event({
+                            "id": f"newpos-{now_ms}-{sym_key}", "ts": now_ms,
+                            "kind": "diag", "etype": "NEW_POS", "level": "warn",
+                            "symbol": _sym_pref, "name": "", "dir": "down" if pos_dir == "long" else "up",
+                            "price": pos.get("avg_entry"),
+                            "text": f"⚠️ 新仓 {sym_key} {side} {pos.get('lots') or 1}手 @{pos.get('avg_entry')}"
+                                    f" — 信号方向是 {sig_side}，你在逆行！确认有充分理由",
+                            "chg5": 0, "chg15": 0, "threshold": 0, "intl": False, "ai": "",
+                        })
+            except Exception:
+                pass
+
             # ★ 高频再开仓（时间洞察实锤：平→再开中位 5.2 分，8 笔中 7 笔 <10 分）：
             # 任何平仓后 10 分钟内新仓 → warn（不分赢亏——这是节奏病不是方向病）
             _today = _trading_day(now)
