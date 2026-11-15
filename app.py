@@ -1616,6 +1616,147 @@ async def session_brief_loop():
         await asyncio.sleep(30)
 
 
+async def observation_loop():
+    """主动观察引擎：交易时段每 15 分钟检查一次，有值得说的话才开口（info 级不吵）。
+    不是警报（出事了），是观察（我注意到你可能没注意的）。"""
+    _last_obs = 0.0
+    while True:
+        try:
+            await asyncio.sleep(30)
+            now = datetime.now()
+            if not is_trading_time(now):
+                continue
+            loop_now = asyncio.get_event_loop().time()
+            if loop_now - _last_obs < 15 * 60:  # 最多 15 分钟一条
+                continue
+            obs = await _gen_observation(now)
+            if obs:
+                _last_obs = loop_now
+                now_ms = int(time.time() * 1000)
+                _emit_event({
+                    "id": f"obs-{now_ms}", "ts": now_ms,
+                    "kind": "diag", "etype": "OBSERVATION", "level": "info",
+                    "symbol": obs.get("sym", ""), "name": "", "dir": "up", "price": None,
+                    "text": obs["text"], "chg5": 0, "chg15": 0, "threshold": 0,
+                    "intl": False, "ai": "",
+                })
+        except Exception:
+            pass
+
+
+async def _gen_observation(now: datetime) -> Optional[dict]:
+    """生成一条教练观察——有值得说的才返回，否则 None。"""
+    observations = []
+
+    # ① 最大变动品种：今天自选中谁动得最厉害（可能被忽视）
+    try:
+        quotes = THS_SYNC.get("quotes") or []
+        if quotes:
+            movers = sorted(quotes, key=lambda q: abs(q.get("chg_pct") or 0), reverse=True)
+            big = movers[0]
+            chg = big.get("chg_pct") or 0
+            if abs(chg) >= 2.0:
+                positions = THS_SYNC.get("positions") or []
+                held = any(_ths_pref(p.get("symbol", "")) == _ths_pref(big.get("code", "")) for p in positions)
+                if not held:
+                    rp = _risk_profile()
+                    sig = _signal_from_snapshot(_ths_pref(big.get("code", "")),
+                                                await psych_snapshot(_ths_pref(big.get("code", ""))),
+                                                rp.get("symbols", {}))
+                    if sig.get("direction") in ("long", "short"):
+                        side = "多" if sig["direction"] == "long" else "空"
+                        observations.append(
+                            f"👁️ {big.get('name', big.get('code'))} 今天{'大涨' if chg > 0 else '大跌'} {abs(chg):.1f}%"
+                            f"——你没有仓位，信号 {side} {sig['confidence']}%")
+    except Exception:
+        pass
+
+    # ② 时段进入/离开你的黄金/雷区
+    try:
+        hour = now.hour
+        rp = _risk_profile()
+        bad_set = {h["hour"] for h in rp.get("bad_hours", [])}
+        if hour in bad_set:
+            bh = next(h for h in rp.get("bad_hours", []) if h["hour"] == hour)
+            observations.append(f"⏰ 你进入了历史失血时段 {hour:02d}:00（均 {bh['avg']:+.1f} 点/{bh['n']} 笔）——能不做就不做")
+    except Exception:
+        pass
+
+    # ③ 交易节奏 vs 历史
+    try:
+        today = _trading_day(now)
+        today_log = [l for l in _SHIELD_STATE["trade_log"] if l.get("date") == today]
+        if len(today_log) >= 4:
+            cfg = load_config()["discipline"]
+            daily_max = int(cfg.get("daily_max_trades", 3) or 3)
+            observations.append(f"📊 今日已开 {len(today_log)} 笔（你的上限 {daily_max}）"
+                                f"——历史证明你在第 {daily_max + 1} 笔之后的平均表现急剧下降")
+    except Exception:
+        pass
+
+    # ④ 组合热度骤升
+    try:
+        positions = THS_SYNC.get("positions") or []
+        if len(positions) >= 2:
+            pos_syms = {_ths_pref(p.get("symbol", "")) for p in positions}
+            for gname, members in CORR_GROUPS.items():
+                overlap = pos_syms & members
+                if len(overlap) >= 2:
+                    observations.append(f"🔗 {gname} 同向 {len(overlap)} 个（{','.join(sorted(overlap))}）"
+                                        f"——这实际上是一笔大注，不是一个组合")
+                    break
+    except Exception:
+        pass
+
+    # ⑤ 权益大幅波动（当日已实现+浮动）
+    try:
+        equity = (THS_SYNC.get("account") or {}).get("equity")
+        if equity:
+            eq_file = BASE_DIR / "equity_history.json"
+            if eq_file.exists():
+                hist = json.loads(eq_file.read_text(encoding="utf-8"))
+                day_start = [h for h in hist if _trading_day(datetime.fromtimestamp(h["ts"] / 1000)) == _trading_day(now)]
+                if day_start:
+                    day_chg_pct = (equity - day_start[0]["equity"]) / day_start[0]["equity"] * 100
+                    if day_chg_pct <= -1.5:
+                        observations.append(f"💰 权益今日已波动 {day_chg_pct:+.1f}%——日亏停手线在 -3% 附近，别等到才停手")
+    except Exception:
+        pass
+
+    if not observations:
+        return None
+    # 随机选一条（避免每次都是同一条）
+    import random
+    chosen = random.choice(observations)
+    return {"text": chosen, "sym": ""}
+    """开盘自动简报：日盘 09:00 / 夜盘 21:00 各推一次到事件流+飞书。
+    纯数据模板（零 LLM 开销，秒出）——教练开盘前 10 秒的赛前谈话。"""
+    fired: set[str] = set()
+    while True:
+        try:
+            now = datetime.now()
+            td = _trading_day(now)
+            for slot, hour in (("day", 9), ("night", 21)):
+                key = f"{td}-{slot}"
+                if (now.hour == hour and now.minute <= 2 and key not in fired
+                        and now.weekday() <= 4):
+                    fired.add(key)
+                    brief = await _build_session_brief(slot)
+                    if brief:
+                        now_ms = int(time.time() * 1000)
+                        _emit_event({
+                            "id": f"brief-{now_ms}", "ts": now_ms,
+                            "kind": "diag", "etype": "SESSION_BRIEF", "level": "info",
+                            "symbol": "", "name": "", "dir": "up", "price": None,
+                            "text": brief, "chg5": 0, "chg15": 0, "threshold": 0,
+                            "intl": False, "ai": "",
+                        }, feishu=True, feishu_text="🎯 开盘简报\n" + brief)
+                        _ths_log(f"开盘简报已推（{slot}）")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
 async def _build_session_brief(slot: str) -> str:
     """组装开盘简报——教练的赛前 10 秒谈话，纯数据不调 LLM。"""
     lines = []
@@ -1762,10 +1903,11 @@ async def lifespan(_app):
     selfcheck_task = asyncio.create_task(selfcheck_loop())
     fillsauto_task = asyncio.create_task(fills_auto_loop())
     brief_task = asyncio.create_task(session_brief_loop())
+    obs_task = asyncio.create_task(observation_loop())
     yield
     for t in (warmup_task, monitor_task, autosim_task, trail_task, psych_task, diagnose_task,
               care_task, ths_task, backup_task, poshealth_task, report_task, selfcheck_task,
-              fillsauto_task, brief_task):
+              fillsauto_task, brief_task, obs_task):
         t.cancel()
 
 
