@@ -640,8 +640,10 @@
         ? '<span class="pb-fatal">🔴 告警 ' + d.fatal + "</span>"
         : d.warn ? '<span class="pb-warn">🟡 预警 ' + d.warn + "</span>"
         : '<span class="pb-ok">🛡️ 安全</span>';
+      const shieldCount = d.shield_alerts_today > 0
+        ? ' <span class="muted small" title="今日盾触发的预警次数">🛡' + d.shield_alerts_today + "</span>" : "";
       el.innerHTML = sess + '<span class="pb-chips">' + chips.join(" · ") + "</span>" +
-        alertChip + '<span class="muted small pb-sys">' +
+        alertChip + shieldCount + '<span class="muted small pb-sys">' +
         (d.ths_ok ? "📺已连" : "📺未连") + " · 自选" + (d.watch_n || 0) +
         ' · <a class="link-btn" id="pbVoice">' + (localStorage.getItem("fa_voice_on") ? "🔊播报开" : "🔇播报关") + "</a></span>";
       el.classList.toggle("pb-alarm", !!d.fatal);

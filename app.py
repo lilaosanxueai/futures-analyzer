@@ -2249,6 +2249,11 @@ async def market_pulse():
     _eq = float((THS_SYNC.get("account") or {}).get("equity") or 0)
     heat_pct = round(heat_risk / _eq * 100, 1) if _eq > 0 else None
 
+    # ★ 今日盾拦截计数（fatal+warn 各多少次——"今天盾为你拦了多少刀"）
+    _now_ms = int(time.time() * 1000)
+    today_alerts = sum(1 for k, v in _SHIELD_STATE.get("alert_repeat", {}).items()
+                       if v > _now_ms - 24 * 3600 * 1000)
+
     return {
         "ok": True,
         "session": _market_session(),
@@ -2263,6 +2268,7 @@ async def market_pulse():
         "watch_n": len(_MONITOR["watch"]),
         "heat_pct": heat_pct,
         "heat_yuan": round(heat_risk, 0),
+        "shield_alerts_today": today_alerts,
         "fatal": sum(1 for a in alerts if a.get("level") == "fatal"),
         "warn": sum(1 for a in alerts if a.get("level") == "warn"),
         "ths_ok": bool((THS_SYNC.get("last") or {}).get("ok")),
@@ -10078,6 +10084,16 @@ async def _generate_report() -> str:
             seg2.append(f"- 今日盾日志：{len(tlog)} 笔开仓（自动记录），已平累计 {closed_pnl2:+.0f} 点")
         if seg2:
             parts.append("【系统自检（引擎战绩 / 资金 / 盾动态）】\n" + "\n".join(seg2))
+        # ★ 盾价值证明：历史反事实——每天看一遍这两个数字
+        try:
+            cf = await shield_counterfactual()
+            if cf.get("ok") and cf.get("total_trades", 0) >= 50:
+                seg2.append(f"- 盾价值证明：{cf['total_trades']} 笔历史中 {cf['blocked_n']} 笔会被拦"
+                            f"（{cf['blocked_pct']}%），战绩从 {cf['actual_pnl']:+.0f} 变成 {cf['would_have_been']:+.0f} 点"
+                            f"（省 {cf['improvement']:.0f} 点）——少做 = 多赚")
+                parts[-1] = "【系统自检（引擎战绩 / 资金 / 盾动态）】\n" + "\n".join(seg2)
+        except Exception:
+            pass
     except Exception:
         pass
 
